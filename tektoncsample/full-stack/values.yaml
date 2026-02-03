@@ -1,0 +1,328 @@
+experiment:
+  name: full-stack-example
+
+modelId: "meta-llama/Llama-3.1-8B-Instruct"
+modelLabelPrefix: "llama-3-1-8b-instruct"
+
+stack:
+  treatments:
+    - prefillReplicas: 1
+      prefillTensorParallelism: 1
+      decodeReplicas: 1
+      decodeTensorParallelism: 1
+    # - prefillReplicas: 8
+    #   prefillTensorParallelism: 1
+    #   decodeReplicas: 1
+    #   decodeTensorParallelism: 8
+    # - prefillReplicas: 4
+    #   prefillTensorParallelism: 2
+    #   decodeReplicas: 1
+    #   decodeTensorParallelism: 8
+    # - prefillReplicas: 2
+    #   prefillTensorParallelism: 4
+    #   decodeReplicas: 1
+    #   decodeTensorParallelism: 8
+    # - prefillReplicas: 6
+    #   prefillTensorParallelism: 2
+    #   decodeReplicas: 1
+    #   decodeTensorParallelism: 4
+    # - prefillReplicas: 4
+    #   prefillTensorParallelism: 2
+    #   decodeReplicas: 2
+    #   decodeTensorParallelism: 4
+    # - prefillReplicas: 2
+    #   prefillTensorParallelism: 2
+    #   decodeReplicas: 3
+    #   decodeTensorParallelism: 4
+  gateway:
+    helmValues:
+      gateway:
+        gatewayClassName: kgateway
+        service:
+          type: NodePort
+        gatewayParameters:
+          enabled: true
+  gaie:
+    helmValues:
+      inferenceExtension:
+        replicas: 1
+        image:
+          name: llm-d-inference-scheduler
+          hub: ghcr.io/llm-d
+          tag: v0.2.1
+          pullPolicy: Always
+        extProcPort: 9002
+        extraContainerPorts:
+          - name: zmq
+            containerPort: 5557
+            protocol: TCP
+        extraServicePorts:
+          - name: zmq
+            port: 5557
+            targetPort: 5557
+            protocol: TCP
+        env:
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-secret
+                key: HF_TOKEN
+        pluginsConfigFile: "plugins-v2.yaml"
+
+      inferencePool:
+        targetPortNumber: 8000
+        modelServerType: vllm
+        apiVersion: "inference.networking.x-k8s.io/v1alpha2"
+        modelServers:
+          matchLabels:
+            llm-d.ai/inferenceServing: "true"
+            llm-d.ai/model: meta-llama-llama-3-1-8b-instruct
+      provider:
+        name: none
+  model:
+    helmValues:
+      fullnameOverride: meta-llama-llama-3-1-8b-instruct
+      multinode: false
+
+      modelArtifacts:
+        uri: pvc://model-pvc/models/meta-llama/Llama-3.1-8B-Instruct
+        size: 300Gi
+        authSecretName: "hf-secret"
+        name: meta-llama/Llama-3.1-8B-Instruct
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: meta-llama-llama-3-1-8b-instruct
+
+      routing:
+        servicePort: 8000
+        proxy:
+          image: "ghcr.io/llm-d/llm-d-routing-sidecar:v0.3.0"
+          secure: false
+          connector: nixlv2
+          debugLevel: 3
+      decode:
+        create: true
+        replicas: 3
+        acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+              - NVIDIA-H100-80GB-HBM3
+        parallelism:
+          data: 1
+          tensor: 4
+        annotations:
+            deployed-by: nick
+            modelservice: llm-d-benchmark
+        podAnnotations:
+            deployed-by: nick
+            modelservice: llm-d-benchmark
+            k8s.v1.cni.cncf.io/networks: multi-nic-compute
+        #no____config
+        containers:
+        - name: "vllm"
+          mountModelVolume: true
+          image: "ghcr.io/llm-d/llm-d:v0.2.0"
+          modelCommand: vllmServe
+          
+          args:
+            - "--block-size"
+            - "128"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - "--disable-log-requests"
+            - "--disable-uvicorn-access-log"
+            - "--max-model-len"
+            - "16000"
+          env:
+            - name: UCX_TLS
+              value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+            - name: UCX_SOCKADDR_TLS_PRIORITY
+              value: "tcp"
+            - name: UCX_NET_DEVICES
+              value: mlx5_1:1
+            - name: NCCL_IB_HCA
+              value: mlx5_1
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5557"
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+              value: "1"
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: "32"
+              
+              nvidia.com/gpu: "4"
+              rdma/roce_gdr: "1"
+            requests:
+              memory: 128Gi
+              cpu: "32"
+              
+              nvidia.com/gpu: "4"
+              rdma/roce_gdr: "1"
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8200
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8200
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8200
+              failureThreshold: 3
+              periodSeconds: 5
+          #no____config
+          volumeMounts: 
+          - name: dshm
+            mountPath: /dev/shm
+        volumes: 
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      prefill:
+        create: true
+        replicas: 1
+        acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+              - NVIDIA-H100-80GB-HBM3
+        parallelism:
+          data: 1
+          tensor: 4
+        annotations:
+            deployed-by: nick
+            modelservice: llm-d-benchmark
+        podAnnotations:
+            deployed-by: nick
+            modelservice: llm-d-benchmark
+            k8s.v1.cni.cncf.io/networks: multi-nic-compute
+        #no____config
+        containers:
+        - name: "vllm"
+          mountModelVolume: true
+          image: "ghcr.io/llm-d/llm-d:v0.2.0"
+          modelCommand: vllmServe
+          
+          args:
+            - "--block-size"
+            - "128"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - "--disable-log-requests"
+            - "--disable-uvicorn-access-log"
+            - "--max-model-len"
+            - "16000"
+          env:
+            - name: VLLM_IS_PREFILL
+              value: "1"
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: UCX_TLS
+              value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+            - name: UCX_SOCKADDR_TLS_PRIORITY
+              value: "tcp"
+            - name: UCX_NET_DEVICES
+              value: mlx5_1:1
+            - name: NCCL_IB_HCA
+              value: mlx5_1
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5557"
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+              value: "1"
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: "32"
+              
+              nvidia.com/gpu: "4"
+              rdma/roce_gdr: "1"
+            requests:
+              memory: 128Gi
+              cpu: "32"
+              
+              nvidia.com/gpu: "4"
+              rdma/roce_gdr: "1"
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+          #no____config
+          volumeMounts: 
+          - name: dshm
+            mountPath: /dev/shm
+        volumes: 
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+workload:
+  harness: vllm-benchmark
+  profile: random_concurrent.yaml
+  profiles: 
+    random_concurrent.yaml:
+      executable: benchmark_serving.py
+      model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+      base-url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+      dataset-name: random
+      random-input-len: 10000
+      random-output-len: 1000
+      max-concurrency: 1
+      num-prompts: 32
+      percentile-metrics: "ttft,tpot,itl,e2el"
+      metric-percentiles: "0.1,1,5,10,25,75,90,95,99,99.9"
+      ignore-eos: none
+  # do we want the user to embed the profile?
+  treatments:
+    - max-concurrency: 1
+      num-prompts: 10
+    # - max-concurrency: 8
+    #   num-prompts: 80
+    # - max-concurrency: 32
+    #   num-prompts: 320
+    # - max-concurrency: 64
+    #   num-prompts: 640
+    # - max-concurrency: 128
+    #   num-prompts: 1280
+    # - max-concurrency: 256
+    #   num-prompts: 2560

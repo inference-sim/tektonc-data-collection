@@ -1,0 +1,143 @@
+# PD disaggregation example benchmark
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{ experiment.name | dns }}
+spec:
+
+  workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    - name: data
+
+  params:
+    - name: namespace
+      description: Kubernetes namespace in which experiment resources should be deployed
+      type: string
+
+  tasks:
+    - name: log-start
+      taskRef: { name: echo }
+      params:
+        - name: text
+          value: |-
+            Starting pipeline "{{ experiment.name }}"
+            Assumes that secret/hf-secret is defined with field HF_TOKEN
+
+    - name: deploy-gateway
+      taskRef: { name: deploy-gateway }
+      params:
+        - { name: releaseName, value: "gateway" }
+        - { name: namespace, value: $(params.namespace) }
+        - { name: values, value: {{ stack.gateway.helmValues }} }
+
+    # Loop: set of stacks per stack (gateway, gaie, vllm)
+    - loopName: per-stack
+      foreach:
+        domain:
+          infra_i: {{ enumerate_list(stack.treatments) }}
+
+      vars:
+        stackId: "{{ infra_i.item.decodeReplicas ~ "-" ~ infra_i.item.decodeTensorParallelism ~ "-" ~ infra_i.item.prefillReplicas ~ "-" ~ infra_i.item.prefillTensorParallelism }}"
+        stackModelLabel:  "{{ modelLabelPrefix }}-{{infra_i.i}}"
+        decodeReplicas: "{{ infra_i.item.decodeReplicas }}"
+        decodeTensorParallelism: "{{ infra_i.item.decodeTensorParallelism }}"
+        prefillReplicas: "{{ infra_i.item.prefillReplicas }}"
+        prefillTensorParallelism: "{{ infra_i.item.prefillTensorParallelism }}"
+
+      tasks:
+      - name: deploy-gaie-{{ stackId }}
+        taskRef: { name: deploy-gaie }
+        runAfter: [ deploy-gateway ]
+        params:
+          - { name: releaseName, value: "gaie-{{ stackId }}" }
+          - { name: namespace , value: $(params.namespace) }
+          - { name: values, value: {{ stack.gaie.helmValues }} }
+          - name: extraValues
+            value:
+              inferencePool:
+                modelServers:
+                  matchLabels:
+                    llm-d.ai/model: "{{ stackModelLabel }}"
+
+      - name: download-model-{{ stackId }}
+        taskRef: { name: download-model }
+        workspaces:
+          - name: model-cache
+          - name: hf-credentials
+        params:
+          - name: model
+            value: {{ modelId }}
+
+      - name: deploy-model-{{ stackId }}
+        taskRef: { name: deploy-model }
+        runAfter: [ "download-model-{{ stackId }}" ]
+        params:
+          - { name: releaseName, value: "model-{{ stackId }}" }
+          - { name: namespace , value: $(params.namespace) }
+          - { name: values, value: {{ stack.model.helmValues }} }
+          {% if stack.model.version is defined and stack.model.version %}
+          - { name: version, value: "{{ stack.model.version }}" }
+          {% endif %}
+          {% if stack.model.repo is defined and stack.model.repo %}
+          - { name: repo, value: "{{ stack.model.repo }}" }
+          {% endif %}
+          {% if stack.model.repoUrl is defined and stack.model.repoUrl %}
+          - { name: repoUrl, value: "{{ stack.model.repoUrl }}" }
+          {% endif %}
+          - name: extraValues
+            value:
+              modelArtifacts:
+                labels:
+                  llm-d.ai/model: "{{ stackModelLabel }}"
+          - name: extraSets
+            value:
+              - decode.replicas={{ prefillReplicas }}
+              - decode.parallelism.tensor={{ decodeTensorParallelism }}
+              - prefill.replicas={{ prefillReplicas }}
+              - prefill.parallelism.tensor={{ prefillTensorParallelism }}
+
+              - modelArtifacts.name={{ modelId }}
+              - modelArtifacts.uri=pvc://model-pvc/models/{{ modelId }}
+              - fullnameOverride={{ stackModelLabel }}
+
+      - name: deploy-httproute-{{ stackId }}
+        taskRef: { name: deploy-httproute }
+        runAfter: [ "deploy-gaie-{{ stackId }}", deploy-gateway ]
+        params:
+          - { name: namespace, value: $(params.namespace) }
+          - { name: gateway, value: $(tasks.deploy-gateway.results.gateway) }
+          - { name: inferencepool, value: "$(tasks.deploy-gaie-{{ stackId }}.results.inferencepool)" }
+          - { name: model_label, value: "{{ stackModelLabel }}" }
+
+      # inner loop
+      - loopName: per-workload
+        foreach:
+          domain:
+            treatment_i: {{ enumerate_list(workload.treatments) }}
+
+        vars: 
+          max_concurrency: "{{ treatment_i['item']['max-concurrency'] }}"
+          num_prompts: "{{ treatment_i['item']['num-prompts'] }}"
+          taskPostfix: "{{ stackId }}-{{ treatment_i.i }}"
+          resultPath: "{{ stackId }}-{{ treatment_i['item']['max-concurrency'] }}_{{ treatment_i['item']['num-prompts'] }}"
+
+        tasks:
+        - __jinja__: |
+            - name: create-workload-profile-{{ taskPostfix }}
+              taskRef: { name: create-workload-profile-{{ workload.harness }} }
+              workspaces:
+                - name: data
+              params:
+                - { name: harness, value: "{{ workload.harness }}" }
+                - { name: profileTemplate, value: {{ workload.profiles | toyaml }} }
+                - { name: model, value: "{{ modelId }}" }
+                - { name: url, value: url }
+                - name: treatment
+                  value:
+                    max-concurrency: {{ max_concurrency }}
+                    num-prompts: {{ num_prompts }}
+                - name: overrides
+                  value:
+                    - {path: "max-concurrency", value: {{ max_concurrency }} }
+                    - {path: "num_prompts", value: {{ num_prompts }} }
