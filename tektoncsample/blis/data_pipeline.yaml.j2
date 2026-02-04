@@ -17,7 +17,7 @@ spec:
       description: Cache of training results
     - name: target-credentials
       description: >-
-        Secret workspace containing upload target credentials. 
+        Secret workspace containing upload target credentials.
         For example, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for s3.
 
 
@@ -42,11 +42,11 @@ spec:
         - name: model
           value: "$(params.model)"
 
-    # - name: install-guidellm
-    #   taskRef: { name: install-guidellm }
-    #   runAfter: [ "download-model" ]
-    #   workspaces:
-    #     - name: data
+    - name: install-guidellm
+      taskRef: { name: install-guidellm }
+      runAfter: [ "download-model" ]
+      workspaces:
+        - name: data
 
     # Loop: Run stacks (different model engine configurations) in parallel
     - loopName: per-stack
@@ -61,8 +61,8 @@ spec:
       tasks:
         - name: create-exp-config-{{ stackId }}
           taskRef: { name: create-exp-config }
-          # runAfter: [ "install-guidellm" ]
-          runAfter: [ "download-model" ]
+          runAfter: [ "install-guidellm" ]
+          # runAfter: [ "download-model" ]
           workspaces:
             - name: data
           params:
@@ -78,21 +78,21 @@ spec:
           description: >-
             Deploy a per-experiment OpenTelemetry collector
           taskRef: { name: create-otel-collector }
-          # runAfter: [ "install-guidellm" ]
-          runAfter: [ "download-model" ]
+          runAfter: [ "install-guidellm" ]
+          # runAfter: [ "download-model" ]
           workspaces:
             - name: data
           params:
             - { name: modelLabel, value: "{{ stackModelLabel }}"}
             - { name: results_dir ,value: "{{ stackModelLabel }}" }
-            
+
 
         - name: deploy-model-{{ stackId }}
           description: >-
             Deploy model engines.
             Uses the modelservice helm chart.
-            The task implementation automatically overrides "modelArtifacts.name", 
-            "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model", 
+            The task implementation automatically overrides "modelArtifacts.name",
+            "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model",
             and "fullnameOverride" to avoid conflicts and ensure consistency.
           taskRef: { name: deploy-model }
           runAfter: [ "deploy-otel-collector-{{ stackId }}" ]
@@ -118,7 +118,7 @@ spec:
           description: Run workload against model server.
           taskRef: { name: run-workload-{{ workload.harness }} }
           runAfter: [ "deploy-model-{{ stackId }}" ]
-          timeout: "350m" 
+          timeout: "350m"
           retries: 3
           workspaces:
             - name: data
@@ -161,7 +161,7 @@ spec:
 
         {% if upload_target is defined and upload_target %}
         - name: raw-upload-{{ stackId }}
-          description: Upload raw data to target data repository 
+          description: Upload raw data to target data repository
           taskRef: { name: upload-{{ upload_target.type }} }
           runAfter: [ "run-workload-{{ stackId }}" ]
           workspaces:
@@ -176,7 +176,7 @@ spec:
             - { name: target, value: {{ upload_target.configuration }} }
         {% endif %}
 
-       
+
 
   finally:
     # Loop in 'finally': make all stacks are deleted when done
