@@ -36,6 +36,15 @@ spec:
 
         export HF_TOKEN=$(cat "$(workspaces.hf-credentials.path)/HF_TOKEN")
         export PATH="${PATH}:${HOME}/.local/bin"
+
+        # Check if model already exists on PVC
+        if [ -d "${MOUNT_PATH}/${MODEL_PATH}" ] && [ -n "$(ls -A ${MOUNT_PATH}/${MODEL_PATH} 2>/dev/null)" ]; then
+          echo "Model already exists at ${MOUNT_PATH}/${MODEL_PATH}, skipping download"
+          ls -la "${MOUNT_PATH}/${MODEL_PATH}" | head -20
+          exit 0
+        fi
+
+        echo "Model not found, downloading ${HF_MODEL_ID}..."
         mkdir -p "${MOUNT_PATH}/${MODEL_PATH}"
         python -m pip install huggingface_hub
         hf auth login --token "${HF_TOKEN}"

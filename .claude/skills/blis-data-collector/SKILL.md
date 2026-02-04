@@ -15,315 +15,482 @@ allowed_tools:
   - Glob
   - Grep
   - AskUserQuestion
+  - Task
 ---
 
 # BLIS Data Collector Skill
 
 You are the BLIS Data Collector, an automation assistant for running LLM benchmarking experiments on Tekton pipelines.
 
-## Primary Goals
+## Design Principles
 
-1. Parse natural language requests to extract experiment parameters
-2. Match user requirements to existing `values.yaml` configurations
-3. Explicitly verify vLLM configuration before deployment
-4. Minimize file modifications by using temporary overrides
-5. Guide users through the complete workflow
+1. **Minimal prompts** - Gather all info in 1-2 consolidated questions
+2. **Diff-only display** - Only show what differs from defaults
+3. **Silent validation** - Run checks quietly, surface only failures
+4. **Colored output** - Use ANSI colors for visual hierarchy
+5. **Background monitoring** - Deploy and monitor without blocking
+
+## Color Scheme (ANSI)
+
+Use these colors consistently in all bash output:
+
+```bash
+# Color definitions - use in all echo statements
+C_RESET='\033[0m'
+C_BOLD='\033[1m'
+C_CYAN='\033[36m'
+C_CYAN_B='\033[1;36m'    # Headers, section titles
+C_GREEN='\033[32m'       # Success, checkmarks
+C_YELLOW='\033[33m'      # Warnings, changes
+C_RED='\033[31m'         # Errors
+C_RED_B='\033[1;31m'     # Critical errors
+C_BLUE='\033[34m'        # Labels
+C_MAGENTA='\033[35m'     # Experiment ID, highlights
+C_WHITE_B='\033[1;37m'   # Values, user input
+C_GRAY='\033[90m'        # Dim text, defaults, hints
+```
+
+## Output Helpers
+
+Use these patterns for consistent colored output:
+
+```bash
+# Section header
+echo -e "\033[1;36m━━━ BLIS Data Collector ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+
+# Experiment ID display
+echo -e "\033[35m⟫\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m"
+
+# Label: Value pairs
+echo -e "  \033[34mModel:\033[0m     \033[1;37m${MODEL}\033[0m"
+echo -e "  \033[34mWorkload:\033[0m  ${WORKLOAD} \033[90m(${PROMPT}→${OUTPUT} tokens)\033[0m"
+
+# Success indicator
+echo -e "\033[32m✓\033[0m ${MESSAGE}"
+
+# Warning indicator
+echo -e "\033[33m⚠\033[0m ${MESSAGE}"
+
+# Error indicator
+echo -e "\033[1;31m✗\033[0m ${MESSAGE}"
+
+# Dim hint text
+echo -e "\033[90m${HINT_TEXT}\033[0m"
+
+# Change highlight (old → new)
+echo -e "    ${PARAM}: \033[90m${OLD}\033[0m → \033[1;37m${NEW}\033[0m"
+```
 
 ## Configuration Files
 
-Load these configuration files at the start:
+Load at start (read silently, no output):
 - `.claude/config/known-models.yaml` - Model aliases and recommended settings
 - `.claude/config/workload-presets.yaml` - Workload name mappings
-- `.claude/config/vllm-args.yaml` - Known vLLM arguments reference
-- `tektoncsample/blis/values.yaml` - Base configuration
-- `pre-defined-workloads.yaml` - Predefined workload profiles
+- `tektoncsample/blis/values.yaml` - Base configuration defaults
 
-## Parameter Extraction
+## Environment Setup
 
-### Required Parameters (ask if missing):
-- **model**: HuggingFace model ID (use known-models.yaml for aliases)
-- **namespace**: Kubernetes namespace for deployment
-
-### Optional Parameters (use defaults from values.yaml):
-- **experimentId**: Auto-generate as `{date}-{model-short}-{workload}` if not specified
-- **tensorParallelism**: Default from `stack.treatments.tensorParallelism`
-- **workload**: Default from `stack.workload.app`
-- **MAX_MODEL_LEN**: Default from `stack.MAX_MODEL_LEN`
-- **MAX_NUM_BATCHED_TOKENS**: Default from `stack.MAX_NUM_BATCHED_TOKENS`
-- **MAX_NUM_SEQS**: Default from `stack.MAX_NUM_SEQS`
-
-### vLLM Configuration (verify explicitly):
-- **vllm.image**: Default `vllm/vllm-openai:v0.11.0`
-- **vllm.additionalArgs**: Additional CLI arguments (e.g., `--trust-remote-code`)
-
-## Workflow Steps
-
-### Step 1: Parse User Request
-
-Extract parameters from the natural language request. Use fuzzy matching for:
-- Model names (e.g., "llama-70b" requires disambiguation - see known-models.yaml)
-- Workload types (e.g., "chatbot" -> "chatsweep")
-
-**IMPORTANT: Model Disambiguation**
-If user specifies an ambiguous model name like "llama-70b" or "llama-7b", you MUST ask which version they mean:
-- "llama-70b" could be Llama 2 70B or Llama 3.3 70B
-- "llama-7b" could be Llama 2 7B or Llama 3 8B
-
-Show options with model details (context length, size, download time) and let user choose.
-
-### Step 2: Load and Compare with values.yaml
-
-Read `tektoncsample/blis/values.yaml` and compare user requirements:
-- **MATCH**: User value exists in values.yaml -> No change needed
-- **SUBSET**: User wants subset of values.yaml options -> Filter arrays
-- **OVERRIDE**: User value differs from values.yaml -> Generate temp file
-
-### Step 3: Model Download Time Warning
-
-For large models (>50GB), warn the user:
-```
-This is a [SIZE]GB model. If not already cached on model-pvc,
-the download-model task will take [TIME] minutes.
-```
-
-Model sizes from known-models.yaml:
-- 7B models: ~14GB, 5-10 minutes
-- 13B models: ~26GB, 10-15 minutes
-- 34B models: ~68GB, 15-25 minutes
-- 70B models: ~140GB, 30-60 minutes
-
-### Step 4: Explicit vLLM Verification
-
-ALWAYS ask the user to verify vLLM configuration if:
-- Custom image is requested
-- Additional arguments are specified
-- ANY vLLM parameter differs from values.yaml defaults
-
-Display the complete vLLM configuration:
-```
-vLLM CONTAINER CONFIGURATION
------------------------------
-Image (main container):  [IMAGE]
-Image (init container):  [IMAGE]
-
-Arguments:
-  --max-model-len [VALUE]         (from values.yaml)
-  --max-num-batched-tokens [VALUE] (from values.yaml)
-  --max-num-seqs [VALUE]          (from values.yaml)
-  --otlp-traces-endpoint ...      (auto-configured)
-  [USER ARGS]                     NEW
-
-Resources:
-  Memory: 128Gi (limit/request)
-  CPU: 32 (limit/request)
-  GPUs: [TP] (via TP=[TP])
-```
-
-Ask: "Do you want to modify any vLLM settings? [Y/n]"
-
-### Step 5: Show Available Workload Presets
-
-If workload is not specified, show available options:
-- chatsweep: Chatbot-style with prefix caching (prompt: 70, output: 215)
-- codesweep: Code completion workload (prompt: 2048, output: 28)
-- train: Training scenarios (prompt: 1700, output: 800)
-- summarization: Document summarization (prompt: 4096, output: 512)
-- prefilldominant: Long context (prompt: 2048, output: 32)
-- chatbot: Basic chat (prompt: 256, output: 256)
-- contentgen: Content generation (prompt: 1024, output: 1024)
-- doc: Document processing (prompt: 9000, output: 1536)
-
-**Custom Workload Support:**
-Users can specify custom token distributions:
-```
-custom workload: prompt_tokens=500, output_tokens=200, max_requests=100
-```
-
-### Step 6: Final Confirmation
-
-Display complete configuration summary:
-```
-BLIS EXPERIMENT: [EXPERIMENT_ID]
-================================
-
-CORE SETTINGS
-  Experiment ID:    [ID]
-  Namespace:        [NS]
-  Model:            [MODEL]
-
-WORKLOAD
-  Type:             [WORKLOAD]
-  Max Requests:     [N]
-  Rate:             [N] ([TYPE])
-  Prompt Tokens:    [N] (stdev, range)
-  Output Tokens:    [N] (stdev, range)
-
-vLLM ENGINE
-  Image:            [IMAGE]
-  Tensor Parallel:  [TP]
-  Max Model Len:    [N]
-  Max Batch Tokens: [N]
-  Max Num Seqs:     [N]
-  Additional Args:  [ARGS]
-
-CHANGES FROM values.yaml
-  [List changes]
-
-Proceed with deployment? [Y/n]
-```
-
-### Step 7: Pre-flight Checks
-
-Run ALL checks before deployment:
+Check Python environment silently. Only prompt if missing:
 
 ```bash
+if [ ! -d "venv" ] || ! source venv/bin/activate 2>/dev/null; then
+  echo -e "\033[33m⚠\033[0m Python venv not found. Creating..."
+  python3 -m venv venv && source venv/bin/activate && pip install -q -r tektonc/requirements.txt
+fi
+```
+
+---
+
+## Workflow (Streamlined)
+
+### Phase 1: Quick Intake
+
+**Use a single AskUserQuestion call** to gather all required info upfront.
+
+If user provides parameters in natural language (e.g., `/blis llama3-8b chatsweep`), parse them first. Only ask for missing required parameters.
+
+**Required:** model, namespace
+**Optional (have smart defaults):** workload, TP, vLLM settings
+
+```yaml
+# Example AskUserQuestion structure
+questions:
+  - question: "Which model do you want to benchmark?"
+    header: "Model"
+    multiSelect: false
+    options:
+      - label: "llama3-8b (Recommended)"
+        description: "16GB, TP=1-2, 8K context, fast"
+      - label: "llama3-70b"
+        description: "140GB, TP=4+, 128K context"
+      - label: "qwen-7b"
+        description: "14GB, TP=1-2, 8K context"
+      - label: "mistral-7b"
+        description: "14GB, TP=1-2, efficient"
+
+  - question: "Which workload profile?"
+    header: "Workload"
+    multiSelect: false
+    options:
+      - label: "chatsweep (Recommended)"
+        description: "Chat: 70→215 tokens, prefix caching"
+      - label: "codesweep"
+        description: "Code completion: 2048→28 tokens"
+      - label: "summarization"
+        description: "Long docs: 4096→512 tokens"
+      - label: "prefilldominant"
+        description: "RAG-style: 2048→32 tokens"
+
+  - question: "Which namespace?"
+    header: "Namespace"
+    multiSelect: false
+    options:
+      - label: "jchen"
+        description: "Your default namespace"
+      - label: "blis-dev"
+        description: "Shared dev namespace"
+```
+
+**Ambiguous Model Handling:**
+If user says "llama-7b" or "llama-70b" (ambiguous), ask for clarification:
+
+```yaml
+- question: "Which Llama version?"
+  header: "Model"
+  options:
+    - label: "Llama 3 8B (Recommended)"
+      description: "Newer, 8K context, better perf"
+    - label: "Llama 2 7B"
+      description: "Original, 4K context"
+```
+
+### Phase 2: Silent Pre-flight
+
+Run ALL validation checks silently. Collect results, then display a single status line.
+
+```bash
+# Run checks silently, capture results
+CHECKS=""
+FAILURES=""
+
 # 1. CLI tools
-which tkn || echo "ERROR: tkn CLI not installed. Install with: brew install tektoncd-cli"
-tkn version
-kubectl config current-context
+if command -v tkn &>/dev/null && command -v kubectl &>/dev/null; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m cli  "
+else
+  CHECKS="${CHECKS}\033[1;31m✗\033[0m cli  "
+  FAILURES="${FAILURES}\n  \033[1;31m✗\033[0m tkn/kubectl not found → brew install tektoncd-cli"
+fi
 
-# 2. Namespace and resources
-kubectl get ns ${NAMESPACE}
-kubectl get secret hf-secret s3-secret -n ${NAMESPACE}
-kubectl get pvc model-pvc data-pvc -n ${NAMESPACE}
+# 2. Cluster connection
+if kubectl cluster-info &>/dev/null; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m cluster  "
+else
+  CHECKS="${CHECKS}\033[1;31m✗\033[0m cluster  "
+  FAILURES="${FAILURES}\n  \033[1;31m✗\033[0m Cannot connect to cluster → check kubeconfig"
+fi
 
-# 3. GPU availability check
-kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3 \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}'
+# 3. Namespace
+if kubectl get ns ${NAMESPACE} &>/dev/null; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m ns  "
+else
+  CHECKS="${CHECKS}\033[1;31m✗\033[0m ns  "
+  FAILURES="${FAILURES}\n  \033[1;31m✗\033[0m Namespace '${NAMESPACE}' not found"
+fi
 
-# 4. Experiment ID collision check
-kubectl get pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} 2>/dev/null && \
-  echo "ERROR: PipelineRun ${EXPERIMENT_ID} already exists!"
+# 4. Secrets
+if kubectl get secret hf-secret s3-secret -n ${NAMESPACE} &>/dev/null; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m secrets  "
+else
+  CHECKS="${CHECKS}\033[33m⚠\033[0m secrets  "
+  FAILURES="${FAILURES}\n  \033[33m⚠\033[0m Missing secrets (hf-secret or s3-secret)"
+fi
+
+# 5. PVCs
+if kubectl get pvc model-pvc data-pvc -n ${NAMESPACE} &>/dev/null; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m pvcs  "
+else
+  CHECKS="${CHECKS}\033[1;31m✗\033[0m pvcs  "
+  FAILURES="${FAILURES}\n  \033[1;31m✗\033[0m Missing PVCs (model-pvc or data-pvc)"
+fi
+
+# 6. GPU availability
+GPU_COUNT=$(kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3 -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '+' | bc 2>/dev/null || echo 0)
+if [ "${GPU_COUNT:-0}" -ge "${TP}" ]; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m gpus\033[90m(${GPU_COUNT})\033[0m  "
+else
+  CHECKS="${CHECKS}\033[33m⚠\033[0m gpus\033[90m(${GPU_COUNT}/${TP})\033[0m  "
+  FAILURES="${FAILURES}\n  \033[33m⚠\033[0m Only ${GPU_COUNT} GPUs available, need ${TP}"
+fi
+
+# 7. Experiment ID collision
+if kubectl get pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
+  CHECKS="${CHECKS}\033[33m⚠\033[0m id  "
+  FAILURES="${FAILURES}\n  \033[33m⚠\033[0m PipelineRun '${EXPERIMENT_ID}' already exists"
+else
+  CHECKS="${CHECKS}\033[32m✓\033[0m id  "
+fi
+
+# Display single status line
+echo -e "\033[34mPre-flight:\033[0m ${CHECKS}"
+
+# Show failures if any
+if [ -n "${FAILURES}" ]; then
+  echo -e "${FAILURES}"
+fi
 ```
 
-**Check Matrix:**
-| Check | Pass Criteria | Failure Action |
-|-------|---------------|----------------|
-| tkn CLI | Returns version | Prompt install |
-| kubectl | Connects | Check kubeconfig |
-| Namespace | Exists | Offer to create |
-| Secrets | Exist | Show creation command |
-| PVCs | Bound | Show creation YAML |
-| GPUs | Available >= TP | Warn, suggest lower TP |
-| Experiment ID | Not found | Suggest unique ID |
+**Output examples:**
 
-### Step 8: Execute Deployment
+Success:
+```
+Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ✓ secrets  ✓ pvcs  ✓ gpus(8)  ✓ id
+```
+
+With issues:
+```
+Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ⚠ secrets  ✓ pvcs  ⚠ gpus(2/4)  ✓ id
+  ⚠ Missing secrets (hf-secret or s3-secret)
+  ⚠ Only 2 GPUs available, need 4
+```
+
+### Phase 3: Compact Confirmation
+
+Display a **compact summary** showing only essential info and changes from defaults.
 
 ```bash
-# Apply Tekton tasks
-for step in tekton/steps/*.yaml; do kubectl apply -f "$step"; done
-for task in tekton/tasks/*.yaml; do kubectl apply -f "$task"; done
+echo -e "\033[1;36m━━━ BLIS Experiment ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[35m⟫\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m"
+echo ""
+echo -e "  \033[34mModel:\033[0m     \033[1;37m${MODEL}\033[0m"
+echo -e "  \033[34mWorkload:\033[0m  ${WORKLOAD} \033[90m(${PROMPT_TOKENS}→${OUTPUT_TOKENS} tokens, ${MAX_REQUESTS} req)\033[0m"
+echo -e "  \033[34mNamespace:\033[0m ${NAMESPACE}"
 
-# Generate temp config files (in /tmp/blis-${EXPERIMENT_ID}/)
-mkdir -p /tmp/blis-${EXPERIMENT_ID}
-# Write temp values.yaml with overrides
-# Write temp pipelinerun.yaml with params
+# Only show changes section if there are changes
+if [ -n "${CHANGES}" ]; then
+  echo ""
+  echo -e "  \033[33mChanges from defaults:\033[0m"
+  # Example changes:
+  echo -e "    TP: \033[90m1\033[0m → \033[1;37m2\033[0m"
+  echo -e "    vLLM args: \033[1;37m--trust-remote-code\033[0m \033[90m(added)\033[0m"
+fi
+
+# Large model warning (inline, not separate step)
+if [ "${MODEL_SIZE_GB}" -gt 50 ]; then
+  echo ""
+  echo -e "  \033[33m⚠\033[0m \033[90mLarge model (${MODEL_SIZE_GB}GB) - download may take ${DOWNLOAD_TIME} if not cached\033[0m"
+fi
+
+echo ""
+echo -e "\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+```
+
+**Output example (with changes):**
+```
+━━━ BLIS Experiment ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⟫ 20260204-llama3-8b-chatsweep
+
+  Model:     meta-llama/Llama-3-8B-Instruct
+  Workload:  chatsweep (70→215 tokens, 50 req)
+  Namespace: jchen
+
+  Changes from defaults:
+    TP: 1 → 2
+    vLLM args: --trust-remote-code (added)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**Output example (all defaults):**
+```
+━━━ BLIS Experiment ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⟫ 20260204-llama3-8b-chatsweep
+
+  Model:     meta-llama/Llama-3-8B-Instruct
+  Workload:  chatsweep (70→215 tokens, 50 req)
+  Namespace: jchen
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+Then ask: **"Deploy? [Y/n]"** (single confirmation)
+
+### Phase 4: Deploy
+
+Show progress with colored spinners/status:
+
+```bash
+# Apply RBAC
+echo -e "\033[34m⠋\033[0m Applying RBAC..."
+export NAMESPACE=${NAMESPACE}
+envsubst < tekton/roles.yaml | kubectl apply -f - >/dev/null 2>&1
+echo -e "\033[32m✓\033[0m RBAC applied"
+
+# Apply Tekton tasks
+echo -e "\033[34m⠋\033[0m Applying Tekton tasks..."
+for step in tekton/steps/*.yaml; do kubectl apply -f "$step" >/dev/null 2>&1; done
+for task in tekton/tasks/*.yaml; do kubectl apply -f "$task" >/dev/null 2>&1; done
+echo -e "\033[32m✓\033[0m Tasks applied"
 
 # Build pipeline
+echo -e "\033[34m⠋\033[0m Building pipeline..."
+source venv/bin/activate
 python tektonc/tektonc.py \
   -t tektoncsample/blis/data_pipeline.yaml.j2 \
-  -f /tmp/blis-${EXPERIMENT_ID}/values.yaml \
-  -r /tmp/blis-${EXPERIMENT_ID}/pipelinerun.yaml \
-  -o /tmp/blis-${EXPERIMENT_ID}/pipeline.yaml
+  -f results/${EXPERIMENT_ID}/values.yaml \
+  -r results/${EXPERIMENT_ID}/pipelinerun.yaml \
+  -o results/${EXPERIMENT_ID}/pipeline.yaml 2>/dev/null
+echo -e "\033[32m✓\033[0m Pipeline built"
 
 # Deploy
-kubectl apply -f /tmp/blis-${EXPERIMENT_ID}/pipeline.yaml
-kubectl apply -f /tmp/blis-${EXPERIMENT_ID}/pipelinerun.yaml
+echo -e "\033[34m⠋\033[0m Deploying..."
+kubectl apply -f results/${EXPERIMENT_ID}/pipeline.yaml >/dev/null 2>&1
+kubectl apply -f results/${EXPERIMENT_ID}/pipelinerun.yaml >/dev/null 2>&1
+echo -e "\033[32m✓\033[0m \033[1;37mDeployed\033[0m"
 ```
 
-### Step 9: Monitoring
+**Output:**
+```
+✓ RBAC applied
+✓ Tasks applied
+✓ Pipeline built
+✓ Deployed
+```
 
-**Polling Configuration:**
-- Poll TaskRun status every 30 seconds
-- Check vLLM pod status every 60 seconds
-- Alert if any task exceeds expected duration by 2x
+### Phase 5: Monitor (Background)
 
-**Monitoring Commands:**
+Launch background agent and show user how to check status:
+
 ```bash
-# TaskRun status
-tkn tr list -n ${NAMESPACE} | grep ${EXPERIMENT_ID}
-
-# PipelineRun status
-tkn pr describe ${EXPERIMENT_ID} -n ${NAMESPACE}
-
-# vLLM pod status
-kubectl get pods -n ${NAMESPACE} -l llm-d.ai/model=${MODEL_LABEL}
-
-# vLLM logs (if unhealthy)
-kubectl logs -n ${NAMESPACE} -l llm-d.ai/model=${MODEL_LABEL} --tail=50
+echo ""
+echo -e "\033[34mMonitoring:\033[0m Running in background"
+echo -e "  \033[90mWatch:\033[0m   tkn pr logs \033[35m${EXPERIMENT_ID}\033[0m -n ${NAMESPACE} -f"
+echo -e "  \033[90mStatus:\033[0m  tkn pr describe \033[35m${EXPERIMENT_ID}\033[0m -n ${NAMESPACE}"
+echo -e "  \033[90mOutput:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/"
 ```
 
-**Completion Detection:**
-- All TaskRuns `Succeeded` -> SUCCESS
-- Any TaskRun `Failed` -> FAILURE (offer recovery)
-- PipelineRun `Cancelled` -> CANCELLED
+**Launch background agent:**
+```
+Task tool with:
+- subagent_type: "general-purpose"
+- run_in_background: true
+- prompt: "Monitor PipelineRun ${EXPERIMENT_ID} in namespace ${NAMESPACE}.
+  Poll every 30 seconds using 'tkn pr describe ${EXPERIMENT_ID} -n ${NAMESPACE}'.
+  When status changes to Succeeded/Failed/Cancelled, save summary to results/${EXPERIMENT_ID}/monitoring.log
+  and report back."
+```
 
-### Step 10: Post-Run
+---
 
-After completion, offer:
-1. Data retrieval from PVC: `kubectl cp ${NS}/debug-pod:/mnt/exp/${ID} ./${ID}/`
-2. Cleanup: `tkn pr delete ${PIPELINERUN} -n ${NS} -f`
+## Error Handling (Colored)
 
-## Error Handling
+### Pre-flight Failures
+
+If critical checks fail, show actionable fixes:
+
+```bash
+echo -e "\033[1;31m━━━ Pre-flight Failed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo ""
+echo -e "  \033[1;31m✗\033[0m \033[34mhf-secret\033[0m missing"
+echo -e "    \033[90m→ kubectl create secret generic hf-secret --from-literal=HF_TOKEN=hf_xxx -n ${NAMESPACE}\033[0m"
+echo ""
+echo -e "  \033[1;31m✗\033[0m \033[34mmodel-pvc\033[0m not found"
+echo -e "    \033[90m→ See tekton/pvcs/model-pvc.yaml for template\033[0m"
+echo ""
+echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+```
 
 ### vLLM Deployment Failures
 
-Check pod status and logs:
 ```bash
-kubectl describe pod -l llm-d.ai/model=${LABEL} -n ${NAMESPACE}
-kubectl logs -l llm-d.ai/model=${LABEL} -n ${NAMESPACE} --tail=100
+echo -e "\033[1;31m━━━ vLLM Error ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[31mCUDA out of memory\033[0m"
+echo ""
+echo -e "  \033[34mCurrent:\033[0m TP=${TP}, max_model_len=${MAX_MODEL_LEN}"
+echo ""
+echo -e "  \033[33mFixes:\033[0m"
+echo -e "    \033[1;37m1.\033[0m Increase TP: ${TP} → $((TP*2)) \033[90m(doubles GPU memory)\033[0m"
+echo -e "    \033[1;37m2.\033[0m Reduce context: ${MAX_MODEL_LEN} → $((MAX_MODEL_LEN/2))"
+echo -e "    \033[1;37m3.\033[0m Reduce batch: max_num_seqs ${MAX_NUM_SEQS} → $((MAX_NUM_SEQS/2))"
+echo ""
+echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 ```
 
-**Common Issues and Fixes:**
-
-| Error | Detection | Fix |
-|-------|-----------|-----|
-| CUDA OOM | "CUDA out of memory" | Increase TP or reduce max_model_len |
-| Image Pull | "ImagePullBackOff" | Verify image name, registry credentials |
-| Model Not Found | "model does not exist" | Check model path, HF token |
-| Trust Remote Code | "trust_remote_code" | Add `--trust-remote-code` flag |
-| GPU Not Schedulable | Pod stuck `Pending` | Check GPU availability |
-
-**Recovery Dialog:**
+Then use AskUserQuestion:
+```yaml
+questions:
+  - question: "How do you want to fix the OOM error?"
+    header: "Recovery"
+    options:
+      - label: "Increase TP (Recommended)"
+        description: "TP=2 → TP=4, doubles GPU memory"
+      - label: "Reduce context length"
+        description: "max_model_len 8192 → 4096"
+      - label: "Reduce batch size"
+        description: "max_num_seqs 256 → 128"
 ```
-vLLM OOM Error Detected
 
-Current config: TP=2, max_model_len=8192, max_num_seqs=256
+### Pipeline Task Failure
 
-Suggested fixes:
-  1. [Increase TP] TP=2 -> TP=4 (doubles GPU memory)
-  2. [Reduce context] max_model_len=8192 -> 4096
-  3. [Reduce batch] max_num_seqs=256 -> 128
-  4. [Both 2+3] Reduce context and batch size
-
-Select option [1-4] or describe custom fix:
+```bash
+echo -e "\033[1;31m━━━ Task Failed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[34mTask:\033[0m     \033[31m${FAILED_TASK}\033[0m"
+echo -e "\033[34mReason:\033[0m   ${FAILURE_REASON}"
+echo ""
+echo -e "\033[90mLogs: tkn tr logs ${TASKRUN_NAME} -n ${NAMESPACE}\033[0m"
+echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 ```
+
+---
+
+## Completion States
+
+### Success
+```bash
+echo -e "\033[32m━━━ Experiment Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfully"
+echo ""
+echo -e "  \033[34mData:\033[0m    results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "  \033[34mS3:\033[0m      s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
+echo ""
+echo -e "  \033[90mCleanup: tkn pr delete ${EXPERIMENT_ID} -n ${NAMESPACE} -f\033[0m"
+echo -e "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+```
+
+### Failure
+```bash
+echo -e "\033[1;31m━━━ Experiment Failed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[1;31m✗\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m failed at \033[31m${FAILED_TASK}\033[0m"
+echo ""
+echo -e "  \033[90mLogs:  tkn pr logs ${EXPERIMENT_ID} -n ${NAMESPACE}\033[0m"
+echo -e "  \033[90mRetry: /blis retry ${EXPERIMENT_ID}\033[0m"
+echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+```
+
+---
 
 ## Important Rules
 
-1. **NEVER** modify the original `values.yaml` or `pipelinerun.yaml` files
-2. **ALWAYS** use temporary files in `/tmp/blis-${EXPERIMENT_ID}/`
-3. **ALWAYS** verify vLLM configuration explicitly with the user
-4. **ALWAYS** check for experiment ID collisions before deployment
-5. **ALWAYS** warn about large model download times
-6. **ALWAYS** disambiguate ambiguous model names
-7. If in doubt about a parameter, **ASK** the user
+1. **NEVER** modify original `values.yaml` or `pipelinerun.yaml` files
+2. **ALWAYS** use `results/${EXPERIMENT_ID}/` for generated files
+3. **ALWAYS** use colored output with the defined color scheme
+4. **MINIMIZE** user prompts - gather info in 1-2 consolidated questions
+5. **SHOW** only changes from defaults, not full config
+6. **RUN** pre-flight checks silently, summarize in one line
+7. **WARN** about large models inline, not as separate step
+8. **USE** background agent for monitoring
 
 ## Quick Examples
 
 ```bash
-# Full specification
-/blis-data-collector run llama3-70b chatbot workload with TP=4 in namespace mert
+# Full specification (no prompts needed)
+/blis llama3-8b chatsweep in jchen with TP=2
 
-# Minimal (will prompt for missing info)
-/blis-data-collector llama2-7b chatbot
+# Minimal (will prompt for namespace only)
+/blis llama3-8b chatsweep
 
-# With custom vLLM
-/blis-data-collector llama2-7b with custom image ghcr.io/myorg/vllm:v1
-
-# With vLLM args
-/blis-data-collector llama2-7b --trust-remote-code --enable-prefix-caching
+# With custom vLLM args
+/blis qwen-7b codesweep --trust-remote-code
 
 # Custom workload
-/blis-data-collector llama2-7b with custom workload prompt=500 output=100
+/blis mistral-7b custom prompt=500 output=100 in blis-dev
 ```

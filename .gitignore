@@ -28,3 +28,6 @@ tmp/
 # OS
 .DS_Store
 Thumbs.db
+
+# BLIS experiment results (local working directory)
+results/

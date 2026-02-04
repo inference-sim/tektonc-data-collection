@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kubectl get:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl delete pipelinerun:*)",
+      "Bash(tkn:*)",
+      "Bash(python:*)",
+      "Bash(pip:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(mkdir:*)",
+      "Bash(which:*)",
+      "Bash(envsubst:*)",
+      "Bash(cat:*)"
+    ]
+  },
+  "hooks": {
+      "Notification": [
+        {
+          "matcher": "",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "afplay /System/Library/Sounds/Glass.aiff &"
+            },
+            {
+              "type": "command",
+              "command": "osascript -e 'display notification \"Claude needs your input\" with title \"Claude Code\" subtitle \"'\"$(basename \"$CLAUDE_PROJECT_DIR\")\"'\""
+            }
+          ]
+        }
+      ]
+    }
+}
