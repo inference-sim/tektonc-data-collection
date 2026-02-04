@@ -29,6 +29,7 @@ spec:
       image: alpine:3.20
       script: |
         mkdir -p "$(workspaces.data.path)/$(params.results_dir)"
+        chmod -R 777 "$(workspaces.data.path)/$(params.results_dir)"
 
         cat <<EOF > "$(workspaces.data.path)/$(params.results_dir)/exp-config.yaml"
         model: $(params.model)

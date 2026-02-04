@@ -79,6 +79,9 @@ spec:
         git clone -b scenario6 https://github.com/inference-sim/vllm-data-collection.git
         cd vllm-data-collection
         pip install -r requirements.txt
+        pip install pandas
+        pip install optuna
+        pip install openpyxl
         cd scenario6
 
         echo "Check out the golang binary here"

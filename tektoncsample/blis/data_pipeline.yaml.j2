@@ -42,11 +42,11 @@ spec:
         - name: model
           value: "$(params.model)"
 
-    - name: install-guidellm
-      taskRef: { name: install-guidellm }
-      runAfter: [ "download-model" ]
-      workspaces:
-        - name: data
+    # - name: install-guidellm
+    #   taskRef: { name: install-guidellm }
+    #   runAfter: [ "download-model" ]
+    #   workspaces:
+    #     - name: data
 
     # Loop: Run stacks (different model engine configurations) in parallel
     - loopName: per-stack
@@ -61,7 +61,8 @@ spec:
       tasks:
         - name: create-exp-config-{{ stackId }}
           taskRef: { name: create-exp-config }
-          runAfter: [ "install-guidellm" ]
+          # runAfter: [ "install-guidellm" ]
+          runAfter: [ "download-model" ]
           workspaces:
             - name: data
           params:
@@ -77,7 +78,8 @@ spec:
           description: >-
             Deploy a per-experiment OpenTelemetry collector
           taskRef: { name: create-otel-collector }
-          runAfter: [ "install-guidellm" ]
+          # runAfter: [ "install-guidellm" ]
+          runAfter: [ "download-model" ]
           workspaces:
             - name: data
           params:

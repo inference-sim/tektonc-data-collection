@@ -132,9 +132,8 @@ spec:
         python -m guidellm benchmark \
           --scenario "${WORKLOAD_PROFILE}" \
           --output-path "${RESULTS}" \
-          --request-type text_completions \
-          --request-formatter-kwargs '{"stream": false}'
-
+          --request-type text_completions 
+        # \ --request-formatter-kwargs '{"stream": false}'
 
         export RC=$?
 

@@ -33,6 +33,13 @@ spec:
   pipelineRef:
     name: blis-test
   params:
-    - { name: experimentId, value: "nov19-testchunk-chat" }
-    - { name: model, value: "meta-llama/Llama-3.3-70B-Instruct" }
-    - { name: namespace, value: toslali }
+    - { name: experimentId, value: "jan30-llama2-7b-chatsweeptps" }
+    # - { name: experimentId, value: "jan30-dummy" }
+    # - { name: model, value: "codellama/CodeLlama-34b-Instruct-hf" }
+    # 
+    - { name: model, value: "meta-llama/Llama-2-7b-hf" }
+    # - { name: model, value: "Qwen/Qwen2.5-Math-1.5B" }
+    
+    # - { name: model, value: "internlm/internlm-20b" }
+    # - { name: model, value: "meta-llama/Llama-3.3-70B-Instruct" }
+    - { name: namespace, value: mert }
