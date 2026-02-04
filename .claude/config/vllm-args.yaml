@@ -1,0 +1,236 @@
+# vLLM argument reference for the skill
+# Categorized by purpose with metadata for validation and help text
+
+categories:
+  # Core performance arguments (commonly changed)
+  performance:
+    - name: "--max-model-len"
+      type: integer
+      description: "Maximum sequence length the model can handle"
+      values_yaml_path: "stack.MAX_MODEL_LEN"
+      common_values: [2048, 4096, 8192, 16384, 32768]
+      notes: "Reduce to save GPU memory, increase for longer contexts"
+
+    - name: "--max-num-batched-tokens"
+      type: integer
+      description: "Maximum number of tokens in a batch"
+      values_yaml_path: "stack.MAX_NUM_BATCHED_TOKENS"
+      common_values: [1024, 2048, 4096, 8192]
+      notes: "Higher values improve throughput but use more memory"
+
+    - name: "--max-num-seqs"
+      type: integer
+      description: "Maximum number of concurrent sequences"
+      values_yaml_path: "stack.MAX_NUM_SEQS"
+      common_values: [32, 64, 128, 256, 512]
+      notes: "Higher values allow more concurrent requests"
+
+    - name: "--gpu-memory-utilization"
+      type: float
+      description: "Fraction of GPU memory to use (0.0-1.0)"
+      default: 0.9
+      range: [0.1, 0.99]
+      notes: "Reduce if OOM errors occur, increase to maximize throughput"
+
+    - name: "--swap-space"
+      type: integer
+      description: "CPU swap space in GB per GPU"
+      default: 4
+      notes: "Allows offloading to CPU memory when GPU is full"
+
+  # Tracing and observability
+  tracing:
+    - name: "--otlp-traces-endpoint"
+      type: string
+      description: "OTLP endpoint for trace export"
+      auto_configured: true
+      notes: "Automatically set based on OTEL collector deployment"
+
+    - name: "--journey-tracing-sample-rate"
+      type: float
+      description: "Sample rate for journey tracing (0.0-1.0)"
+      range: [0.0, 1.0]
+      requires_custom_image: true
+      custom_image_notes: "Only available in custom vLLM builds with journey tracing"
+
+    - name: "--collect-detailed-traces"
+      type: flag
+      description: "Enable detailed tracing for debugging"
+      notes: "May impact performance, use for debugging only"
+
+  # Model loading
+  model_loading:
+    - name: "--trust-remote-code"
+      type: flag
+      description: "Allow execution of custom model code from HuggingFace"
+      security_note: "Only enable for trusted models"
+      notes: "Required for some models like Falcon, StarCoder"
+
+    - name: "--dtype"
+      type: enum
+      values: ["auto", "half", "float16", "bfloat16", "float", "float32"]
+      description: "Data type for model weights"
+      default: "auto"
+      notes: "bfloat16 recommended for newer GPUs, float16 for compatibility"
+
+    - name: "--quantization"
+      type: enum
+      values: ["awq", "gptq", "squeezellm", "fp8", "marlin"]
+      description: "Quantization method for the model"
+      notes: "Requires model to be pre-quantized in matching format"
+
+    - name: "--load-format"
+      type: enum
+      values: ["auto", "pt", "safetensors", "npcache", "dummy"]
+      description: "Format to load model weights"
+      default: "auto"
+      notes: "safetensors is faster and more secure"
+
+    - name: "--revision"
+      type: string
+      description: "Model revision/branch to load"
+      default: "main"
+      notes: "Specify branch, tag, or commit hash"
+
+    - name: "--tokenizer"
+      type: string
+      description: "Tokenizer to use (if different from model)"
+      notes: "Rarely needed, only for custom tokenizer setups"
+
+  # Optimization flags
+  optimization:
+    - name: "--enable-prefix-caching"
+      type: flag
+      description: "Enable automatic prefix caching"
+      notes: "Useful for workloads with repeated prefixes (chatbots, RAG)"
+
+    - name: "--enforce-eager"
+      type: flag
+      description: "Disable CUDA graph optimization"
+      notes: "May help with debugging or memory issues, slower inference"
+
+    - name: "--enable-chunked-prefill"
+      type: flag
+      description: "Enable chunked prefill optimization"
+      notes: "Can improve latency for long prompts"
+
+    - name: "--disable-log-stats"
+      type: flag
+      description: "Disable logging of statistics"
+      notes: "Reduces log verbosity"
+
+    - name: "--disable-log-requests"
+      type: flag
+      description: "Disable logging of individual requests"
+      notes: "Reduces log verbosity for high-traffic deployments"
+
+    - name: "--max-paddings"
+      type: integer
+      description: "Maximum padding tokens in a batch"
+      default: 256
+      notes: "Reduce for memory efficiency with varied sequence lengths"
+
+  # Speculative decoding
+  speculative:
+    - name: "--speculative-model"
+      type: string
+      description: "Draft model for speculative decoding"
+      notes: "Must be a smaller, faster model compatible with the main model"
+
+    - name: "--num-speculative-tokens"
+      type: integer
+      description: "Number of tokens to speculatively decode"
+      common_values: [3, 5, 7]
+      notes: "Higher values may improve throughput but increase latency"
+
+    - name: "--speculative-draft-tensor-parallel-size"
+      type: integer
+      description: "Tensor parallel size for draft model"
+      default: 1
+      notes: "Usually 1, increase for larger draft models"
+
+  # Distributed inference
+  distributed:
+    - name: "--tensor-parallel-size"
+      type: integer
+      description: "Number of GPUs for tensor parallelism"
+      notes: "Set via tensorParallelism in values.yaml, not directly"
+      values_yaml_path: "stack.treatments.tensorParallelism"
+
+    - name: "--pipeline-parallel-size"
+      type: integer
+      description: "Number of stages for pipeline parallelism"
+      default: 1
+      notes: "Rarely used, tensor parallelism is more common"
+
+    - name: "--worker-use-ray"
+      type: flag
+      description: "Use Ray for distributed workers"
+      notes: "Alternative to default multiprocessing"
+
+  # Server configuration
+  server:
+    - name: "--host"
+      type: string
+      description: "Host to bind the server to"
+      default: "0.0.0.0"
+      notes: "Use 0.0.0.0 for container deployments"
+
+    - name: "--port"
+      type: integer
+      description: "Port to bind the server to"
+      default: 8000
+      notes: "Must match service port configuration"
+
+    - name: "--api-key"
+      type: string
+      description: "API key for authentication"
+      notes: "Optional, for secured deployments"
+
+    - name: "--served-model-name"
+      type: string
+      description: "Name to serve the model as"
+      notes: "Useful for model aliasing in API responses"
+
+# Arguments that are auto-configured by the pipeline
+# The skill should inform users these are set automatically
+auto_configured_args:
+  - "--otlp-traces-endpoint"
+  - "--tensor-parallel-size"  # Set via deploy-model task overrides
+
+# Arguments that require custom vLLM images
+custom_image_args:
+  - "--journey-tracing-sample-rate"
+
+# Common argument combinations for specific use cases
+recipes:
+  high_throughput:
+    description: "Maximize throughput for batch processing"
+    args:
+      - "--max-num-seqs=512"
+      - "--max-num-batched-tokens=8192"
+      - "--gpu-memory-utilization=0.95"
+
+  low_latency:
+    description: "Minimize latency for real-time applications"
+    args:
+      - "--max-num-seqs=64"
+      - "--enable-chunked-prefill"
+
+  memory_constrained:
+    description: "Reduce memory usage when GPU memory is limited"
+    args:
+      - "--gpu-memory-utilization=0.8"
+      - "--max-model-len=2048"
+      - "--max-num-seqs=128"
+
+  debug:
+    description: "Enable debugging features"
+    args:
+      - "--enforce-eager"
+      - "--collect-detailed-traces"
+
+  prefix_caching:
+    description: "Enable prefix caching for chatbot/RAG workloads"
+    args:
+      - "--enable-prefix-caching"

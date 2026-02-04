@@ -1,0 +1,287 @@
+# Workload preset mappings for natural language matching
+# Maps user-friendly terms to predefined workload configurations
+
+mappings:
+  chatsweep:
+    keywords:
+      - "chatbot"
+      - "chat"
+      - "conversation"
+      - "conversational"
+      - "dialogue"
+      - "assistant"
+    description: "Short prompts with medium outputs, includes prefix caching"
+    profile:
+      app: chatsweep
+      rate_type: sweep
+      max_requests: 50
+      rate: 12
+      random_seed: 42
+      data:
+        prefix_tokens: 284
+        prompt_tokens: 70
+        prompt_tokens_stdev: 35
+        prompt_tokens_min: 2
+        prompt_tokens_max: 200
+        output_tokens: 215
+        output_tokens_stdev: 80
+        output_tokens_min: 1
+        output_tokens_max: 512
+
+  codesweep:
+    keywords:
+      - "code"
+      - "coding"
+      - "programming"
+      - "completion"
+      - "autocomplete"
+      - "copilot"
+    description: "Long prompts (code context) with short outputs (completions)"
+    profile:
+      app: codesweep
+      rate_type: sweep
+      max_requests: 50
+      rate: 12
+      random_seed: 42
+      data:
+        prompt_tokens: 2048
+        prompt_tokens_stdev: 1974
+        prompt_tokens_min: 2
+        prompt_tokens_max: 3500
+        output_tokens: 28
+        output_tokens_stdev: 60
+        output_tokens_min: 6
+        output_tokens_max: 200
+
+  train:
+    keywords:
+      - "training"
+      - "fine-tuning"
+      - "learning"
+      - "finetune"
+    description: "Variable length inputs and outputs for training scenarios"
+    profile:
+      app: train
+      rate_type: sweep
+      max_requests: 25
+      rate: 12
+      random_seed: 42
+      data:
+        prefix_tokens: 0
+        prompt_tokens: 1700
+        prompt_tokens_stdev: 1200
+        prompt_tokens_min: 2
+        prompt_tokens_max: 3500
+        output_tokens: 800
+        output_tokens_stdev: 500
+        output_tokens_min: 1
+        output_tokens_max: 500
+
+  summarization:
+    keywords:
+      - "summary"
+      - "summarization"
+      - "summarize"
+      - "tldr"
+      - "condense"
+      - "digest"
+    description: "Long input documents with medium-length summaries"
+    profile:
+      app: summarization
+      rate_type: sweep
+      max_requests: 40
+      rate: 5
+      random_seed: 42
+      data:
+        prefix_tokens: 820
+        prompt_tokens: 4096
+        prompt_tokens_stdev: 500
+        prompt_tokens_min: 100
+        prompt_tokens_max: 7168
+        output_tokens: 512
+        output_tokens_stdev: 150
+        output_tokens_min: 10
+        output_tokens_max: 1024
+
+  prefilldominant:
+    keywords:
+      - "prefill"
+      - "prefill-heavy"
+      - "long-context"
+      - "context-heavy"
+      - "rag"
+      - "retrieval"
+    description: "Very long prompts with minimal outputs (RAG-style)"
+    profile:
+      app: prefilldominant
+      rate_type: sweep
+      max_requests: 40
+      rate: 5
+      random_seed: 42
+      data:
+        prefix_tokens: 1024
+        prompt_tokens: 2048
+        prompt_tokens_stdev: 500
+        prompt_tokens_min: 100
+        prompt_tokens_max: 4096
+        output_tokens: 32
+        output_tokens_stdev: 16
+        output_tokens_min: 1
+        output_tokens_max: 64
+
+  chatbot:
+    keywords:
+      - "basic-chat"
+      - "simple-chat"
+      - "balanced"
+    description: "Balanced prompts and outputs for general chat"
+    profile:
+      app: chatbot
+      rate_type: sweep
+      max_requests: 40
+      rate: 5
+      random_seed: 42
+      data:
+        prefix_tokens: 256
+        prompt_tokens: 256
+        prompt_tokens_stdev: 100
+        prompt_tokens_min: 2
+        prompt_tokens_max: 800
+        output_tokens: 256
+        output_tokens_stdev: 100
+        output_tokens_min: 1
+        output_tokens_max: 1024
+
+  contentgen:
+    keywords:
+      - "content"
+      - "generation"
+      - "writing"
+      - "creative"
+      - "blog"
+      - "article"
+    description: "Medium prompts with long generated outputs"
+    profile:
+      app: contentgen
+      rate_type: sweep
+      max_requests: 40
+      rate: 5
+      random_seed: 42
+      data:
+        prefix_tokens: 310
+        prompt_tokens: 1024
+        prompt_tokens_stdev: 150
+        prompt_tokens_min: 10
+        prompt_tokens_max: 2048
+        output_tokens: 1024
+        output_tokens_stdev: 200
+        output_tokens_min: 10
+        output_tokens_max: 2048
+
+  doc:
+    keywords:
+      - "document"
+      - "long-form"
+      - "documentation"
+      - "report"
+      - "analysis"
+    description: "Very long prompts and outputs for document processing"
+    profile:
+      app: doc
+      rate_type: sweep
+      max_requests: 25
+      rate: 5
+      random_seed: 42
+      data:
+        prefix_tokens: 1000
+        prompt_tokens: 9000
+        prompt_tokens_stdev: 1200
+        prompt_tokens_min: 500
+        prompt_tokens_max: 11000
+        output_tokens: 1536
+        output_tokens_stdev: 300
+        output_tokens_min: 50
+        output_tokens_max: 2000
+
+# Custom workload template
+# Users can specify custom token distributions using these parameters
+custom_workload_template:
+  required_params:
+    - prompt_tokens
+    - output_tokens
+  optional_params:
+    prompt_tokens_stdev:
+      default: 0
+      description: "Standard deviation for prompt tokens"
+    prompt_tokens_min:
+      default: 1
+      description: "Minimum prompt tokens"
+    prompt_tokens_max:
+      default: null  # Will use prompt_tokens * 2 if not specified
+      description: "Maximum prompt tokens"
+    output_tokens_stdev:
+      default: 0
+      description: "Standard deviation for output tokens"
+    output_tokens_min:
+      default: 1
+      description: "Minimum output tokens"
+    output_tokens_max:
+      default: null  # Will use output_tokens * 2 if not specified
+      description: "Maximum output tokens"
+    prefix_tokens:
+      default: 0
+      description: "Cached prefix length for prefix caching experiments"
+    max_requests:
+      default: 50
+      description: "Total requests to generate"
+    rate:
+      default: 12
+      description: "Request rate"
+    rate_type:
+      default: "sweep"
+      description: "Rate type: 'sweep' or 'constant'"
+    random_seed:
+      default: 42
+      description: "Random seed for reproducibility"
+
+# Quick reference table for preset selection
+preset_summary:
+  - name: chatsweep
+    prompt: 70
+    output: 215
+    use_case: "Chatbot, conversational AI"
+
+  - name: codesweep
+    prompt: 2048
+    output: 28
+    use_case: "Code completion, autocomplete"
+
+  - name: train
+    prompt: 1700
+    output: 800
+    use_case: "Training data generation"
+
+  - name: summarization
+    prompt: 4096
+    output: 512
+    use_case: "Document summarization"
+
+  - name: prefilldominant
+    prompt: 2048
+    output: 32
+    use_case: "RAG, long context Q&A"
+
+  - name: chatbot
+    prompt: 256
+    output: 256
+    use_case: "Basic chat, balanced I/O"
+
+  - name: contentgen
+    prompt: 1024
+    output: 1024
+    use_case: "Content generation, writing"
+
+  - name: doc
+    prompt: 9000
+    output: 1536
+    use_case: "Document analysis, reports"

@@ -1,0 +1,167 @@
+# Model aliases for natural language matching
+# IMPORTANT: Ambiguous aliases require disambiguation (see ambiguous_aliases below)
+
+aliases:
+  # Llama 2 family (explicit - preferred)
+  "llama2-7b": "meta-llama/Llama-2-7b-hf"
+  "llama-2-7b": "meta-llama/Llama-2-7b-hf"
+  "llama2-13b": "meta-llama/Llama-2-13b-hf"
+  "llama-2-13b": "meta-llama/Llama-2-13b-hf"
+  "llama2-70b": "meta-llama/Llama-2-70b-hf"
+  "llama-2-70b": "meta-llama/Llama-2-70b-hf"
+
+  # Llama 3 family (explicit - preferred)
+  "llama3-8b": "meta-llama/Llama-3-8B-Instruct"
+  "llama-3-8b": "meta-llama/Llama-3-8B-Instruct"
+  "llama3-70b": "meta-llama/Llama-3.3-70B-Instruct"
+  "llama-3-70b": "meta-llama/Llama-3.3-70B-Instruct"
+  "llama-3.3-70b": "meta-llama/Llama-3.3-70B-Instruct"
+
+  # CodeLlama family
+  "codellama-7b": "codellama/CodeLlama-7b-Instruct-hf"
+  "codellama-34b": "codellama/CodeLlama-34b-Instruct-hf"
+
+  # Qwen family
+  "qwen-1.5b": "Qwen/Qwen2.5-Math-1.5B"
+  "qwen-7b": "Qwen/Qwen2.5-7B-Instruct"
+
+  # Mistral family
+  "mistral-7b": "mistralai/Mistral-7B-Instruct-v0.3"
+
+# Ambiguous aliases that REQUIRE user disambiguation
+# When user says these, the skill MUST ask which version they mean
+ambiguous_aliases:
+  "llama-7b":
+    options:
+      - id: "meta-llama/Llama-2-7b-hf"
+        label: "Llama 2 7B"
+        description: "Original Llama 2, well-tested, 4K context"
+      - id: "meta-llama/Llama-3-8B-Instruct"
+        label: "Llama 3 8B"
+        description: "Newer Llama 3, improved performance, 8K context"
+    prompt: "Did you mean Llama 2 (7B) or Llama 3 (8B)?"
+
+  "llama-70b":
+    options:
+      - id: "meta-llama/Llama-2-70b-hf"
+        label: "Llama 2 70B"
+        description: "Original Llama 2, 4K context"
+      - id: "meta-llama/Llama-3.3-70B-Instruct"
+        label: "Llama 3.3 70B (Recommended)"
+        description: "Latest Llama 3.3, 128K context, improved performance"
+    prompt: "Did you mean Llama 2 (70B) or Llama 3.3 (70B)?"
+
+  "llama":
+    options:
+      - id: "meta-llama/Llama-2-7b-hf"
+        label: "Llama 2 7B"
+      - id: "meta-llama/Llama-3-8B-Instruct"
+        label: "Llama 3 8B"
+      - id: "meta-llama/Llama-3.3-70B-Instruct"
+        label: "Llama 3.3 70B"
+    prompt: "Which Llama model do you want to use?"
+
+# Recommended settings per model
+recommended_settings:
+  "meta-llama/Llama-2-7b-hf":
+    tp: [1, 2]
+    max_model_len: 4096
+    max_num_seqs: 256
+    max_num_batched_tokens: 2048
+    model_size_gb: 14
+    estimated_download_time: "5-10 minutes"
+    notes: "Standard 7B model, works well with TP=1-2 on H100"
+
+  "meta-llama/Llama-2-13b-hf":
+    tp: [1, 2]
+    max_model_len: 4096
+    max_num_seqs: 256
+    max_num_batched_tokens: 2048
+    model_size_gb: 26
+    estimated_download_time: "10-15 minutes"
+    notes: "13B model, works well with TP=1-2 on H100"
+
+  "meta-llama/Llama-2-70b-hf":
+    tp: [4, 8]
+    max_model_len: 4096
+    max_num_seqs: 128
+    max_num_batched_tokens: 2048
+    model_size_gb: 140
+    estimated_download_time: "30-60 minutes"
+    notes: "Large Llama 2 model, requires TP=4+ on H100"
+
+  "meta-llama/Llama-3-8B-Instruct":
+    tp: [1, 2]
+    max_model_len: 8192
+    max_num_seqs: 256
+    max_num_batched_tokens: 4096
+    model_size_gb: 16
+    estimated_download_time: "5-10 minutes"
+    notes: "Llama 3 8B, 8K context, improved over Llama 2 7B"
+
+  "meta-llama/Llama-3.3-70B-Instruct":
+    tp: [4, 8]
+    max_model_len: 8192
+    max_num_seqs: 128
+    max_num_batched_tokens: 4096
+    model_size_gb: 140
+    estimated_download_time: "30-60 minutes"
+    notes: "Large model, requires TP=4+ on H100, 128K native context"
+    requires_trust_remote_code: false
+
+  "codellama/CodeLlama-7b-Instruct-hf":
+    tp: [1, 2]
+    max_model_len: 4096
+    max_num_seqs: 256
+    max_num_batched_tokens: 2048
+    model_size_gb: 14
+    estimated_download_time: "5-10 minutes"
+    notes: "Code completion 7B model"
+
+  "codellama/CodeLlama-34b-Instruct-hf":
+    tp: [2, 4]
+    max_model_len: 4096
+    max_num_seqs: 128
+    max_num_batched_tokens: 2048
+    model_size_gb: 68
+    estimated_download_time: "15-25 minutes"
+    notes: "Code completion 34B model"
+
+  "Qwen/Qwen2.5-Math-1.5B":
+    tp: [1]
+    max_model_len: 4096
+    max_num_seqs: 256
+    max_num_batched_tokens: 2048
+    model_size_gb: 3
+    estimated_download_time: "1-2 minutes"
+    notes: "Small math-focused model"
+
+  "Qwen/Qwen2.5-7B-Instruct":
+    tp: [1, 2]
+    max_model_len: 8192
+    max_num_seqs: 256
+    max_num_batched_tokens: 4096
+    model_size_gb: 14
+    estimated_download_time: "5-10 minutes"
+    notes: "Qwen 2.5 7B, good general performance"
+
+  "mistralai/Mistral-7B-Instruct-v0.3":
+    tp: [1, 2]
+    max_model_len: 8192
+    max_num_seqs: 256
+    max_num_batched_tokens: 4096
+    model_size_gb: 14
+    estimated_download_time: "5-10 minutes"
+    notes: "Mistral 7B, efficient architecture"
+
+# Custom vLLM image recommendations
+custom_images:
+  journey_tracing:
+    image: "ghcr.io/ibm/vllm-journey"
+    tags: ["v0.8.0", "v0.9.0", "latest"]
+    required_args:
+      - "--journey-tracing-sample-rate"
+    notes: "Custom vLLM with journey tracing support"
+
+# Default vLLM image (official)
+default_vllm_image: "vllm/vllm-openai:v0.11.0"

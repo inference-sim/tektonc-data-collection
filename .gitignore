@@ -12,12 +12,6 @@ env/
 .venv/
 tmp/
 
-# Generated pipeline output
-*.yaml
-!tekton/**/*.yaml
-!tektoncsample/**/values.yaml
-!tektoncsample/**/pipelinerun.yaml
-
 # IDE
 .idea/
 .vscode/
