@@ -11,8 +11,8 @@ aliases:
   "llama-2-70b": "meta-llama/Llama-2-70b-hf"
 
   # Llama 3 family (explicit - preferred)
-  "llama3-8b": "meta-llama/Llama-3-8B-Instruct"
-  "llama-3-8b": "meta-llama/Llama-3-8B-Instruct"
+  "llama3-8b": "meta-llama/Meta-Llama-3-8B-Instruct"
+  "llama-3-8b": "meta-llama/Meta-Llama-3-8B-Instruct"
   "llama3-70b": "meta-llama/Llama-3.3-70B-Instruct"
   "llama-3-70b": "meta-llama/Llama-3.3-70B-Instruct"
   "llama-3.3-70b": "meta-llama/Llama-3.3-70B-Instruct"
@@ -36,7 +36,7 @@ ambiguous_aliases:
       - id: "meta-llama/Llama-2-7b-hf"
         label: "Llama 2 7B"
         description: "Original Llama 2, well-tested, 4K context"
-      - id: "meta-llama/Llama-3-8B-Instruct"
+      - id: "meta-llama/Meta-Llama-3-8B-Instruct"
         label: "Llama 3 8B"
         description: "Newer Llama 3, improved performance, 8K context"
     prompt: "Did you mean Llama 2 (7B) or Llama 3 (8B)?"
@@ -55,7 +55,7 @@ ambiguous_aliases:
     options:
       - id: "meta-llama/Llama-2-7b-hf"
         label: "Llama 2 7B"
-      - id: "meta-llama/Llama-3-8B-Instruct"
+      - id: "meta-llama/Meta-Llama-3-8B-Instruct"
         label: "Llama 3 8B"
       - id: "meta-llama/Llama-3.3-70B-Instruct"
         label: "Llama 3.3 70B"
@@ -90,7 +90,7 @@ recommended_settings:
     estimated_download_time: "30-60 minutes"
     notes: "Large Llama 2 model, requires TP=4+ on H100"
 
-  "meta-llama/Llama-3-8B-Instruct":
+  "meta-llama/Meta-Llama-3-8B-Instruct":
     tp: [1, 2]
     max_model_len: 8192
     max_num_seqs: 256

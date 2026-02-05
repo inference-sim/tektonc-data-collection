@@ -164,6 +164,18 @@ If user says "llama-7b" or "llama-70b" (ambiguous), ask for clarification:
       description: "Original, 4K context"
 ```
 
+### EXPERIMENT_ID Generation
+
+Generate a DNS-1123 compatible experiment ID:
+
+```bash
+# Generate base ID from date, model, and workload
+BASE_ID="${DATE}-${MODEL_SHORT}-${WORKLOAD}"
+
+# Sanitize for DNS-1123: lowercase, alphanumeric and hyphens only, max 63 chars
+EXPERIMENT_ID=$(echo "${BASE_ID}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-63)
+```
+
 ### Phase 2: Silent Pre-flight
 
 Run ALL validation checks silently. Collect results, then display a single status line.
@@ -213,13 +225,37 @@ else
   FAILURES="${FAILURES}\n  \033[1;31m✗\033[0m Missing PVCs (model-pvc or data-pvc)"
 fi
 
-# 6. GPU availability
-GPU_COUNT=$(kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3 -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '+' | bc 2>/dev/null || echo 0)
-if [ "${GPU_COUNT:-0}" -ge "${TP}" ]; then
-  CHECKS="${CHECKS}\033[32m✓\033[0m gpus\033[90m(${GPU_COUNT})\033[0m  "
+# 6. GPU availability (check actual free GPUs, not just allocatable)
+GPU_ALLOCATABLE=$(kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3 -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '+' | bc 2>/dev/null || echo 0)
+GPU_REQUESTED=$(kubectl get pods --all-namespaces -o jsonpath='{.items[*].spec.containers[*].resources.requests.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' | paste -sd+ - | bc 2>/dev/null || echo 0)
+GPU_FREE=$((${GPU_ALLOCATABLE:-0} - ${GPU_REQUESTED:-0}))
+
+# Check namespace quota
+QUOTA_LIMIT=$(kubectl get resourcequota -n ${NAMESPACE} -o jsonpath='{.items[*].spec.hard.nvidia\.com/gpu}' 2>/dev/null | head -1)
+QUOTA_USED=$(kubectl get resourcequota -n ${NAMESPACE} -o jsonpath='{.items[*].status.used.nvidia\.com/gpu}' 2>/dev/null | head -1)
+if [ -n "${QUOTA_LIMIT}" ]; then
+  QUOTA_AVAIL=$((${QUOTA_LIMIT:-0} - ${QUOTA_USED:-0}))
 else
-  CHECKS="${CHECKS}\033[33m⚠\033[0m gpus\033[90m(${GPU_COUNT}/${TP})\033[0m  "
-  FAILURES="${FAILURES}\n  \033[33m⚠\033[0m Only ${GPU_COUNT} GPUs available, need ${TP}"
+  QUOTA_AVAIL=${GPU_FREE}  # No quota = unlimited
+fi
+
+# Effective available is min of free GPUs and quota available
+if [ ${GPU_FREE} -lt ${QUOTA_AVAIL} ]; then
+  GPU_AVAIL=${GPU_FREE}
+else
+  GPU_AVAIL=${QUOTA_AVAIL}
+fi
+
+if [ "${GPU_AVAIL:-0}" -ge "${TP}" ]; then
+  CHECKS="${CHECKS}\033[32m✓\033[0m gpus\033[90m(${GPU_AVAIL}free)\033[0m  "
+else
+  CHECKS="${CHECKS}\033[33m⚠\033[0m gpus\033[90m(${GPU_AVAIL}/${TP})\033[0m  "
+  if [ ${GPU_FREE} -lt ${TP} ]; then
+    FAILURES="${FAILURES}\n  \033[33m⚠\033[0m Only ${GPU_FREE} GPUs free cluster-wide (${GPU_REQUESTED}/${GPU_ALLOCATABLE} in use), need ${TP}"
+  fi
+  if [ -n "${QUOTA_LIMIT}" ] && [ ${QUOTA_AVAIL} -lt ${TP} ]; then
+    FAILURES="${FAILURES}\n  \033[33m⚠\033[0m Namespace quota: ${QUOTA_USED}/${QUOTA_LIMIT} used, only ${QUOTA_AVAIL} available, need ${TP}"
+  fi
 fi
 
 # 7. Experiment ID collision
@@ -319,11 +355,16 @@ Then ask: **"Deploy? [Y/n]"** (single confirmation)
 Show progress with colored spinners/status:
 
 ```bash
-# Apply RBAC
+# Apply RBAC and verify service account
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
 export NAMESPACE=${NAMESPACE}
 envsubst < tekton/roles.yaml | kubectl apply -f - >/dev/null 2>&1
-echo -e "\033[32m✓\033[0m RBAC applied"
+if ! kubectl get serviceaccount helm-installer -n ${NAMESPACE} &>/dev/null; then
+  echo -e "\033[1;31m✗\033[0m Failed to create helm-installer service account"
+  echo -e "  \033[90m→ Check RBAC permissions and tekton/roles.yaml\033[0m"
+  exit 1
+fi
+echo -e "\033[32m✓\033[0m RBAC applied (helm-installer SA verified)"
 
 # Apply Tekton tasks
 echo -e "\033[34m⠋\033[0m Applying Tekton tasks..."
@@ -346,6 +387,56 @@ echo -e "\033[34m⠋\033[0m Deploying..."
 kubectl apply -f results/${EXPERIMENT_ID}/pipeline.yaml >/dev/null 2>&1
 kubectl apply -f results/${EXPERIMENT_ID}/pipelinerun.yaml >/dev/null 2>&1
 echo -e "\033[32m✓\033[0m \033[1;37mDeployed\033[0m"
+
+# Check for GPU scheduling failures (wait up to 60s for pods to schedule)
+echo -e "\033[34m⠋\033[0m Verifying GPU scheduling..."
+sleep 10  # Initial wait for pods to be created
+
+GPU_FAIL=false
+for i in {1..5}; do
+  # Check for Unschedulable pods with GPU resource issues
+  PENDING_PODS=$(kubectl get pods -n ${NAMESPACE} -l tekton.dev/pipelineRun=${EXPERIMENT_ID} \
+    --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+
+  if [ -n "${PENDING_PODS}" ]; then
+    for pod in ${PENDING_PODS}; do
+      EVENTS=$(kubectl get events -n ${NAMESPACE} --field-selector involvedObject.name=${pod} \
+        -o jsonpath='{.items[*].message}' 2>/dev/null)
+      if echo "${EVENTS}" | grep -qi "Insufficient nvidia.com/gpu\|gpu.*unavailable\|FailedScheduling.*gpu"; then
+        GPU_FAIL=true
+        break 2
+      fi
+    done
+  fi
+
+  # If no pending pods, scheduling succeeded
+  if [ -z "${PENDING_PODS}" ]; then
+    break
+  fi
+  sleep 10
+done
+
+if [ "${GPU_FAIL}" = true ]; then
+  echo -e "\033[1;31m✗\033[0m GPU scheduling failed"
+
+  # Terminate experiment
+  kubectl delete pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+  kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+
+  echo -e "\033[1;31m━━━ GPU Unavailable ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+  echo -e "\033[1;31m✗\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m terminated - GPUs no longer available"
+  echo ""
+  echo -e "  \033[34mRequired:\033[0m ${TP} GPU(s)"
+  echo -e "  \033[34mStatus:\033[0m   GPUs were claimed by another workload"
+  echo ""
+  echo -e "  \033[33mOptions:\033[0m"
+  echo -e "    \033[1;37m1.\033[0m Wait and retry: \033[90m/blis retry ${EXPERIMENT_ID}\033[0m"
+  echo -e "    \033[1;37m2.\033[0m Check GPU availability: \033[90mkubectl describe nodes | grep -A5 'Allocated resources'\033[0m"
+  echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+  exit 1
+fi
+
+echo -e "\033[32m✓\033[0m GPU scheduling verified"
 ```
 
 **Output:**
@@ -354,6 +445,7 @@ echo -e "\033[32m✓\033[0m \033[1;37mDeployed\033[0m"
 ✓ Tasks applied
 ✓ Pipeline built
 ✓ Deployed
+✓ GPU scheduling verified
 ```
 
 ### Phase 5: Monitor (Background)
@@ -445,14 +537,44 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 ## Completion States
 
 ### Success
+
+**Download data from cluster PVC:**
+```bash
+echo -e "\033[34m⠋\033[0m Downloading data from cluster..."
+mkdir -p results/${EXPERIMENT_ID}/data
+
+# Create temporary pod to access data-pvc
+kubectl run data-copy-${EXPERIMENT_ID} \
+  --image=busybox \
+  --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"data-copy-'${EXPERIMENT_ID}'","image":"busybox","command":["sleep","300"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}]}}' \
+  -n ${NAMESPACE} >/dev/null 2>&1
+kubectl wait --for=condition=Ready pod/data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --timeout=60s >/dev/null 2>&1
+
+# Copy data from PVC to local
+kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID} results/${EXPERIMENT_ID}/data/ 2>/dev/null
+
+# Cleanup temporary pod
+kubectl delete pod data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+
+echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+```
+
+**Cleanup cluster resources:**
+```bash
+echo -e "\033[34m⠋\033[0m Cleaning up cluster resources..."
+kubectl delete pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+echo -e "\033[32m✓\033[0m Cluster resources cleaned up"
+```
+
+**Display completion:**
 ```bash
 echo -e "\033[32m━━━ Experiment Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfully"
 echo ""
 echo -e "  \033[34mData:\033[0m    results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
 echo -e "  \033[34mS3:\033[0m      s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
-echo ""
-echo -e "  \033[90mCleanup: tkn pr delete ${EXPERIMENT_ID} -n ${NAMESPACE} -f\033[0m"
 echo -e "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 ```
 
