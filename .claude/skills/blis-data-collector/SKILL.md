@@ -420,6 +420,8 @@ Show progress with colored spinners/status.
 
 **IMPORTANT:** All operations below only READ from `tekton/` and `tektonc/` directories. All generated files go to `results/${EXPERIMENT_ID}/`.
 
+**CRITICAL BUG FIX:** The pipelinerun.yaml generation MUST update the `params` section to match user input. The base template contains hardcoded values that will override values.yaml if not updated. See Phase 3 setup for correct implementation.
+
 ```bash
 # Apply RBAC (read-only from tekton/roles.yaml)
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
