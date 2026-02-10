@@ -1,0 +1,192 @@
+# vLLM Observability Demo Pipeline
+# Demonstrates journey tracing, step tracing, and KV cache events collection
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{ experiment.name | dns }}
+spec:
+  {% if experiment.description is defined and experiment.description %}
+  description: {{ experiment.description }}
+  {% endif %}
+
+  workspaces:
+    - name: model-cache
+      description: Location where models are stored
+    - name: hf-credentials
+      description: Secret workspace containing HuggingFace token
+    - name: data
+      description: Workspace for traces and KV events output
+    - name: target-credentials
+      description: Secret workspace containing upload target credentials (AWS_ACCESS_KEY_ID, etc.)
+
+  params:
+    - name: experimentId
+      type: string
+      description: Identifier for experiment execution
+    - name: model
+      type: string
+      description: Model to deploy
+    - name: namespace
+      type: string
+      description: Kubernetes namespace where pipeline executes
+    - name: debug
+      type: string
+      default: 'false'
+      description: If true, skip cleanup of deployed resources
+
+  tasks:
+    - name: download-model
+      taskRef: { name: download-model }
+      workspaces:
+        - name: model-cache
+        - name: hf-credentials
+      params:
+        - name: model
+          value: "$(params.model)"
+
+    - name: install-guidellm
+      taskRef: { name: install-guidellm }
+      runAfter: [ "download-model" ]
+      workspaces:
+        - name: data
+
+    - name: create-exp-config
+      taskRef: { name: create-exp-config }
+      runAfter: [ "install-guidellm" ]
+      workspaces:
+        - name: data
+      params:
+        - { name: model, value: "$(params.model)" }
+        - { name: tp, value: "1" }
+        - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN }}" }
+        - { name: max_num_batched_tokens, value: "{{ stack.MAX_NUM_BATCHED_TOKENS }}" }
+        - { name: max_num_seqs, value: "{{ stack.MAX_NUM_SEQS }}" }
+        - { name: app, value: "{{ stack.workload.app }}" }
+        - { name: results_dir, value: "$(params.experimentId)" }
+
+    - name: deploy-otel-collector
+      description: Deploy a per-experiment OpenTelemetry collector
+      taskRef: { name: create-otel-collector }
+      runAfter: [ "install-guidellm" ]
+      workspaces:
+        - name: data
+      params:
+        - { name: modelLabel, value: "{{ experiment.name | dns }}"}
+        - { name: results_dir, value: "$(params.experimentId)" }
+
+    - name: deploy-model
+      description: Deploy model with observability features enabled
+      taskRef: { name: deploy-model }
+      runAfter: [ "deploy-otel-collector" ]
+      workspaces:
+        - name: model-cache
+      params:
+        - { name: model, value: "$(params.model)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}"}
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: config, value: {{ stack.model.helmValues }} }
+        - name: overrides
+          value:
+            # Standard vLLM configuration
+            - decode.parallelism.tensor=1
+            - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
+            - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
+            - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
+
+            # OTEL endpoint configuration
+            - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{ experiment.name | dns }}:4318/v1/traces
+            - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_ENDPOINT"].value=http://otel-{{ experiment.name | dns }}:4318
+            - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"].value=http://otel-{{ experiment.name | dns }}:4318
+            - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/$(params.experimentId)/vllm_logging.json"
+
+            # Journey tracing
+            {% if stack.tracing.journey %}
+            - decode.containers[name="vllm"].args=--enable-journey-tracing
+            {% endif %}
+
+            # Step tracing
+            {% if stack.tracing.step.enabled %}
+            - decode.containers[name="vllm"].args=--step-tracing-enabled
+            - decode.containers[name="vllm"].args=--step-tracing-sample-rate={{ stack.tracing.step.sample_rate }}
+            - decode.containers[name="vllm"].args=--step-tracing-rich-subsample-rate={{ stack.tracing.step.rich_subsample_rate }}
+            - decode.containers[name="vllm"].args=--step-tracing-closure-interval={{ stack.tracing.step.closure_interval }}
+            {% endif %}
+
+            # KV cache events
+            {% if stack.tracing.kv_events.enabled %}
+            - 'decode.containers[name="vllm"].args=--kv-events-config={"enable_kv_cache_events": true, "publisher": "{{ stack.tracing.kv_events.publisher }}", "endpoint": "tcp://*:5557", "replay_endpoint": "tcp://*:5558", "topic": "kv-events"}'
+            - decode.containers[name="vllm"].args=--kv-offloading-size={{ stack.tracing.kv_events.offloading_size }}
+
+            # Update KV events subscriber output path
+            - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/$(params.experimentId)/kv_events.jsonl
+            {% endif %}
+
+    - name: run-workload
+      description: Run workload to generate observability data
+      taskRef: { name: run-workload-{{ workload.harness }} }
+      runAfter: [ "deploy-model" ]
+      timeout: "350m"
+      retries: 3
+      workspaces:
+        - name: data
+        - name: hf-credentials
+      params:
+        - { name: modelLabel, value: "{{ experiment.name | dns }}"}
+        - { name: results_dir, value: "$(params.experimentId)" }
+        - { name: max_requests, value: "{{ stack.workload.profile.max_requests }}" }
+        - { name: rate, value: "{{ stack.workload.profile.rate }}" }
+        - { name: rate_type, value: "{{ stack.workload.profile.rate_type }}" }
+        - { name: random_seed, value: "{{ stack.workload.profile.random_seed }}" }
+        - { name: prefix_tokens, value: "{{ stack.workload.profile.data.prefix_tokens }}" }
+        - { name: prompt_tokens, value: "{{ stack.workload.profile.data.prompt_tokens }}" }
+        - { name: prompt_tokens_stdev, value: "{{ stack.workload.profile.data.prompt_tokens_stdev }}" }
+        - { name: prompt_tokens_min, value: "{{ stack.workload.profile.data.prompt_tokens_min }}" }
+        - { name: prompt_tokens_max, value: "{{ stack.workload.profile.data.prompt_tokens_max }}" }
+        - { name: output_tokens, value: "{{ stack.workload.profile.data.output_tokens }}" }
+        - { name: output_tokens_stdev, value: "{{ stack.workload.profile.data.output_tokens_stdev }}" }
+        - { name: output_tokens_min, value: "{{ stack.workload.profile.data.output_tokens_min }}" }
+        - { name: output_tokens_max, value: "{{ stack.workload.profile.data.output_tokens_max }}" }
+
+    - name: collect-kv-events
+      description: Collect KV cache events from vLLM pod
+      taskRef: { name: collect-kv-events }
+      runAfter: [ "run-workload" ]
+      workspaces:
+        - name: data
+      params:
+        - { name: results_dir, value: "$(params.experimentId)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}" }
+        - { name: namespace, value: "$(params.namespace)" }
+
+    - name: delete-model
+      description: Delete the model engine
+      runAfter: [ "collect-kv-events" ]
+      taskRef: { name: delete-model }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}" }
+        - { name: debug, value: "$(params.debug)" }
+
+    - name: delete-otel-collector
+      description: Delete the OTEL collector
+      runAfter: [ "collect-kv-events" ]
+      taskRef: { name: delete-otel-collector }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}" }
+        - { name: debug, value: "$(params.debug)" }
+
+  finally:
+    - name: finally-delete-model
+      taskRef: { name: delete-model }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}" }
+        - { name: debug, value: "$(params.debug)" }
+
+    - name: finally-delete-otel-collector
+      taskRef: { name: delete-otel-collector }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "{{ experiment.name | dns }}" }
+        - { name: debug, value: "$(params.debug)" }

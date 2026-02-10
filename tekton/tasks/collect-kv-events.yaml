@@ -1,0 +1,66 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-kv-events
+spec:
+  description: Collects KV cache events from vLLM pod to data workspace
+  params:
+    - name: results_dir
+      type: string
+      description: Directory where KV events will be stored
+    - name: modelLabel
+      type: string
+      description: Label of the deployed model
+    - name: namespace
+      type: string
+      description: Kubernetes namespace
+      default: diya
+  workspaces:
+    - name: data
+      description: Workspace for storing KV events
+  steps:
+    - name: collect-kv-events
+      image: bitnami/kubectl:latest
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "Collecting KV events from deployment: $(params.modelLabel)-decode"
+
+        # Get the pod name using the correct label
+        POD_NAME=$(kubectl get pods -n $(params.namespace) \
+          -l llm-d.ai/model=$(params.modelLabel) \
+          -o jsonpath='{.items[0].metadata.name}')
+
+        if [ -z "$POD_NAME" ]; then
+          echo "Warning: Could not find pod for $(params.modelLabel)-model-decode"
+          echo "KV events may not have been collected"
+          exit 0
+        fi
+
+        echo "Found pod: $POD_NAME"
+
+        # Check if kv_events.jsonl exists in the pod
+        if kubectl exec -n $(params.namespace) $POD_NAME -c kv-events-subscriber -- test -f /mnt/exp/$(params.results_dir)/kv_events.jsonl 2>/dev/null; then
+          echo "KV events file found, collecting..."
+
+          # Copy KV events from pod to data workspace
+          kubectl cp -n $(params.namespace) \
+            $POD_NAME:/mnt/exp/$(params.results_dir)/kv_events.jsonl \
+            $(workspaces.data.path)/$(params.results_dir)/kv_events.jsonl \
+            -c kv-events-subscriber
+
+          # Count events
+          EVENT_COUNT=$(cat $(workspaces.data.path)/$(params.results_dir)/kv_events.jsonl | wc -l)
+          echo "Collected $EVENT_COUNT KV event records"
+
+          # Create summary
+          cat $(workspaces.data.path)/$(params.results_dir)/kv_events.jsonl | \
+            jq -r '.[1][][0]' | sort | uniq -c > \
+            $(workspaces.data.path)/$(params.results_dir)/kv_events_summary.txt || true
+
+          echo "KV events collection complete"
+        else
+          echo "Warning: kv_events.jsonl not found in pod"
+          echo "This may be expected if KV offloading was not triggered"
+        fi

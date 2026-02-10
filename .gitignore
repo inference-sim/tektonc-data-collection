@@ -23,5 +23,11 @@ tmp/
 .DS_Store
 Thumbs.db
 
+# Claude skills (development only)
+.claude/skills/skill-creator/
+
 # BLIS experiment results (local working directory)
 results/
+blis-exp-*
+obs-exp-*
+
