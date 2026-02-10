@@ -3,7 +3,8 @@ name: blis-data-collector
 description: |
   Automates BLIS LLM data collection pipeline on Tekton.
   Handles cluster validation, pipeline deployment, monitoring, and data retrieval.
-  Supports custom vLLM images and arguments.
+  Supports custom vLLM images and observability features (journey tracing, step tracing, KV events).
+  Use for benchmarking (/blis) or deep debugging (/blis --observability).
 triggers:
   - /blis-data-collector
   - /blis
@@ -29,6 +30,7 @@ You are the BLIS Data Collector, an automation assistant for running LLM benchma
 3. **Silent validation** - Run checks quietly, surface only failures
 4. **Colored output** - Use ANSI colors for visual hierarchy
 5. **Background monitoring** - Deploy and monitor without blocking
+6. **Automatic data retrieval** - Download results from cluster when pipeline succeeds
 
 ## Color Scheme (ANSI)
 
@@ -112,6 +114,26 @@ If user provides parameters in natural language (e.g., `/blis llama3-8b chatswee
 **Required:** model, namespace
 **Optional (have smart defaults):** workload, TP, vLLM settings
 
+**Observability Mode Detection:**
+
+If user specifies `--observability`, `--obs`, or explicitly mentions tracing/KV events, switch to observability mode:
+- Use `tektoncsample/blis-observability/` templates instead of `tektoncsample/blis/`
+- Add tracing configuration questions
+- Default namespace to `diya` instead of prompting
+
+```bash
+# Detect observability mode from user input
+OBSERVABILITY_MODE=false
+if [[ "$USER_INPUT" =~ (--observability|--obs|tracing|kv.events) ]]; then
+  OBSERVABILITY_MODE=true
+  TEMPLATE_DIR="tektoncsample/blis-observability"
+  DEFAULT_NAMESPACE="diya"
+else
+  TEMPLATE_DIR="tektoncsample/blis"
+  DEFAULT_NAMESPACE=""  # Will prompt
+fi
+```
+
 ```yaml
 # Example AskUserQuestion structure
 questions:
@@ -149,6 +171,38 @@ questions:
         description: "Your default namespace"
       - label: "blis-dev"
         description: "Shared dev namespace"
+
+  # If observability mode, ask for each tracing feature explicitly
+  - question: "Enable journey tracing? (Per-request OTEL spans tracking full request lifecycle)"
+    header: "Journey"
+    multiSelect: false
+    options:
+      - label: "Yes (Recommended)"
+        description: "<1% overhead, essential for request latency analysis"
+      - label: "No"
+        description: "Skip journey tracing"
+
+  - question: "Enable step tracing? (Scheduler step metrics exported as OTEL spans)"
+    header: "Step Tracing"
+    multiSelect: false
+    options:
+      - label: "Yes at 10% sampling (Recommended)"
+        description: "5-8% overhead, good for debugging scheduler behavior"
+      - label: "Yes at 1% sampling"
+        description: "~2% overhead, minimal visibility"
+      - label: "Yes at 100% sampling"
+        description: "High overhead, full visibility for development"
+      - label: "No"
+        description: "Skip step tracing"
+
+  - question: "Enable KV cache events? (Block-level cache operations via ZMQ)"
+    header: "KV Events"
+    multiSelect: false
+    options:
+      - label: "Yes (Recommended)"
+        description: "3-5% overhead, essential for cache behavior analysis"
+      - label: "No"
+        description: "Skip KV events collection"
 ```
 
 **Ambiguous Model Handling:**
@@ -316,6 +370,16 @@ if [ "${MODEL_SIZE_GB}" -gt 50 ]; then
   echo -e "  \033[33m⚠\033[0m \033[90mLarge model (${MODEL_SIZE_GB}GB) - download may take ${DOWNLOAD_TIME} if not cached\033[0m"
 fi
 
+# If observability mode, show tracing config
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo ""
+  echo -e "  \033[34mTracing:\033[0m"
+  [ "${JOURNEY_TRACING}" = "true" ] && echo -e "    \033[32m✓\033[0m Journey (<1% overhead)"
+  [ "${STEP_TRACING}" = "true" ] && echo -e "    \033[32m✓\033[0m Step @ ${STEP_SAMPLE_RATE}% sample"
+  [ "${KV_EVENTS}" = "true" ] && echo -e "    \033[32m✓\033[0m KV events (3-5% overhead)"
+  echo -e "  \033[34mOutput:\033[0m   results/${EXPERIMENT_ID}/traces.json, kv_events.jsonl"
+fi
+
 echo ""
 echo -e "\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 ```
@@ -352,10 +416,14 @@ Then ask: **"Deploy? [Y/n]"** (single confirmation)
 
 ### Phase 4: Deploy
 
-Show progress with colored spinners/status:
+Show progress with colored spinners/status.
+
+**IMPORTANT:** All operations below only READ from `tekton/` and `tektonc/` directories. All generated files go to `results/${EXPERIMENT_ID}/`.
+
+**CRITICAL BUG FIX:** The pipelinerun.yaml generation MUST update the `params` section to match user input. The base template contains hardcoded values that will override values.yaml if not updated. See Phase 3 setup for correct implementation.
 
 ```bash
-# Apply RBAC and verify service account
+# Apply RBAC (read-only from tekton/roles.yaml)
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
 export NAMESPACE=${NAMESPACE}
 envsubst < tekton/roles.yaml | kubectl apply -f - >/dev/null 2>&1
@@ -376,7 +444,7 @@ echo -e "\033[32m✓\033[0m Tasks applied"
 echo -e "\033[34m⠋\033[0m Building pipeline..."
 source venv/bin/activate
 python tektonc/tektonc.py \
-  -t tektoncsample/blis/data_pipeline.yaml.j2 \
+  -t ${TEMPLATE_DIR}/pipeline.yaml.j2 \
   -f results/${EXPERIMENT_ID}/values.yaml \
   -r results/${EXPERIMENT_ID}/pipelinerun.yaml \
   -o results/${EXPERIMENT_ID}/pipeline.yaml 2>/dev/null
@@ -471,6 +539,84 @@ Task tool with:
   and report back."
 ```
 
+### Phase 6: Download Results (On Success)
+
+**IMPORTANT:** This phase runs automatically when the background monitoring agent reports success.
+
+When the background agent reports that the pipeline succeeded, immediately execute this phase to download results from the cluster PVC to local storage.
+
+```bash
+# Download data from cluster PVC
+echo ""
+echo -e "\033[1;36m━━━ Downloading Results ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[34m⠋\033[0m Downloading data from cluster..."
+
+mkdir -p results/${EXPERIMENT_ID}/data
+
+# Create temporary pod to access data-pvc
+kubectl run data-copy-${EXPERIMENT_ID} \
+  --image=busybox \
+  --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"data-copy-'${EXPERIMENT_ID}'","image":"busybox","command":["sleep","300"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}]}}' \
+  -n ${NAMESPACE} >/dev/null 2>&1
+
+# Wait for pod to be ready
+kubectl wait --for=condition=Ready pod/data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --timeout=60s >/dev/null 2>&1
+
+# Copy data from PVC to local
+kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID} results/${EXPERIMENT_ID}/data/ 2>/dev/null
+
+# Cleanup temporary pod
+kubectl delete pod data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+
+echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+
+# Optional: Cleanup cluster resources
+echo -e "\033[34m⠋\033[0m Cleaning up cluster resources..."
+kubectl delete pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
+echo -e "\033[32m✓\033[0m Cluster resources cleaned up"
+```
+
+**Display completion summary:**
+```bash
+echo ""
+echo -e "\033[32m━━━ Experiment Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfully"
+echo ""
+echo -e "  \033[34mLocal Data:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "  \033[34mS3 Backup:\033[0m   s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
+echo ""
+
+# If observability mode, show trace files and analysis commands
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo -e "  \033[34mObservability Data:\033[0m"
+
+  # List downloaded trace files
+  if [ -f "results/${EXPERIMENT_ID}/data/traces.json" ]; then
+    echo -e "    \033[32m✓\033[0m OTEL traces (traces.json)"
+  fi
+  if [ -f "results/${EXPERIMENT_ID}/data/kv_events.jsonl" ]; then
+    echo -e "    \033[32m✓\033[0m KV events (kv_events.jsonl)"
+  fi
+  if [ -f "results/${EXPERIMENT_ID}/data/guidellm-results.json" ]; then
+    echo -e "    \033[32m✓\033[0m Benchmark results (guidellm-results.json)"
+  fi
+
+  echo ""
+  echo -e "  \033[90mQuick analysis:\033[0m"
+  echo -e "  \033[90m  # Trace span types:\033[0m"
+  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/data/traces.json | sort | uniq -c\033[0m"
+  echo ""
+  echo -e "  \033[90m  # KV event types:\033[0m"
+  echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/data/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+fi
+
+echo ""
+echo -e "  \033[90mView results: /blis-results-viewer ${EXPERIMENT_ID}\033[0m"
+echo -e "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+```
+
 ---
 
 ## Error Handling (Colored)
@@ -536,6 +682,8 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 
 ## Completion States
 
+**NOTE:** The completion logic below is implemented in Phase 6 of the workflow. This section serves as reference documentation.
+
 ### Success
 
 **Download data from cluster PVC:**
@@ -575,6 +723,21 @@ echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfu
 echo ""
 echo -e "  \033[34mData:\033[0m    results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
 echo -e "  \033[34mS3:\033[0m      s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
+
+# If observability mode, show trace extraction commands
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo ""
+  echo -e "  \033[34mTraces:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/traces.json"
+  echo -e "  \033[34mKV events:\033[0m results/\033[35m${EXPERIMENT_ID}\033[0m/kv_events.jsonl"
+  echo ""
+  echo -e "  \033[90mAnalyze traces:\033[0m"
+  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' traces.json | sort | uniq -c\033[0m"
+  echo -e "  \033[90mCount KV events:\033[0m"
+  echo -e "  \033[90m  cat kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+fi
+
+echo ""
+echo -e "  \033[90mCleanup: tkn pr delete ${EXPERIMENT_ID} -n ${NAMESPACE} -f\033[0m"
 echo -e "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 ```
 
@@ -592,14 +755,16 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 
 ## Important Rules
 
-1. **NEVER** modify original `values.yaml` or `pipelinerun.yaml` files
-2. **ALWAYS** use `results/${EXPERIMENT_ID}/` for generated files
-3. **ALWAYS** use colored output with the defined color scheme
-4. **MINIMIZE** user prompts - gather info in 1-2 consolidated questions
-5. **SHOW** only changes from defaults, not full config
-6. **RUN** pre-flight checks silently, summarize in one line
-7. **WARN** about large models inline, not as separate step
-8. **USE** background agent for monitoring
+1. **NEVER** modify anything in `tekton/` directory (tasks, steps, roles)
+2. **NEVER** modify anything in `tektonc/` directory (compiler code)
+3. **NEVER** modify original `values.yaml` or `pipelinerun.yaml` files in `tektoncsample/`
+4. **ALWAYS** use `results/${EXPERIMENT_ID}/` for generated files
+5. **ALWAYS** use colored output with the defined color scheme
+6. **MINIMIZE** user prompts - gather info in 1-2 consolidated questions
+7. **SHOW** only changes from defaults, not full config
+8. **RUN** pre-flight checks silently, summarize in one line
+9. **WARN** about large models inline, not as separate step
+10. **USE** background agent for monitoring
 
 ## Quick Examples
 
@@ -615,4 +780,13 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 
 # Custom workload
 /blis mistral-7b custom prompt=500 output=100 in blis-dev
+
+# Observability mode (journey + step + KV tracing)
+/blis llama3-8b chatsweep --observability
+
+# Observability with specific tracing
+/blis mistral-7b codesweep --obs journey step
+
+# Custom tracing sample rate
+/blis qwen-7b custom --observability step-rate=0.05
 ```
