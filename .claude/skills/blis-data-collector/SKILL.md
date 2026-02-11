@@ -444,7 +444,7 @@ echo -e "\033[32m✓\033[0m Tasks applied"
 echo -e "\033[34m⠋\033[0m Building pipeline..."
 source venv/bin/activate
 python tektonc/tektonc.py \
-  -t ${TEMPLATE_DIR}/pipeline.yaml.j2 \
+  -t ${TEMPLATE_DIR}/data_pipeline.yaml.j2 \
   -f results/${EXPERIMENT_ID}/values.yaml \
   -r results/${EXPERIMENT_ID}/pipelinerun.yaml \
   -o results/${EXPERIMENT_ID}/pipeline.yaml 2>/dev/null
@@ -551,7 +551,7 @@ echo ""
 echo -e "\033[1;36m━━━ Downloading Results ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo -e "\033[34m⠋\033[0m Downloading data from cluster..."
 
-mkdir -p results/${EXPERIMENT_ID}/data
+mkdir -p results/${EXPERIMENT_ID}
 
 # Create temporary pod to access data-pvc
 kubectl run data-copy-${EXPERIMENT_ID} \
@@ -564,12 +564,12 @@ kubectl run data-copy-${EXPERIMENT_ID} \
 kubectl wait --for=condition=Ready pod/data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --timeout=60s >/dev/null 2>&1
 
 # Copy data from PVC to local
-kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID} results/${EXPERIMENT_ID}/data/ 2>/dev/null
+kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID}/ results/${EXPERIMENT_ID}/ 2>/dev/null
 
 # Cleanup temporary pod
 kubectl delete pod data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
 
-echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/"
 
 # Optional: Cleanup cluster resources
 echo -e "\033[34m⠋\033[0m Cleaning up cluster resources..."
@@ -584,7 +584,7 @@ echo ""
 echo -e "\033[32m━━━ Experiment Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfully"
 echo ""
-echo -e "  \033[34mLocal Data:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "  \033[34mLocal Data:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/"
 echo -e "  \033[34mS3 Backup:\033[0m   s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
 echo ""
 
@@ -593,23 +593,23 @@ if [ "${OBSERVABILITY_MODE}" = "true" ]; then
   echo -e "  \033[34mObservability Data:\033[0m"
 
   # List downloaded trace files
-  if [ -f "results/${EXPERIMENT_ID}/data/traces.json" ]; then
+  if [ -f "results/${EXPERIMENT_ID}/traces.json" ]; then
     echo -e "    \033[32m✓\033[0m OTEL traces (traces.json)"
   fi
-  if [ -f "results/${EXPERIMENT_ID}/data/kv_events.jsonl" ]; then
+  if [ -f "results/${EXPERIMENT_ID}/kv_events.jsonl" ]; then
     echo -e "    \033[32m✓\033[0m KV events (kv_events.jsonl)"
   fi
-  if [ -f "results/${EXPERIMENT_ID}/data/guidellm-results.json" ]; then
+  if [ -f "results/${EXPERIMENT_ID}/guidellm-results.json" ]; then
     echo -e "    \033[32m✓\033[0m Benchmark results (guidellm-results.json)"
   fi
 
   echo ""
   echo -e "  \033[90mQuick analysis:\033[0m"
   echo -e "  \033[90m  # Trace span types:\033[0m"
-  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/data/traces.json | sort | uniq -c\033[0m"
+  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/traces.json | sort | uniq -c\033[0m"
   echo ""
   echo -e "  \033[90m  # KV event types:\033[0m"
-  echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/data/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+  echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
 fi
 
 echo ""
@@ -689,7 +689,7 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 **Download data from cluster PVC:**
 ```bash
 echo -e "\033[34m⠋\033[0m Downloading data from cluster..."
-mkdir -p results/${EXPERIMENT_ID}/data
+mkdir -p results/${EXPERIMENT_ID}
 
 # Create temporary pod to access data-pvc
 kubectl run data-copy-${EXPERIMENT_ID} \
@@ -700,12 +700,12 @@ kubectl run data-copy-${EXPERIMENT_ID} \
 kubectl wait --for=condition=Ready pod/data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --timeout=60s >/dev/null 2>&1
 
 # Copy data from PVC to local
-kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID} results/${EXPERIMENT_ID}/data/ 2>/dev/null
+kubectl cp ${NAMESPACE}/data-copy-${EXPERIMENT_ID}:/data/${EXPERIMENT_ID}/ results/${EXPERIMENT_ID}/ 2>/dev/null
 
 # Cleanup temporary pod
 kubectl delete pod data-copy-${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false >/dev/null 2>&1
 
-echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "\033[32m✓\033[0m Data downloaded to results/\033[35m${EXPERIMENT_ID}\033[0m/"
 ```
 
 **Cleanup cluster resources:**
@@ -721,7 +721,7 @@ echo -e "\033[32m✓\033[0m Cluster resources cleaned up"
 echo -e "\033[32m━━━ Experiment Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo -e "\033[32m✓\033[0m \033[1;37m${EXPERIMENT_ID}\033[0m finished successfully"
 echo ""
-echo -e "  \033[34mData:\033[0m    results/\033[35m${EXPERIMENT_ID}\033[0m/data/"
+echo -e "  \033[34mData:\033[0m    results/\033[35m${EXPERIMENT_ID}\033[0m/"
 echo -e "  \033[34mS3:\033[0m      s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
 
 # If observability mode, show trace extraction commands
@@ -731,9 +731,9 @@ if [ "${OBSERVABILITY_MODE}" = "true" ]; then
   echo -e "  \033[34mKV events:\033[0m results/\033[35m${EXPERIMENT_ID}\033[0m/kv_events.jsonl"
   echo ""
   echo -e "  \033[90mAnalyze traces:\033[0m"
-  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' traces.json | sort | uniq -c\033[0m"
+  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/traces.json | sort | uniq -c\033[0m"
   echo -e "  \033[90mCount KV events:\033[0m"
-  echo -e "  \033[90m  cat kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+  echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
 fi
 
 echo ""
