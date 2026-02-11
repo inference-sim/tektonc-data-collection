@@ -9,7 +9,7 @@ Displays benchmark results from BLIS LLM data collection experiments.
 
 ## Data Location
 
-Results are in `results/<experiment-id>/data/guidellm-results.json`
+Results are in `results/<experiment-id>/guidellm-results.json`
 
 ## File Cleanup
 
@@ -67,7 +67,7 @@ sed -i '' 's/pod ".*" deleted from .* namespace$//' guidellm-results.json
 ```python
 import json
 
-with open('results/<experiment>/data/guidellm-results.json') as f:
+with open('results/<experiment>/guidellm-results.json') as f:
     data = json.load(f)
 
 for bench in data.get('benchmarks', []):

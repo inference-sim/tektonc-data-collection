@@ -16,7 +16,7 @@ pip install -r tektonc/requirements.txt
 ### Test template compilation (dry run)
 ```bash
 python tektonc/tektonc.py \
-  -t tektoncsample/quickstart/pipeline.yaml.j2 \
+  -t tektoncsample/quickstart/data_pipeline.yaml.j2 \
   -f tektoncsample/quickstart/values.yaml \
   --explain
 ```
@@ -87,7 +87,7 @@ tektonc -t TEMPLATE -f VALUES [-r PIPELINERUN] [-o OUTPUT] [--explain] [--debug]
 
 | Flag | Description |
 |------|-------------|
-| `-t, --template` | Jinja template file (pipeline.yaml.j2) |
+| `-t, --template` | Jinja template file (data_pipeline.yaml.j2) |
 | `-f, --values` | YAML values file |
 | `-r, --pipelinerun` | Optional PipelineRun for parameter overrides |
 | `-o, --out` | Output file (default: stdout) |
