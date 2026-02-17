@@ -1,0 +1,216 @@
+experiment:
+  name: blis-inference-perf
+  description: BLIS with inference-perf harness
+
+stack:
+  # Observability configuration
+  tracing:
+    # Journey tracing: per-request OTEL spans tracking full request lifecycle
+    journey: true
+
+    # Step tracing: scheduler step metrics exported as OTEL spans
+    step:
+      enabled: true
+      sample_rate: 0.1              # 10% of batches sampled
+      rich_subsample_rate: 0.1      # 10% of sampled batches get detailed metrics
+      closure_interval: 10          # Close spans every 10 scheduler steps
+
+    # KV cache events: block-level cache operations via ZMQ
+    kv_events:
+      enabled: true
+      publisher: "zmq"
+      offloading_size: 8.0          # CPU memory (GiB) for KV cache offloading
+
+  treatments:
+    tensorParallelism:
+      - 1
+
+  MAX_MODEL_LEN: 4096
+  MAX_NUM_BATCHED_TOKENS: 2048
+  MAX_NUM_SEQS: 128
+
+  model:
+    helmValues:
+      fullnameOverride: FULLNAME
+      serviceAccountOverride: default
+      multinode: false
+      modelArtifacts:
+        uri: pvc://model-pvc/models/MODEL
+        size: 300Gi
+        authSecretName: "hf-secret"
+        name: MODEL
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: FULLNAME
+      routing:
+        servicePort: 8000
+        proxy:
+          enabled: false
+      prefill:
+        create: false
+      decode:
+        create: true
+        replicas: 1
+        acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+              - NVIDIA-H100-80GB-HBM3
+        parallelism:
+          data: 1
+          tensor: 1
+        initContainers:
+        - name: install-otel-dependencies
+          image: ghcr.io/inference-sim/vllm:0.6.8
+          command: ["/bin/bash", "-c"]
+          args:
+          - |-
+            set -e
+            pip install --target=/deps \
+              'opentelemetry-sdk>=1.26.0,<1.27.0' \
+              'opentelemetry-api>=1.26.0,<1.27.0' \
+              'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
+              'python-json-logger' \
+              'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'
+          volumeMounts:
+            - name: deps
+              mountPath: /deps
+        containers:
+        - name: "vllm"
+          env:
+            - name: PYTHONPATH
+              value: /deps
+            - name: OTEL_SERVICE_NAME
+              value: "vllm-inference-perf"
+            - name: OTEL_TRACES_SAMPLER
+              value: "traceidratio"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "1.0"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-FULLNAME:4318"
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://otel-FULLNAME:4318"
+            - name: VLLM_CONFIGURE_LOGGING
+              value: "1"
+            - name: VLLM_LOGGING_CONFIG_PATH
+              value: "/workspace/vllm_logging.json"
+            # Fix cache permission issue
+            - name: HF_HOME
+              value: "/mnt/exp/.cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/mnt/exp/.cache/huggingface"
+          mountModelVolume: true
+          image: "ghcr.io/inference-sim/vllm:0.6.8"
+          modelCommand: vllmServe
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: "32"
+            requests:
+              memory: 128Gi
+              cpu: "32"
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
+          - name: deps
+            mountPath: /deps
+
+        # KV events subscriber sidecar
+        - name: "kv-events-subscriber"
+          image: "ghcr.io/inference-sim/vllm:0.6.8"
+          modelCommand: custom
+          command: ["python3"]
+          args: ["examples/online_serving/kv_events_subscriber.py"]
+          env:
+          - name: VLLM_KV_EVENTS_SUB_ADDR
+            value: "tcp://localhost:5557"
+          - name: VLLM_KV_EVENTS_REPLAY_ADDR
+            value: "tcp://localhost:5558"
+          - name: VLLM_KV_EVENTS_OUTPUT_FILE
+            value: "/mnt/exp/EXPERIMENTID/kv_events.jsonl"
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
+
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-pvc
+        - name: deps
+          emptyDir: {}
+
+workload:
+  harness: inference-perf
+
+  profileTemplate:
+    load:
+      type: constant
+      stages:
+      - rate: 8.0
+        duration: 600      # Low traffic period (0-600s)
+      - rate: 20.0
+        duration: 600      # Peak traffic period (600-1200s)
+
+    api:
+      type: completion
+      streaming: true
+
+    server:
+      type: vllm
+      model_name: MODEL
+      base_url: STACK_ENDPOINT
+      ignore_eos: true
+
+    tokenizer:
+      pretrained_model_name_or_path: TOKENIZER
+
+    data:
+      type: shared_prefix
+      shared_prefix:
+        num_unique_system_prompts: 9
+        num_users_per_system_prompt: 5
+        system_prompt_len: 100
+        question_len: 447
+        output_len: 248
+        enable_multi_turn_chat: true
+
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: true
+
+    storage:
+      local_storage:
+        path: PATH
+
+upload_target:
+  type: s3
+  configuration:
+    bucket: cloud-object-storage-cos-standard-ere
+    endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud

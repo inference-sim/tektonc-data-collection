@@ -1,0 +1,68 @@
+general:
+  load:
+    type: constant
+    stages:
+    - rate: 8.0
+      duration: 600      # Low traffic period (0-600s)
+    - rate: 20.0
+      duration: 600      # Peak traffic period (600-1200s)
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 9
+      num_users_per_system_prompt: 5     # 45 clients total
+      system_prompt_len: 100             # Prefix tokens
+      question_len: 447                  # 547 - 100 = 447
+      output_len: 248
+      enable_multi_turn_chat: true
+codegen:
+  load:
+    type: constant
+    stages:
+    - rate: 5.0
+      duration: 600      # Low activity period
+    - rate: 10.0
+      duration: 600      # Development peak period
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 11
+      num_users_per_system_prompt: 4     # 44 clients total
+      system_prompt_len: 100             # Prefix tokens
+      question_len: 466                  # 566 - 100 = 466
+      output_len: 247
+      enable_multi_turn_chat: true
+roleplay:
+  load:
+    type: constant
+    stages:
+    - rate: 6.0
+      duration: 1200        # Steady rate throughout
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 10
+      num_users_per_system_prompt: 5     # 50 clients total
+      system_prompt_len: 150             # Prefix tokens
+      question_len: 600                  # 750 - 150 = 600
+      output_len: 251
+      enable_multi_turn_chat: true
+reasoning:
+  load:
+    type: constant
+    stages:
+    - rate: 4.0
+      duration: 1200        # Steady rate throughout
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 23
+      num_users_per_system_prompt: 1     # 23 clients total
+      system_prompt_len: 100             # Prefix tokens
+      question_len: 934                  # 1034 - 100 = 934
+      output_len: 1448                   # Decode-heavy!
+      enable_multi_turn_chat: true
