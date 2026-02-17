@@ -14,7 +14,7 @@ Automated LLM benchmarking pipeline using the **inference-perf** harness on Tekt
 # Full specification
 /blis-inference-perf llama-2-7b general in diya with TP=1
 
-# Sweep mode (linear rate sweeping)
+# Sweep mode (geometric rate sweeping)
 /blis-inference-perf llama-2-7b general sweep
 ```
 
@@ -90,7 +90,7 @@ results/20260217-121756-llama-2-7b-inference-perf/
 
 ### Sweep Mode
 
-Replace workload's load stages with linear rate sweeping:
+Replace workload's load stages with geometric rate sweeping:
 
 ```bash
 # Sweep general workload

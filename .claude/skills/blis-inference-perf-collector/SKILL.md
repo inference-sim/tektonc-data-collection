@@ -169,8 +169,8 @@ questions:
     options:
       - label: "No (Recommended)"
         description: "Use workload's configured load stages"
-      - label: "Yes - Linear sweep"
-        description: "Replace load with linear sweep (rate sweeping)"
+      - label: "Yes - Geometric sweep"
+        description: "Replace load with geometric sweep (rate sweeping)"
 ```
 
 ### EXPERIMENT_ID Generation
@@ -268,7 +268,7 @@ echo -e "  \033[34mHarness:\033[0m   inference-perf"
 echo -e "  \033[34mNamespace:\033[0m ${NAMESPACE}"
 echo -e "  \033[34mWorkload:\033[0m  ${WORKLOAD_NAME}"
 if [ "${SWEEP_MODE}" = "true" ]; then
-  echo -e "  \033[34mLoad:\033[0m      \033[1;37mLinear sweep\033[0m \033[90m(constant type)\033[0m"
+  echo -e "  \033[34mLoad:\033[0m      \033[1;37mGeometric sweep\033[0m \033[90m(constant type)\033[0m"
 else
   echo -e "  \033[34mLoad:\033[0m      ${STAGE1_RATE} req/s (${STAGE1_DURATION}s)$([ -n \"$STAGE2_RATE\" ] && echo \" → ${STAGE2_RATE} req/s (${STAGE2_DURATION}s)\" || echo \"\")"
 fi
@@ -324,11 +324,11 @@ workload = workloads['${WORKLOAD_NAME}']
 
 # Determine load configuration based on sweep mode
 if '${SWEEP_MODE}' == 'true':
-    # Use linear sweep instead of stages
+    # Use geometric sweep instead of stages
     values['workload']['profileTemplate']['load'] = {
         'type': 'constant',
         'sweep': {
-            'type': 'linear'
+            'type': 'geometric'
         }
     }
 else:
@@ -542,7 +542,7 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 /blis-ip llama-2-7b roleplay in diya     # Longer conversations
 /blis-ip llama3-8b reasoning in diya     # Decode-heavy workload
 
-# Sweep mode (linear rate sweeping)
+# Sweep mode (geometric rate sweeping)
 /blis-ip llama-2-7b general sweep        # Uses general data, sweeps load
 /blis-ip llama3-8b codegen sweep         # Uses codegen data, sweeps load
 /blis-ip llama-2-7b reasoning sweep      # Uses reasoning data, sweeps load
