@@ -1,0 +1,113 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-workload-inference-perf-blis
+spec:
+  description: |
+    Run workload using inference-perf from data workspace.
+    Accepts profileTemplate in inference-perf's native format.
+
+  workspaces:
+    - name: data
+    - name: hf-credentials
+
+  params:
+    - name: model
+      type: string
+      description: Model name for substitution in profile
+    - name: modelLabel
+      type: string
+      description: Label to find model pod
+    - name: results_dir
+      type: string
+      description: Results directory path
+    - name: profileTemplate
+      type: string
+      description: inference-perf profile template with placeholders
+
+  steps:
+    - name: create-profile
+      env:
+        - name: MODEL_LABEL
+          value: "$(params.modelLabel)"
+        - name: MODEL
+          value: "$(params.model)"
+      image: alpine/kubectl:1.34.1
+      script: |
+        #!/bin/sh
+        set -eu
+
+        # Get model pod IP (same approach as guidellm)
+        podIP=$(kubectl get po -l llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=decode -o jsonpath='{.items[0].status.podIP}')
+        targetUrl="http://${podIP}:8000"
+
+        RESULTS_PATH="$(workspaces.data.path)/$(params.results_dir)/results"
+        WORKLOAD_PROFILE="$(workspaces.data.path)/$(params.results_dir)/profile.yaml"
+
+        mkdir -p "$(workspaces.data.path)/$(params.results_dir)"
+
+        # Substitute placeholders in profileTemplate
+        # MODEL -> actual model name
+        # STACK_ENDPOINT -> pod URL
+        # TOKENIZER -> model name
+        # PATH -> results path
+        cat <<'EOF' | sed \
+          -e "s|MODEL|${MODEL}|g" \
+          -e "s|STACK_ENDPOINT|${targetUrl}|g" \
+          -e "s|TOKENIZER|${MODEL}|g" \
+          -e "s|PATH|${RESULTS_PATH}|g" \
+          > "${WORKLOAD_PROFILE}"
+        $(params.profileTemplate)
+        EOF
+
+    - name: log-profile
+      image: alpine:3.20
+      script: |
+        #!/bin/sh
+        set -eu
+
+        WORKLOAD_PROFILE="$(workspaces.data.path)/$(params.results_dir)/profile.yaml"
+        echo ">>> created profile:"
+        cat "${WORKLOAD_PROFILE}"
+
+    - name: run-workload
+      image: python:3.12.9-slim-bookworm
+      computeResources:
+        requests:
+          memory: "16Gi"
+          cpu: "8"
+        limits:
+          memory: "16Gi"
+          cpu: "8"
+      script: |
+        #!/bin/bash
+        set -eu
+
+        ROOT_DIR="$(workspaces.data.path)/$(params.results_dir)"
+        WORKLOAD_PROFILE="${ROOT_DIR}/profile.yaml"
+        RESULTS_DIR="${ROOT_DIR}/results"
+
+        mkdir -p "${RESULTS_DIR}"
+
+        echo "ROOT_DIR=${ROOT_DIR}"
+        echo "WORKLOAD_PROFILE=${WORKLOAD_PROFILE}"
+        echo "RESULTS_DIR=${RESULTS_DIR}"
+
+        # Set PYTHONPATH and PATH to use inference-perf from data workspace
+        export PYTHONPATH="$(workspaces.data.path)/inference-perf"
+        export PATH="$(workspaces.data.path)/inference-perf/bin:${PATH}"
+        export HF_TOKEN=$(cat "$(workspaces.hf-credentials.path)/HF_TOKEN")
+
+        # Run inference-perf using the installed binary
+        inference-perf --config_file "${WORKLOAD_PROFILE}" \
+          > >(tee -a ${RESULTS_DIR}/stdout.log) \
+          2> >(tee -a ${RESULTS_DIR}/stderr.log >&2)
+
+        export RC=$?
+
+        # If benchmark harness returned with an error, exit here
+        if [ $RC -ne 0 ]; then
+          echo "❌ Harness returned with error $RC"
+          exit $RC
+        fi
+        echo "✅ Harness completed successfully."

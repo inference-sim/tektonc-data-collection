@@ -5,18 +5,6 @@ description: |
   Handles cluster validation, pipeline deployment, monitoring, and data retrieval.
   Supports custom vLLM images and observability features (journey tracing, step tracing, KV events).
   Use for benchmarking (/blis) or deep debugging (/blis --observability).
-triggers:
-  - /blis-data-collector
-  - /blis
-allowed_tools:
-  - Bash
-  - Read
-  - Write
-  - Edit
-  - Glob
-  - Grep
-  - AskUserQuestion
-  - Task
 ---
 
 # BLIS Data Collector Skill
@@ -312,14 +300,6 @@ else
   fi
 fi
 
-# 7. Experiment ID collision
-if kubectl get pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
-  CHECKS="${CHECKS}\033[33m⚠\033[0m id  "
-  FAILURES="${FAILURES}\n  \033[33m⚠\033[0m PipelineRun '${EXPERIMENT_ID}' already exists"
-else
-  CHECKS="${CHECKS}\033[32m✓\033[0m id  "
-fi
-
 # Display single status line
 echo -e "\033[34mPre-flight:\033[0m ${CHECKS}"
 
@@ -333,12 +313,12 @@ fi
 
 Success:
 ```
-Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ✓ secrets  ✓ pvcs  ✓ gpus(8)  ✓ id
+Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ✓ secrets  ✓ pvcs  ✓ gpus(8)
 ```
 
 With issues:
 ```
-Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ⚠ secrets  ✓ pvcs  ⚠ gpus(2/4)  ✓ id
+Pre-flight: ✓ cli  ✓ cluster  ✓ ns  ⚠ secrets  ✓ pvcs  ⚠ gpus(2/4)
   ⚠ Missing secrets (hf-secret or s3-secret)
   ⚠ Only 2 GPUs available, need 4
 ```
@@ -423,6 +403,16 @@ Show progress with colored spinners/status.
 **CRITICAL BUG FIX:** The pipelinerun.yaml generation MUST update the `params` section to match user input. The base template contains hardcoded values that will override values.yaml if not updated. See Phase 3 setup for correct implementation.
 
 ```bash
+# Cleanup existing resources if any
+if kubectl get pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
+  echo -e "\033[34m⠋\033[0m Cleaning up existing pipelinerun..."
+  kubectl delete pipelinerun ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false &>/dev/null
+  sleep 2
+fi
+if kubectl get pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
+  kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false &>/dev/null
+fi
+
 # Apply RBAC (read-only from tekton/roles.yaml)
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
 export NAMESPACE=${NAMESPACE}

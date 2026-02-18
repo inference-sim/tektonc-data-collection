@@ -1,0 +1,208 @@
+# BLIS with inference-perf pipeline
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{ experiment.name | dns }}
+spec:
+  {% if experiment.description is defined and experiment.description %}
+  description: {{ experiment.description }}
+  {% endif %}
+
+  workspaces:
+    - name: model-cache
+      description: Location where models are stored; shared by multiple model servers
+    - name: hf-credentials
+      description: Secret workspace containing a HuggingFace token
+    - name: data
+      description: Cache of results and harness installation
+    - name: target-credentials
+      description: >-
+        Secret workspace containing upload target credentials.
+        For example, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for s3.
+
+  params:
+    - name: experimentId
+      type: string
+      description: Identifier for experiment execution
+    - name: model
+      type: string
+      description: the model to be deployed
+    - name: namespace
+      type: string
+      description: Kubernetes namespace where workload will execute
+
+  tasks:
+    - name: download-model
+      taskRef: { name: download-model }
+      workspaces:
+        - name: model-cache
+        - name: hf-credentials
+      params:
+        - name: model
+          value: "$(params.model)"
+
+    - name: install-inference-perf
+      taskRef: { name: install-inference-perf-blis }
+      runAfter: [ "download-model" ]
+      workspaces:
+        - name: data
+
+    # Loop: Run stacks (different model engine configurations) in parallel
+    - loopName: per-stack
+      foreach:
+        domain:
+          tp: {{ stack.treatments.tensorParallelism }}
+
+      vars:
+        stackId: "{{ tp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}"
+
+      tasks:
+        - name: create-exp-config-{{ stackId }}
+          taskRef: { name: create-exp-config }
+          runAfter: [ "install-inference-perf" ]
+          workspaces:
+            - name: data
+          params:
+            - { name: model, value: "$(params.model)" }
+            - { name: tp, value: "{{ tp }}" }
+            - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN }}" }
+            - { name: max_num_batched_tokens, value: "{{ stack.MAX_NUM_BATCHED_TOKENS }}" }
+            - { name: max_num_seqs, value: "{{ stack.MAX_NUM_SEQS }}" }
+            - { name: app, value: "inference-perf" }
+            - { name: results_dir, value: "{{ stackModelLabel }}" }
+
+        - name: deploy-otel-collector-{{ stackId }}
+          description: >-
+            Deploy a per-experiment OpenTelemetry collector
+          taskRef: { name: create-otel-collector }
+          runAfter: [ "install-inference-perf" ]
+          workspaces:
+            - name: data
+          params:
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: results_dir ,value: "{{ stackModelLabel }}" }
+
+
+        - name: deploy-model-{{ stackId }}
+          description: >-
+            Deploy model engines.
+            Uses the modelservice helm chart.
+            The task implementation automatically overrides "modelArtifacts.name",
+            "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model",
+            and "fullnameOverride" to avoid conflicts and ensure consistency.
+          taskRef: { name: deploy-model }
+          runAfter: [ "deploy-otel-collector-{{ stackId }}" ]
+          workspaces:
+            - name: model-cache
+          params:
+            - { name: model, value: $(params.model) }
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: namespace , value: $(params.namespace) }
+            - { name: config, value: {{ stack.model.helmValues }} }
+            - name: overrides
+              value:
+                - decode.parallelism.tensor={{ tp }}
+                - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
+                - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
+                - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
+                - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{stackModelLabel}}:4318/v1/traces
+                - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
+                - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
+                - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
+
+                # Journey tracing
+                {% if stack.tracing is defined and stack.tracing.journey %}
+                - decode.containers[name="vllm"].args=--enable-journey-tracing
+                {% endif %}
+
+                # Step tracing
+                {% if stack.tracing is defined and stack.tracing.step is defined and stack.tracing.step.enabled %}
+                - decode.containers[name="vllm"].args=--step-tracing-enabled
+                - decode.containers[name="vllm"].args=--step-tracing-sample-rate={{ stack.tracing.step.sample_rate }}
+                - decode.containers[name="vllm"].args=--step-tracing-rich-subsample-rate={{ stack.tracing.step.rich_subsample_rate }}
+                - decode.containers[name="vllm"].args=--step-tracing-closure-interval={{ stack.tracing.step.closure_interval }}
+                {% endif %}
+
+                # KV cache events
+                {% if stack.tracing is defined and stack.tracing.kv_events is defined and stack.tracing.kv_events.enabled %}
+                - 'decode.containers[name="vllm"].args=--kv-events-config={"enable_kv_cache_events": true, "publisher": "{{ stack.tracing.kv_events.publisher }}", "endpoint": "tcp://*:5557", "replay_endpoint": "tcp://*:5558", "topic": "kv-events"}'
+                - decode.containers[name="vllm"].args=--kv-offloading-size={{ stack.tracing.kv_events.offloading_size }}
+
+                # Update KV events subscriber output path
+                - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
+                {% endif %}
+
+        - name: run-workload-{{ stackId }}
+          description: Run workload against model server using inference-perf.
+          taskRef: { name: run-workload-inference-perf-blis }
+          runAfter: [ "deploy-model-{{ stackId }}" ]
+          timeout: "350m"
+          retries: 3
+          workspaces:
+            - name: data
+            - name: hf-credentials
+          params:
+            - { name: model, value: "$(params.model)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: results_dir, value: "{{ stackModelLabel }}" }
+            - { name: profileTemplate, value: {{ workload.profileTemplate }} }
+
+        - name: delete-model-{{ stackId }}
+          description: Delete the model engine.
+          runAfter: [ "run-workload-{{ stackId }}" ]
+          taskRef: { name: delete-model }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+
+        - name: delete-otel-collector-{{ stackId }}
+          description: Delete the OTEL collector.
+          runAfter: [ "run-workload-{{ stackId }}" ]
+          taskRef: { name: delete-otel-collector }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+
+        {% if upload_target is defined and upload_target %}
+        - name: raw-upload-{{ stackId }}
+          description: Upload raw data to target data repository
+          taskRef: { name: upload-{{ upload_target.type }} }
+          runAfter: [ "run-workload-{{ stackId }}" ]
+          workspaces:
+            - name: data
+            - name: target-credentials
+          params:
+            - name: archive
+              value: "{{ stackModelLabel }}-raw.tar.gz"
+            - name: paths
+              value: |
+                {{ stackModelLabel }}
+            - { name: target, value: {{ upload_target.configuration }} }
+        {% endif %}
+
+
+
+  finally:
+    # Loop in 'finally': make sure all stacks are deleted when done
+    - loopName: cleanup
+      foreach:
+        domain:
+          tp: {{ stack.treatments.tensorParallelism }}
+
+      vars:
+        stackId: "{{ tp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}"
+
+      tasks:
+        - name: finally-delete-model-{{ stackId }}
+          taskRef: { name: delete-model }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+
+        - name: finally-delete-otel-collector-{{ stackId }}
+          taskRef: { name: delete-otel-collector }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }

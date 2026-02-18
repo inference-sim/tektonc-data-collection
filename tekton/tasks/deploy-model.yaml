@@ -34,7 +34,7 @@ spec:
     - name: namespace
       type: string
     - name: startupTimeout
-      default: "600"
+      default: "36000"
 
   steps:
 

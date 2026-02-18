@@ -1,0 +1,43 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: install-inference-perf-blis
+spec:
+  description: |
+    Install inference-perf packages into the shared data workspace.
+    Uses the same approach as install-guidellm for consistency with BLIS.
+
+  workspaces:
+    - name: data
+
+  params:
+    - name: git_repo_url
+      type: string
+      default: "https://github.com/kubernetes-sigs/inference-perf.git"
+      description: Git repository URL for inference-perf
+    - name: git_commit
+      type: string
+      default: "e8e0aa99c57f2ffa0912df7ba1fbd2a8a596a041"
+      description: Specific git commit to install
+
+  steps:
+    - name: install-packages
+      image: python:3.12.9-slim-bookworm
+      script: |
+        #!/bin/sh
+        set -eux
+
+        echo "🔄 Installing required tools"
+        apt-get update -y
+        apt-get install -y git
+        rm -rf /var/lib/apt/lists/*
+
+        TARGET="$(workspaces.data.path)/inference-perf"
+
+        echo "📦 Installing inference-perf into $TARGET"
+        mkdir -p "$TARGET"
+
+        pip install --target="$TARGET" \
+          "git+$(params.git_repo_url)@$(params.git_commit)"
+
+        echo "✔ Done installing inference-perf"
