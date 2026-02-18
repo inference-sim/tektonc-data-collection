@@ -27,6 +27,7 @@ Thumbs.db
 .claude/skills/skill-creator/
 
 # BLIS experiment results (local working directory)
+old_results/
 results/
 blis-exp-*
 obs-exp-*

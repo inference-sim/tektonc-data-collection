@@ -175,15 +175,20 @@ questions:
 
 ### EXPERIMENT_ID Generation
 
-Generate a DNS-1123 compatible experiment ID:
+Generate a DNS-1123 compatible experiment ID with format: `datetime-model-tp<x>-workload_type`
 
 ```bash
-# Generate base ID from date, model, and harness
-BASE_ID="${DATE}-${MODEL_SHORT}-inference-perf"
+# Generate base ID from date, model, TP, and workload
+BASE_ID="${DATE}-${MODEL_SHORT}-tp${TP}-${WORKLOAD_NAME}"
 
 # Sanitize for DNS-1123: lowercase, alphanumeric and hyphens only, max 63 chars
 EXPERIMENT_ID=$(echo "${BASE_ID}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-63)
 ```
+
+**Example IDs:**
+- `20260217-143522-llama-2-7b-tp1-general`
+- `20260217-150033-llama3-8b-tp2-codegen`
+- `20260217-161245-qwen-7b-tp1-reasoning`
 
 ### Phase 2: Silent Pre-flight
 
@@ -329,7 +334,8 @@ if '${SWEEP_MODE}' == 'true':
         'type': 'constant',
         'sweep': {
             'type': 'linear',
-            'num_stages': 2
+            'num_stages': 2,
+            'stage_duration': 600
         }
     }
 else:
