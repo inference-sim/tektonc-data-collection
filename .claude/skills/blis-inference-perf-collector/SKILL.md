@@ -3,7 +3,7 @@ name: blis-inference-perf-collector
 description: |
   Automates BLIS LLM benchmarking pipeline with inference-perf harness on Tekton.
   Handles cluster validation, pipeline deployment, monitoring, and data retrieval.
-  Supports observability features (journey tracing, step tracing, KV events).
+  Defaults to stock vLLM; observability features (journey tracing, step tracing, KV events) are opt-in via --observability/--obs.
   Use for detailed request lifecycle analysis (/blis-inference-perf, /blis-ip).
   Outputs inference-perf metrics: per_request_lifecycle_metrics.json, stage metrics, summary.
 ---
@@ -85,9 +85,9 @@ echo -e "    ${PARAM}: \033[90m${OLD}\033[0m → \033[1;37m${NEW}\033[0m"
 ## Configuration Files
 
 Load at start (read silently, no output):
-- `tektoncsample/blis-inference-perf/values.yaml` - Base configuration defaults
+- `tektoncsample/blis-inference-perf/values.yaml` - Stock vLLM configuration (default)
+- `tektoncsample/blis-inference-perf/values-observability.yaml` - Instrumented vLLM with OTEL tracing (opt-in)
 - `workloads.yaml` - Workload profile definitions (general, codegen, roleplay, reasoning)
-- Check if observability features are enabled (tracing section)
 
 ## Environment Setup
 
@@ -113,9 +113,23 @@ If user provides parameters in natural language (e.g., `/blis-ip llama-2-7b gene
 **Required:** model, namespace, workload
 **Optional (have smart defaults):** TP, vLLM settings, sweep mode
 
-**Observability Mode:**
+**Observability Mode Detection:**
 
-The blis-inference-perf pipeline ALWAYS includes observability features by default (journey tracing, step tracing, KV events). Users can disable features if needed, but default is full observability.
+Detect `--observability`, `--obs`, or explicit mentions of tracing/KV events in the user input:
+
+```bash
+# Detect observability mode from user input
+OBSERVABILITY_MODE=false
+if [[ "$USER_INPUT" =~ (--observability|--obs|tracing|kv.events) ]]; then
+  OBSERVABILITY_MODE=true
+  VALUES_FILE="values-observability.yaml"
+else
+  VALUES_FILE="values.yaml"
+fi
+```
+
+- **Default (no flag):** Stock vLLM (`vllm/vllm-openai:v0.15.1`), no OTEL tracing, no KV events, no sidecar. Uses `tektoncsample/blis-inference-perf/values.yaml`.
+- **With `--obs`:** Instrumented vLLM (`ghcr.io/inference-sim/vllm:0.15.1`), journey tracing, step tracing, KV cache events. Uses `tektoncsample/blis-inference-perf/values-observability.yaml`.
 
 **Workload Loading:**
 
@@ -280,12 +294,16 @@ fi
 echo -e "  \033[34mClients:\033[0m   ${NUM_CLIENTS} \033[90m(${NUM_PROMPTS} prompts × ${USERS_PER_PROMPT} users)\033[0m"
 echo -e "  \033[34mTokens:\033[0m    ${PROMPT_TOKENS}→${OUTPUT_TOKENS} \033[90m(prefix: ${PREFIX_TOKENS})\033[0m"
 
-# Show observability config
-echo ""
-echo -e "  \033[34mObservability:\033[0m"
-echo -e "    \033[32m✓\033[0m Journey tracing (<1% overhead)"
-echo -e "    \033[32m✓\033[0m Step tracing @ 10% sampling (5-8% overhead)"
-echo -e "    \033[32m✓\033[0m KV cache events (3-5% overhead)"
+# Show observability config (only in observability mode)
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo ""
+  echo -e "  \033[34mObservability:\033[0m \033[32menabled\033[0m"
+  echo -e "    \033[32m✓\033[0m Journey tracing (<1% overhead)"
+  echo -e "    \033[32m✓\033[0m Step tracing @ 10% sampling (5-8% overhead)"
+  echo -e "    \033[32m✓\033[0m KV cache events (3-5% overhead)"
+else
+  echo -e "  \033[34mImage:\033[0m     vllm/vllm-openai:v0.15.1 \033[90m(stock)\033[0m"
+fi
 
 # Only show changes section if there are changes
 if [ -n "${CHANGES}" ]; then
@@ -311,13 +329,13 @@ Show progress with colored spinners/status.
 echo -e "\033[34m⠋\033[0m Preparing configuration..."
 mkdir -p results/${EXPERIMENT_ID}
 
-# Read base values.yaml and workload definition
+# Read base values file (stock or observability) and workload definition
 python3 << 'PYTHON_MERGE'
 import yaml
 import sys
 
-# Load base values
-with open('tektoncsample/blis-inference-perf/values.yaml', 'r') as f:
+# Load base values (VALUES_FILE is 'values.yaml' or 'values-observability.yaml')
+with open('tektoncsample/blis-inference-perf/${VALUES_FILE}', 'r') as f:
     values = yaml.safe_load(f)
 
 # Load workload configuration
@@ -460,16 +478,18 @@ echo -e "  \033[34mLocal Data:\033[0m  results/\033[35m${EXPERIMENT_ID}\033[0m/"
 echo -e "  \033[34mS3 Backup:\033[0m   s3://${BUCKET}/${NAMESPACE}/${EXPERIMENT_ID}/"
 echo ""
 
-# Show observability data
-echo -e "  \033[34mObservability Data:\033[0m"
-if [ -f "results/${EXPERIMENT_ID}/traces.json" ]; then
-  echo -e "    \033[32m✓\033[0m OTEL traces (traces.json)"
-fi
-if [ -f "results/${EXPERIMENT_ID}/kv_events.jsonl" ]; then
-  echo -e "    \033[32m✓\033[0m KV events (kv_events.jsonl)"
+# Show observability data (only in observability mode)
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo -e "  \033[34mObservability Data:\033[0m"
+  if [ -f "results/${EXPERIMENT_ID}/traces.json" ]; then
+    echo -e "    \033[32m✓\033[0m OTEL traces (traces.json)"
+  fi
+  if [ -f "results/${EXPERIMENT_ID}/kv_events.jsonl" ]; then
+    echo -e "    \033[32m✓\033[0m KV events (kv_events.jsonl)"
+  fi
+  echo ""
 fi
 
-echo ""
 echo -e "  \033[34mInference-Perf Results:\033[0m"
 echo -e "    \033[32m✓\033[0m results/per_request_lifecycle_metrics.json"
 echo -e "    \033[32m✓\033[0m results/stage_0_lifecycle_metrics.json"
@@ -480,12 +500,15 @@ echo ""
 echo -e "  \033[90mQuick analysis:\033[0m"
 echo -e "  \033[90m  # View summary:\033[0m"
 echo -e "  \033[90m  jq '.' results/${EXPERIMENT_ID}/results/summary_lifecycle_metrics.json\033[0m"
-echo ""
-echo -e "  \033[90m  # Trace span types:\033[0m"
-echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/traces.json | sort | uniq -c\033[0m"
-echo ""
-echo -e "  \033[90m  # KV event types:\033[0m"
-echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+
+if [ "${OBSERVABILITY_MODE}" = "true" ]; then
+  echo ""
+  echo -e "  \033[90m  # Trace span types:\033[0m"
+  echo -e "  \033[90m  jq '.resourceSpans[].scopeSpans[].spans[].name' results/${EXPERIMENT_ID}/traces.json | sort | uniq -c\033[0m"
+  echo ""
+  echo -e "  \033[90m  # KV event types:\033[0m"
+  echo -e "  \033[90m  cat results/${EXPERIMENT_ID}/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c\033[0m"
+fi
 
 echo ""
 echo -e "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
@@ -535,7 +558,7 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 ## Quick Examples
 
 ```bash
-# Minimal (will prompt for namespace, workload, and load mode)
+# Minimal — stock vLLM, no observability (will prompt for namespace, workload, and load mode)
 /blis-ip llama-2-7b
 
 # With workload specification (uses configured stages)
@@ -553,4 +576,9 @@ echo -e "\033[1;31m━━━━━━━━━━━━━━━━━━━━�
 /blis-ip llama-2-7b general sweep        # Uses general data, sweeps load
 /blis-ip llama3-8b codegen sweep         # Uses codegen data, sweeps load
 /blis-ip llama-2-7b reasoning sweep      # Uses reasoning data, sweeps load
+
+# With observability (instrumented vLLM + OTEL tracing + KV events)
+/blis-ip llama-2-7b general --obs                # Observability enabled
+/blis-ip llama-2-7b general in diya --obs        # Full spec + observability
+/blis-ip llama3-8b codegen sweep --observability  # Sweep + observability
 ```

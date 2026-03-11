@@ -3,6 +3,24 @@ experiment:
   description: BLIS with inference-perf harness
 
 stack:
+  # Observability configuration
+  tracing:
+    # Journey tracing: per-request OTEL spans tracking full request lifecycle
+    journey: true
+
+    # Step tracing: scheduler step metrics exported as OTEL spans
+    step:
+      enabled: true
+      sample_rate: 0.1              # 10% of batches sampled
+      rich_subsample_rate: 0.1      # 10% of sampled batches get detailed metrics
+      closure_interval: 10          # Close spans every 10 scheduler steps
+
+    # KV cache events: block-level cache operations via ZMQ
+    kv_events:
+      enabled: true
+      publisher: "zmq"
+      offloading_size: 8.0          # CPU memory (GiB) for KV cache offloading
+
   treatments:
     tensorParallelism:
       - 1
@@ -40,9 +58,43 @@ stack:
         parallelism:
           data: 1
           tensor: 1
+        initContainers:
+        - name: install-otel-dependencies
+          image: ghcr.io/inference-sim/vllm:0.15.1
+          command: ["/bin/bash", "-c"]
+          args:
+          - |-
+            set -e
+            pip install --target=/deps \
+              'opentelemetry-sdk>=1.26.0,<1.27.0' \
+              'opentelemetry-api>=1.26.0,<1.27.0' \
+              'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
+              'python-json-logger' \
+              'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'
+          volumeMounts:
+            - name: deps
+              mountPath: /deps
         containers:
         - name: "vllm"
           env:
+            - name: PYTHONPATH
+              value: /deps
+            - name: OTEL_SERVICE_NAME
+              value: "vllm-inference-perf"
+            - name: OTEL_TRACES_SAMPLER
+              value: "traceidratio"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "1.0"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-FULLNAME:4318"
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://otel-FULLNAME:4318"
             - name: VLLM_CONFIGURE_LOGGING
               value: "1"
             - name: VLLM_LOGGING_CONFIG_PATH
@@ -53,7 +105,7 @@ stack:
             - name: TRANSFORMERS_CACHE
               value: "/mnt/exp/.cache/huggingface"
           mountModelVolume: true
-          image: "vllm/vllm-openai:v0.15.1"
+          image: "ghcr.io/inference-sim/vllm:0.15.1"
           modelCommand: vllmServe
           resources:
             limits:
@@ -85,11 +137,32 @@ stack:
           volumeMounts:
           - name: data
             mountPath: /mnt/exp
+          - name: deps
+            mountPath: /deps
+
+        # KV events subscriber sidecar
+        - name: "kv-events-subscriber"
+          image: "ghcr.io/inference-sim/vllm:0.15.1"
+          modelCommand: custom
+          command: ["python3"]
+          args: ["examples/online_serving/kv_events_subscriber.py"]
+          env:
+          - name: VLLM_KV_EVENTS_SUB_ADDR
+            value: "tcp://localhost:5557"
+          - name: VLLM_KV_EVENTS_REPLAY_ADDR
+            value: "tcp://localhost:5558"
+          - name: VLLM_KV_EVENTS_OUTPUT_FILE
+            value: "/mnt/exp/EXPERIMENTID/kv_events.jsonl"
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
 
         volumes:
         - name: data
           persistentVolumeClaim:
             claimName: data-pvc
+        - name: deps
+          emptyDir: {}
 
 workload:
   harness: inference-perf
