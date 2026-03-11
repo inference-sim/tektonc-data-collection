@@ -72,6 +72,7 @@ spec:
             - { name: app, value: "inference-perf" }
             - { name: results_dir, value: "{{ stackModelLabel }}" }
 
+        {% if stack.tracing is defined %}
         - name: deploy-otel-collector-{{ stackId }}
           description: >-
             Deploy a per-experiment OpenTelemetry collector
@@ -82,7 +83,7 @@ spec:
           params:
             - { name: modelLabel, value: "{{ stackModelLabel }}"}
             - { name: results_dir ,value: "{{ stackModelLabel }}" }
-
+        {% endif %}
 
         - name: deploy-model-{{ stackId }}
           description: >-
@@ -92,7 +93,7 @@ spec:
             "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model",
             and "fullnameOverride" to avoid conflicts and ensure consistency.
           taskRef: { name: deploy-model }
-          runAfter: [ "deploy-otel-collector-{{ stackId }}" ]
+          runAfter: [ "{% if stack.tracing is defined %}deploy-otel-collector-{{ stackId }}{% else %}install-inference-perf{% endif %}" ]
           workspaces:
             - name: model-cache
           params:
@@ -106,10 +107,12 @@ spec:
                 - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
                 - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
                 - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
+                - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
+                {% if stack.tracing is defined %}
                 - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{stackModelLabel}}:4318/v1/traces
                 - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
                 - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
-                - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
+                {% endif %}
 
                 # Journey tracing
                 {% if stack.tracing is defined and stack.tracing.journey %}
@@ -156,6 +159,7 @@ spec:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
 
+        {% if stack.tracing is defined %}
         - name: delete-otel-collector-{{ stackId }}
           description: Delete the OTEL collector.
           runAfter: [ "run-workload-{{ stackId }}" ]
@@ -163,6 +167,7 @@ spec:
           params:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
+        {% endif %}
 
         {% if upload_target is defined and upload_target %}
         - name: raw-upload-{{ stackId }}
@@ -201,8 +206,10 @@ spec:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
 
+        {% if stack.tracing is defined %}
         - name: finally-delete-otel-collector-{{ stackId }}
           taskRef: { name: delete-otel-collector }
           params:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
+        {% endif %}

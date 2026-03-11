@@ -2,10 +2,12 @@
 
 Automated LLM benchmarking pipeline using the **inference-perf** harness on Tekton. Provides detailed per-request lifecycle metrics for deep performance analysis.
 
+Defaults to **stock vLLM** (`vllm/vllm-openai:v0.15.1`). Observability features (OTEL tracing, KV cache events) are opt-in via `--obs`.
+
 ## Quick Start
 
 ```bash
-# Basic usage (will prompt for details)
+# Basic usage — stock vLLM, no observability (will prompt for details)
 /blis-inference-perf llama-2-7b
 
 # With workload profile
@@ -16,6 +18,9 @@ Automated LLM benchmarking pipeline using the **inference-perf** harness on Tekt
 
 # Sweep mode (linear rate sweeping)
 /blis-inference-perf llama-2-7b general sweep
+
+# With observability (instrumented vLLM + OTEL tracing + KV events)
+/blis-inference-perf llama-2-7b general --obs
 ```
 
 ## Key Features
@@ -25,10 +30,15 @@ Automated LLM benchmarking pipeline using the **inference-perf** harness on Tekt
 - **Stage metrics**: Prefill/decode stage breakdowns
 - **Layer-level timing**: Per-layer execution analysis
 
-### Built-in Observability
+### Opt-in Observability (`--obs`)
+
+Add `--obs` or `--observability` to enable the instrumented vLLM image and full observability stack:
+
 - Journey tracing (<1% overhead)
 - Step tracing at 10% sampling (5-8% overhead)
 - KV cache event tracking (3-5% overhead)
+
+Without `--obs`, the pipeline uses stock vLLM with zero observability overhead.
 
 ### Workload Profiles
 - **general**: Balanced workload (8.0→20.0 req/s, 45 clients)
@@ -60,8 +70,8 @@ results/20260217-121756-llama-2-7b-inference-perf/
 │   ├── stage_0_lifecycle_metrics.json         # Stage 1 metrics
 │   ├── stage_1_lifecycle_metrics.json         # Stage 2 metrics (if multi-stage)
 │   └── summary_lifecycle_metrics.json         # Aggregated summary
-├── traces.json                                # OTEL traces
-└── kv_events.jsonl                            # KV cache events
+├── traces.json                                # OTEL traces (--obs only)
+└── kv_events.jsonl                            # KV cache events (--obs only)
 ```
 
 ## Prerequisites
@@ -75,7 +85,7 @@ results/20260217-121756-llama-2-7b-inference-perf/
 
 ## Examples
 
-### Standard Benchmarking
+### Standard Benchmarking (stock vLLM)
 
 ```bash
 # General workload with configured load stages
@@ -98,6 +108,21 @@ Replace workload's load stages with linear rate sweeping:
 
 # Sweep codegen data with rate variations
 /blis-inference-perf llama3-8b codegen sweep in diya
+```
+
+### With Observability
+
+Enable the instrumented vLLM image, OTEL collector, and KV events sidecar:
+
+```bash
+# General workload + observability
+/blis-inference-perf llama-2-7b general --obs
+
+# Full specification + observability
+/blis-inference-perf llama-2-7b general in diya with TP=1 --observability
+
+# Sweep + observability
+/blis-inference-perf llama3-8b codegen sweep --obs
 ```
 
 ## Monitoring
@@ -123,7 +148,11 @@ jq '.' results/<experiment-id>/results/summary_lifecycle_metrics.json
 
 # Extract per-request TTFT
 jq '.requests[].ttft' results/<experiment-id>/results/per_request_lifecycle_metrics.json
+```
 
+With `--obs`, you also get:
+
+```bash
 # Trace span types
 jq '.resourceSpans[].scopeSpans[].spans[].name' results/<experiment-id>/traces.json | sort | uniq -c
 
@@ -134,32 +163,18 @@ cat results/<experiment-id>/kv_events.jsonl | jq -r '.[1][][0]' | sort | uniq -c
 ## Template Files
 
 - `data_pipeline.yaml.j2`: Main Tekton pipeline template with loop constructs
-- `values.yaml`: Default configuration (models, resources, observability)
+- `values.yaml`: Stock vLLM configuration (default)
+- `values-observability.yaml`: Instrumented vLLM with OTEL tracing (used with `--obs`)
 - `pipeline.yaml`: Compiled pipeline (generated during setup)
-- `pipelinerun.yaml`: Pipeline run instance (generated during setup)
 
 ## Customization
 
-To modify defaults, edit `values.yaml` in this directory before running the skill. Common changes:
+Two values files control the pipeline behavior:
 
-```yaml
-# vLLM settings
-vllm:
-  tensorParallel: 2
-  gpuMemoryUtilization: 0.9
+- **`values.yaml`** (default) — stock `vllm/vllm-openai:v0.15.1`, no observability overhead
+- **`values-observability.yaml`** (with `--obs`) — instrumented `ghcr.io/inference-sim/vllm:0.15.1` with OTEL tracing, step tracing, and KV cache events
 
-# Observability (all enabled by default)
-tracing:
-  enabled: true
-  stepSampleRate: 0.1
-  logKvEvents: true
-
-# Workload (controlled by workloads.yaml)
-workload:
-  profileTemplate:
-    load: ...
-    data: ...
-```
+The skill selects the appropriate values file based on the `--obs` flag. Workload configuration is always merged from `workloads.yaml`.
 
 ---
 

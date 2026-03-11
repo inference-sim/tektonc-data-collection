@@ -164,4 +164,4 @@ custom_images:
     notes: "Custom vLLM with journey tracing support"
 
 # Default vLLM image (official)
-default_vllm_image: "vllm/vllm-openai:v0.11.0"
+default_vllm_image: "vllm/vllm-openai:v0.15.1"

@@ -40,7 +40,7 @@ spec:
     - download-model
     workspaces:
     - name: data
-  - name: create-exp-config-4
+  - name: create-exp-config-1
     taskRef:
       name: create-exp-config
     runAfter:
@@ -51,43 +51,30 @@ spec:
     - name: model
       value: $(params.model)
     - name: tp
-      value: '4'
+      value: '1'
     - name: max_model_len
-      value: '8192'
-    - name: max_num_batched_tokens
       value: '4096'
+    - name: max_num_batched_tokens
+      value: '2048'
     - name: max_num_seqs
       value: '128'
     - name: app
       value: inference-perf
     - name: results_dir
-      value: $(params.experimentId)-4
-  - name: deploy-otel-collector-4
-    description: Deploy a per-experiment OpenTelemetry collector
-    taskRef:
-      name: create-otel-collector
-    runAfter:
-    - install-inference-perf
-    workspaces:
-    - name: data
-    params:
-    - name: modelLabel
-      value: $(params.experimentId)-4
-    - name: results_dir
-      value: $(params.experimentId)-4
-  - name: deploy-model-4
+      value: $(params.experimentId)-1
+  - name: deploy-model-1
     description: Deploy model engines. Uses the modelservice helm chart. The task implementation automatically overrides "modelArtifacts.name", "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model", and "fullnameOverride" to avoid conflicts and ensure consistency.
     taskRef:
       name: deploy-model
     runAfter:
-    - deploy-otel-collector-4
+    - install-inference-perf
     workspaces:
     - name: model-cache
     params:
     - name: model
       value: $(params.model)
     - name: modelLabel
-      value: $(params.experimentId)-4
+      value: $(params.experimentId)-1
     - name: namespace
       value: $(params.namespace)
     - name: config
@@ -119,44 +106,19 @@ spec:
           parallelism:
             data: 1
             tensor: 1
-          initContainers:
-          - name: install-otel-dependencies
-            image: vllm/vllm-openai:v0.11.0
-            command:
-            - /bin/bash
-            - -c
-            args:
-            - "set -e\npip install --target=/deps \\\n  'opentelemetry-sdk>=1.26.0,<1.27.0' \\\n  'opentelemetry-api>=1.26.0,<1.27.0' \\\n  'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \\\n  'python-json-logger' \\\n  'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
-            volumeMounts:
-            - name: deps
-              mountPath: /deps
           containers:
           - name: vllm
             env:
-            - name: PYTHONPATH
-              value: /deps
-            - name: OTEL_SERVICE_NAME
-              value: vllm-exp1
-            - name: OTEL_TRACES_SAMPLER
-              value: traceidratio
-            - name: OTEL_TRACES_SAMPLER_ARG
-              value: '1.0'
-            - name: OTEL_TRACES_EXPORTER
-              value: otlp
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
-              value: http/protobuf
-            - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
-              value: http/protobuf
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://otel-exp1:4318
-            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-              value: http://otel-exp1:4318
             - name: VLLM_CONFIGURE_LOGGING
               value: '1'
             - name: VLLM_LOGGING_CONFIG_PATH
               value: /workspace/vllm_logging.json
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
             mountModelVolume: true
-            image: vllm/vllm-openai:v0.11.0
+            image: vllm/vllm-openai:v0.15.1
             modelCommand: vllmServe
             resources:
               limits:
@@ -188,30 +150,23 @@ spec:
             volumeMounts:
             - name: data
               mountPath: /mnt/exp
-            - name: deps
-              mountPath: /deps
           volumes:
           - name: data
             persistentVolumeClaim:
               claimName: data-pvc
-          - name: deps
-            emptyDir: {}
     - name: overrides
       value:
-      - decode.parallelism.tensor=4
-      - decode.containers[name="vllm"].args=--max-model-len=8192
-      - decode.containers[name="vllm"].args=--max-num-batched-tokens=4096
+      - decode.parallelism.tensor=1
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
       - decode.containers[name="vllm"].args=--max-num-seqs=128
-      - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-$(params.experimentId)-4:4318/v1/traces
-      - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_ENDPOINT"].value=http://otel-$(params.experimentId)-4:4318
-      - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"].value=http://otel-$(params.experimentId)-4:4318
-      - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/$(params.experimentId)-4/vllm_logging.json"
-  - name: run-workload-4
+      - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/$(params.experimentId)-1/vllm_logging.json"
+  - name: run-workload-1
     description: Run workload against model server using inference-perf.
     taskRef:
       name: run-workload-inference-perf-blis
     runAfter:
-    - deploy-model-4
+    - deploy-model-1
     timeout: 350m
     retries: 3
     workspaces:
@@ -221,9 +176,9 @@ spec:
     - name: model
       value: $(params.model)
     - name: modelLabel
-      value: $(params.experimentId)-4
+      value: $(params.experimentId)-1
     - name: results_dir
-      value: $(params.experimentId)-4
+      value: $(params.experimentId)-1
     - name: profileTemplate
       value:
         load:
@@ -260,42 +215,31 @@ spec:
         storage:
           local_storage:
             path: PATH
-  - name: delete-model-4
+  - name: delete-model-1
     description: Delete the model engine.
     runAfter:
-    - run-workload-4
+    - run-workload-1
     taskRef:
       name: delete-model
     params:
     - name: namespace
       value: $(params.namespace)
     - name: modelLabel
-      value: $(params.experimentId)-4
-  - name: delete-otel-collector-4
-    description: Delete the OTEL collector.
-    runAfter:
-    - run-workload-4
-    taskRef:
-      name: delete-otel-collector
-    params:
-    - name: namespace
-      value: $(params.namespace)
-    - name: modelLabel
-      value: $(params.experimentId)-4
-  - name: raw-upload-4
+      value: $(params.experimentId)-1
+  - name: raw-upload-1
     description: Upload raw data to target data repository
     taskRef:
       name: upload-s3
     runAfter:
-    - run-workload-4
+    - run-workload-1
     workspaces:
     - name: data
     - name: target-credentials
     params:
     - name: archive
-      value: $(params.experimentId)-4-raw.tar.gz
+      value: $(params.experimentId)-1-raw.tar.gz
     - name: paths
-      value: '$(params.experimentId)-4
+      value: '$(params.experimentId)-1
 
         '
     - name: target
@@ -303,19 +247,11 @@ spec:
         bucket: cloud-object-storage-cos-standard-ere
         endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud
   finally:
-  - name: finally-delete-model-4
+  - name: finally-delete-model-1
     taskRef:
       name: delete-model
     params:
     - name: namespace
       value: $(params.namespace)
     - name: modelLabel
-      value: $(params.experimentId)-4
-  - name: finally-delete-otel-collector-4
-    taskRef:
-      name: delete-otel-collector
-    params:
-    - name: namespace
-      value: $(params.namespace)
-    - name: modelLabel
-      value: $(params.experimentId)-4
+      value: $(params.experimentId)-1
