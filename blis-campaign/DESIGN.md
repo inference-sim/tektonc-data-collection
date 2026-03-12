@@ -115,20 +115,19 @@ H100:
   context: "pokprod001"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-H100-80GB-HBM3"
-  gpu_capacity: 0  # set before running
 
 A100-80GB:
   context: "fmaas"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-A100-SXM4-80GB"
-  gpu_capacity: 0  # set before running
 
 L40S:
   context: "fmaas"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-L40S"
-  gpu_capacity: 0  # set before running
 ```
+
+No `gpu_capacity` field — the runner queries real-time GPU availability from the cluster before each scheduling decision (see GPU scheduling section).
 
 ### What changes per experiment (all three files)
 
@@ -271,41 +270,74 @@ Iterates over pre-generated experiment directories, deploys them to the correct 
 
 ### GPU-aware scheduling
 
-Each experiment needs `tp * max(dp, 1)` GPUs. The runner maintains a GPU pool per HW type and schedules experiments using **order-preserving greedy backfill**:
+Each experiment needs `tp * max(dp, 1)` GPUs. The runner queries **real-time GPU availability** from each cluster and schedules using **order-preserving greedy backfill**:
 
 1. Always try to start the **next experiment in table order** first
 2. If it doesn't fit (not enough free GPUs), scan ahead for smaller experiments that do fit
-3. When a running experiment completes, free its GPUs and re-evaluate the pending queue
+3. When a running experiment completes, re-query availability and evaluate the pending queue
+
+#### Real-time GPU query
+
+Before each scheduling decision, the runner checks actual free GPUs:
 
 ```python
-pools = {hw: GPUPool(capacity=cfg["gpu_capacity"], context=cfg["context"])
-         for hw, cfg in clusters.items()}
+def get_available_gpus(context, gpu_label_key, gpu_label_value):
+    """Query actual free GPUs on nodes matching the GPU label."""
+    # Total allocatable GPUs on matching nodes
+    nodes = kubectl_json(
+        f"get nodes -l {gpu_label_key}={gpu_label_value}", context=context
+    )
+    total = sum(
+        int(n["status"]["allocatable"].get("nvidia.com/gpu", 0))
+        for n in nodes["items"]
+    )
 
+    # GPUs currently requested by running pods on those nodes
+    pods = kubectl_json(
+        "get pods --all-namespaces --field-selector=status.phase=Running",
+        context=context
+    )
+    allocated = sum(
+        int(c["resources"].get("requests", {}).get("nvidia.com/gpu", 0))
+        for p in pods["items"]
+        for c in p["spec"]["containers"]
+    )
+
+    return total - allocated
+```
+
+This means: if someone else takes GPUs mid-campaign, the runner sees it and waits. If GPUs free up from other users, the runner takes advantage.
+
+#### Scheduler loop
+
+```python
 pending = deque(all_experiment_dirs)  # in table order
 running = {}  # exp_id -> RunningExperiment
 
 while pending or running:
+    # Query real GPU availability per cluster
+    available = {
+        hw: get_available_gpus(cfg["context"], cfg["gpu_label_key"], cfg["gpu_label_value"])
+        for hw, cfg in clusters.items()
+    }
+
     # Start experiments that fit
-    started_any = False
     for exp_dir in list(pending):
         exp = read_json(exp_dir / "experiment.json")
         gpus_needed = exp["tp"] * max(exp.get("dp") or 1, 1)
-        pool = pools[exp["hw"]]
 
-        if pool.available() >= gpus_needed:
-            pool.allocate(gpus_needed)
-            pr = deploy(exp_dir, pool.context)
+        if available[exp["hw"]] >= gpus_needed:
+            pr = deploy(exp_dir, clusters[exp["hw"]]["context"])
             running[exp_dir] = RunningExperiment(pr, gpus_needed, exp["hw"])
+            available[exp["hw"]] -= gpus_needed
             pending.remove(exp_dir)
-            started_any = True
 
     # Poll all running experiments
     sleep(30)
     for exp_dir, run in list(running.items()):
-        status = check_status(run.pipeline_run, context=pools[run.hw].context)
+        status = check_status(run.pipeline_run, context=clusters[run.hw]["context"])
         if status in ("Succeeded", "Failed", "timeout"):
             handle_completion(exp_dir, run, status, pending)
-            pools[run.hw].release(run.gpus)
             del running[exp_dir]
 ```
 
@@ -488,7 +520,7 @@ If verification fails after all retries:
 | Cluster contexts reachable | `kubectl --context=X cluster-info` per cluster; abort if unreachable |
 | Namespace exists | `kubectl get namespace` per cluster; abort |
 | Pipeline tasks deployed | `kubectl get task` for required tasks; abort with list of missing tasks |
-| `gpu_capacity > 0` for all referenced HW | Abort with "set gpu_capacity in clusters.yaml" |
+| GPUs queryable per cluster | `get_available_gpus()` must return ≥ 0; abort if nodes not found for a referenced HW label |
 | Auth valid | `kubectl auth can-i create pipelinerun` per cluster; abort |
 
 ### Runtime errors
