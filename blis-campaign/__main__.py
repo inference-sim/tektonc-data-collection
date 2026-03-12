@@ -24,6 +24,8 @@ def main():
     run.add_argument("--hw", required=True, help="Hardware type (H100, A100-80GB, L40S)")
     run.add_argument("--range", dest="id_range", help="ID range, e.g. 13-35")
     run.add_argument("--only", help="Comma-separated experiment IDs")
+    run.add_argument("--max-gpus", type=int, default=16,
+                     help="Max GPUs to use concurrently (default: 16)")
 
     # status
     st = sub.add_parser("status", help="Show campaign status")

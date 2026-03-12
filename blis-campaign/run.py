@@ -17,7 +17,7 @@ from cleanup import cleanup_pipeline_run, collect_diagnostics
 log = logging.getLogger("blis-campaign")
 
 POLL_INTERVAL = 30  # seconds between polling cycles
-STALL_TIMEOUT = 3600  # 60 minutes without progress = stall
+STALL_TIMEOUT = 10800  # 3 hours without progress = stall (large model downloads can take 1-2h)
 MAX_ATTEMPTS = 2
 
 
@@ -304,9 +304,13 @@ def run_campaign(args):
     campaign_dir = Path(args.campaign)
     setup_logging(campaign_dir)
 
+    max_gpus = args.max_gpus
+
     log.info("BLIS Campaign Runner starting")
     log.info(f"  Target: {args.hw} ({context})")
     log.info(f"  Campaign: {campaign_dir}")
+    if max_gpus:
+        log.info(f"  Max GPUs: {max_gpus}")
 
     # Pre-flight checks
     try:
@@ -346,6 +350,11 @@ def run_campaign(args):
             log.warning(f"GPU query failed: {e}, retrying next cycle")
             time.sleep(POLL_INTERVAL)
             continue
+
+        # Cap by --max-gpus (subtract GPUs already used by this campaign)
+        if max_gpus is not None:
+            campaign_gpus = sum(r["gpus"] for r in running.values())
+            available = min(available, max_gpus - campaign_gpus)
 
         # Try to start experiments (order-preserving greedy backfill)
         started = []
