@@ -929,7 +929,7 @@ Thin Claude skill (`/blis-campaign`) that wraps the Python CLI:
 - **`/blis-campaign run [--range FROM-TO] [--only ID,ID,...]`** — The runner is long-lived (hours/days), so Claude **does not run it**. Instead, Claude prints the exact command for you to run in a `tmux`/`screen` session:
   ```
   Run this in a tmux session:
-    ./blis-campaign/run-campaign.sh --campaign campaign/ --range 13-35
+    ./blis-campaign/run-campaign.sh --campaign campaign/ --hw H100 --range 13-35
   ```
   The wrapper script auto-restarts the runner on unexpected crashes (up to 3 times). All output is logged to `campaign/campaign.log`.
 
@@ -943,15 +943,16 @@ The skill does no YAML generation, monitoring, or pipeline logic. It's a conveni
 
 ```
 blis-campaign generate --experiments experiments.json --output campaign/
-blis-campaign run --campaign campaign/ [--range 13-35] [--only 13,25,39]
+blis-campaign run --campaign campaign/ [--hw H100] [--range 13-35] [--only 13,25,39]
 blis-campaign status --campaign campaign/
 ```
 
+- `--hw H100` or `--hw H100,A100-80GB` — Only run experiments targeting these hardware types. Matches the `hw` field in experiment JSON. Use this when you only have access to some clusters.
 - `--range FROM-TO` — Run experiments with IDs from FROM to TO inclusive. E.g., `--range 13-35` runs experiments 13, 14, 15, ..., 35.
 - `--only ID,ID,...` — Run only these specific experiment IDs. E.g., `--only 13,25,39`.
-- No flags — runs all experiments.
+- No flags — runs all experiments on all clusters.
 
-Both flags filter the pre-generated experiment directories. They don't regenerate anything.
+All filters are AND'd together. `--hw H100 --range 13-35` runs only H100 experiments with IDs 13-35. Pre-flight checks only validate clusters that have pending experiments after filtering.
 
 ---
 
