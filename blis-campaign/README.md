@@ -23,7 +23,52 @@ campaign/
     pipelinerun.yaml     # PipelineRun template (name stamped at deploy time)
 ```
 
-### 2. Run experiments on a cluster
+### 2. Launch the campaign (unattended)
+
+Start a tmux or screen session and run the crash-resilient wrapper:
+
+```bash
+tmux new -s blis
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100
+```
+
+This is the recommended way to run. The wrapper:
+- Runs all matching experiments with GPU-aware parallel scheduling (default: up to 16 GPUs)
+- Retries each experiment once on failure, with full diagnostics
+- Restarts the runner up to 3 times if it crashes (network blip, kubectl timeout, etc.)
+- Picks up where it left off on restart — state is persisted to `campaign-state.json`
+- Logs everything to `campaign/campaign.log`
+
+Detach from tmux with `Ctrl-b d` and come back later with `tmux attach -t blis`.
+
+To limit GPU usage or run a subset:
+
+```bash
+# Use at most 8 GPUs
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --max-gpus 8
+
+# Run only experiments 13 through 24
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --range 13-24
+
+# Run specific experiments by ID
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --only 16,17,18
+```
+
+### 3. Monitor progress
+
+From another terminal:
+
+```bash
+# Live log
+tail -f blis-campaign/campaign/campaign.log
+
+# Status summary
+python blis-campaign status --campaign blis-campaign/campaign/
+```
+
+## Running Directly (without wrapper)
+
+If you prefer running without the crash-resilient wrapper:
 
 ```bash
 python blis-campaign run \
@@ -31,31 +76,7 @@ python blis-campaign run \
   --hw H100
 ```
 
-The runner:
-- Checks cluster connectivity and GPU availability
-- Deploys experiments in table order, packing as many as GPUs allow
-- Monitors pipeline progress every 30 seconds
-- Downloads results from the PVC on success
-- Retries once on failure, collects diagnostics on final failure
-- Skips already-completed experiments on restart
-
-### 3. Check progress
-
-```bash
-python blis-campaign status --campaign blis-campaign/campaign/
-```
-
-## Filtering Experiments
-
-Run a subset of experiments instead of the full table:
-
-```bash
-# Run only experiments 13 through 24
-python blis-campaign run --campaign blis-campaign/campaign/ --hw H100 --range 13-24
-
-# Run specific experiments by ID
-python blis-campaign run --campaign blis-campaign/campaign/ --hw H100 --only 16,17,18
-```
+This does the same scheduling/retry logic but won't auto-restart if the Python process itself crashes.
 
 ## Running with Claude
 
@@ -66,27 +87,6 @@ If you use Claude Code, you can ask it to run experiments interactively:
 ```
 
 Claude will use the `/blis-inference-perf` skill to deploy and monitor individual experiments. The campaign runner is for unattended batch execution when you want to run many experiments overnight.
-
-## Unattended Overnight Operation
-
-For long-running campaigns, use the crash-resilient wrapper script:
-
-```bash
-# Run in a tmux/screen session
-./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100
-```
-
-This wrapper restarts the runner up to 3 times if it crashes (e.g., network blip, kubectl timeout). The runner picks up where it left off because state is persisted to `campaign-state.json`.
-
-Monitor from another terminal:
-
-```bash
-# Live log
-tail -f blis-campaign/campaign/campaign.log
-
-# Status summary
-python blis-campaign status --campaign blis-campaign/campaign/
-```
 
 ## Clusters
 
