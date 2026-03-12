@@ -25,6 +25,8 @@ The campaign runner replaces this with two steps:
 
 All experiments run in the `diya` namespace. GPU capacity per cluster is configurable. **Everything is Python — no AI in the loop.** Claude is only a thin wrapper that calls the Python CLI for a nicer interactive experience; it does no YAML generation, monitoring, or decision-making.
 
+**Designed for unattended overnight runs.** All output is logged to `campaign/campaign.log` (not just stdout). A crash-resilient wrapper script auto-restarts the runner up to 3 times. PVC and local disk space are monitored continuously. Auth tokens are checked pre-flight. When the campaign finishes, a full summary is saved to disk with re-run commands for any failures.
+
 ## Problem
 
 Running 40+ LLM benchmarking experiments manually is slow and error-prone. The current `/blis-inference-perf` skill runs one experiment at a time with Claude generating YAML — introducing hallucination risk, no retry logic, no multi-cluster support, and no batch orchestration.
@@ -684,14 +686,157 @@ If verification fails after all retries:
 | `kubectl apply` fails | Capture stderr, mark `failed`, log error, move on |
 | Orphaned helm release from previous run | Pre-deploy `helm list` check; warn + clean up before deploying |
 | `tkn pr describe` transient failure | Retry 3x with 10s backoff before treating as error |
-| Auth token expires mid-campaign | Detect 401/403, pause campaign, log "re-authenticate and resume" |
+| Auth token expires mid-campaign | Pre-flight: verify token TTL or run `oc whoami` per cluster; warn if token expires within 24h. Runtime: detect 401/403, retry auth check 3x with 30s backoff, then pause with clear message and persist state for resume. See Unattended Operation section. |
 | Pipeline stuck (no progress for 60 min) | Treat as timeout failure |
 | Busybox pod won't start | Retry pod creation once with 60s wait; then `download_failed` |
 | `kubectl cp` corruption | Use `tar cf - \| tar xf -` pipe instead of `kubectl cp` |
 | Large file timeout | 10 min timeout on tar copy; retry once |
-| Local disk full | Check free space before download; skip with `download_failed` |
+| Local disk full | Check free space before download; if below 2 GB, **halt campaign** (not just skip) — all subsequent downloads would also fail. Log "disk full, pausing" and persist state. |
+| PVC filling up | After each experiment completes, check PVC free space via busybox `df`. Warn at 80% full. At 95% full, halt new experiment launches (data corruption risk). Log remaining space per experiment. |
 | PipelineRun delete fails | Log warning, continue (not blocking) |
 | Orphaned helm release detected post-run | Log warning with exact `helm delete` command; don't auto-delete |
+
+---
+
+## Unattended Operation
+
+The campaign runner is designed to run overnight without human intervention. Six concerns are addressed:
+
+### 1. File logging
+
+All output goes to **both** stdout and a log file (`campaign/campaign.log`). The log file is append-only and includes timestamps, so terminal history overflow doesn't lose information.
+
+```python
+import logging, sys
+
+def setup_logging(campaign_dir):
+    log_file = campaign_dir / "campaign.log"
+    fmt = "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(
+        level=logging.INFO,
+        format=fmt,
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_file, mode="a"),
+        ],
+    )
+```
+
+Each experiment's diagnostics are also saved to `campaign/<exp-id>/diagnosis/` (already covered above), so even if the terminal is gone, the full record exists on disk.
+
+### 2. Auth token pre-flight
+
+Before launching the campaign, the runner checks token health per cluster:
+
+```python
+def check_auth_health(context):
+    """Warn if auth token will expire before campaign likely finishes."""
+    # Try oc whoami --show-token to check expiry (OpenShift)
+    result = run_cmd(f"oc whoami --show-token --context={context}", ignore_errors=True)
+    if result.returncode != 0:
+        # Non-OCP cluster, or token not available — check basic auth
+        result = run_cmd(f"kubectl auth can-i create pipelinerun --context={context}")
+        if result.returncode != 0:
+            raise AuthError(f"Cannot authenticate to {context}")
+        log.warning(f"Cannot determine token TTL for {context}; ensure long-lived token")
+        return
+
+    # If we can decode the token, check expiry
+    # ... token TTL check logic ...
+```
+
+If the token looks short-lived (< 12 hours), the runner prints a warning:
+```
+WARNING: Token for pokprod001 may expire in ~8h. Campaign has ~53 experiments.
+Consider: oc login --token=<long-lived-token> or use a service account.
+```
+
+### 3. PVC space monitoring
+
+After each experiment downloads results, the runner checks PVC free space:
+
+```python
+def check_pvc_space(context, namespace, threshold_pct=80, critical_pct=95):
+    """Check PVC usage via busybox pod."""
+    output = kubectl_exec_busybox(
+        "df -h /mnt/exp | tail -1", context=context, namespace=namespace
+    )
+    usage_pct = parse_df_usage(output)
+    if usage_pct >= critical_pct:
+        raise PVCFullError(f"PVC {usage_pct}% full — halting to prevent data corruption")
+    if usage_pct >= threshold_pct:
+        log.warning(f"PVC {usage_pct}% full — consider cleaning old experiment data")
+```
+
+Thresholds: **warn at 80%**, **halt at 95%**.
+
+### 4. Local disk space early halt
+
+Unlike the per-download check (which skips one experiment), this is a campaign-level guard. If local disk drops below 2 GB, the runner **halts the entire campaign** rather than skipping individual downloads — because all subsequent downloads would also fail.
+
+### 5. Crash recovery wrapper
+
+The runner persists state after every transition (`campaign-state.json`), so it can always resume. But if the Python process itself crashes (segfault, OOM, power loss), nobody restarts it. The recommended approach is a simple wrapper script:
+
+```bash
+#!/bin/bash
+# run-campaign.sh — crash-resilient wrapper
+# Usage: ./run-campaign.sh [args passed to blis-campaign run]
+MAX_RESTARTS=3
+RESTART_COUNT=0
+
+while [ $RESTART_COUNT -lt $MAX_RESTARTS ]; do
+    echo "[$(date)] Starting campaign runner (attempt $((RESTART_COUNT+1))/$MAX_RESTARTS)"
+    python -m blis_campaign run "$@"
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "[$(date)] Campaign completed successfully."
+        break
+    fi
+
+    RESTART_COUNT=$((RESTART_COUNT+1))
+    echo "[$(date)] Runner exited with code $EXIT_CODE. Restart $RESTART_COUNT/$MAX_RESTARTS in 30s..."
+    sleep 30
+done
+
+if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+    echo "[$(date)] FATAL: Runner crashed $MAX_RESTARTS times. Check campaign/campaign.log"
+fi
+```
+
+The runner uses exit code conventions:
+- **0**: Campaign completed (all experiments finished or skipped)
+- **1**: Unrecoverable error (bad config, all clusters unreachable)
+- **2**: Crash/unexpected error (wrapper should restart)
+
+### 6. Campaign completion summary
+
+When the campaign finishes (all experiments completed, failed, or skipped), the runner prints and logs a final summary:
+
+```
+═══════════════════════════════════════════════════════
+CAMPAIGN COMPLETE — 2026-03-12T08:30:00Z
+═══════════════════════════════════════════════════════
+Total:     53 experiments
+Completed: 41
+Failed:     8  (see details below)
+Skipped:    4  (deprioritized)
+
+FAILED EXPERIMENTS:
+  #15 DeepSeek-V3 H100 general    — OOMKilled (2 attempts)
+  #17 DeepSeek-V3 FP8 codegen     — deploy-model timeout (2 attempts)
+  #36 Llama-4-Scout EP sweep       — expert_parallel config error
+  ...
+
+Re-run failed experiments with:
+  python -m blis_campaign run --campaign campaign/ --only 15,17,36,...
+
+Full log: campaign/campaign.log
+═══════════════════════════════════════════════════════
+```
+
+This summary is also saved to `campaign/campaign-summary.txt` so it's available even if the terminal is closed.
 
 ---
 
@@ -728,8 +873,9 @@ Thin Claude skill (`/blis-campaign`) that wraps the Python CLI:
 - **`/blis-campaign run [--range FROM-TO] [--only ID,ID,...]`** — The runner is long-lived (hours/days), so Claude **does not run it**. Instead, Claude prints the exact command for you to run in a `tmux`/`screen` session:
   ```
   Run this in a tmux session:
-    python -m blis_campaign run --campaign campaign/ --range 13-35
+    ./blis-campaign/run-campaign.sh --campaign campaign/ --range 13-35
   ```
+  The wrapper script auto-restarts the runner on unexpected crashes (up to 3 times). All output is logged to `campaign/campaign.log`.
 
 The skill does no YAML generation, monitoring, or pipeline logic. It's a convenience layer for generate/status and a command builder for run. You can also skip the skill entirely and use the Python CLI directly.
 
@@ -765,6 +911,7 @@ blis-campaign/
   cluster.py               # Cluster context management + pre-flight checks
   download.py              # PVC download with tar pipe + verification
   cleanup.py               # PipelineRun deletion, orphan detection
+  run-campaign.sh          # Crash-resilient wrapper script (restarts on unexpected exit)
   config/
     models.yaml            # Short name → HF ID mapping
     clusters.yaml          # HW → context, GPU label, capacity
