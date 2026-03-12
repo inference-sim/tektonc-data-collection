@@ -1,0 +1,13 @@
+# Short name -> HuggingFace ID (matching #598 discussion table)
+Llama-3.1-8b: "meta-llama/Llama-3.1-8B-Instruct"
+Qwen3-14B: "Qwen/Qwen3-14B"
+Codellama-34b: "codellama/CodeLlama-34b-Instruct-hf"
+Llama-2-70b: "meta-llama/Llama-2-70b-hf"
+Mixtral-8x7B: "mistralai/Mixtral-8x7B-v0.1"
+DeepSeek-V3: "deepseek-ai/DeepSeek-V3"
+Llama-2-7b-hf: "meta-llama/Llama-2-7b-hf"
+
+Llama-4-Scout-17B-16E:
+  hf_id: "meta-llama/Llama-4-Scout-17B-16E"
+  extra_vllm_args:
+    - '--override-generation-config={"attn_temperature_tuning": true}'
