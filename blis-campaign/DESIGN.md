@@ -418,9 +418,10 @@ Data stays on PVC (S3 upload happens within the pipeline). PipelineRun gets clea
 ### Retry policy
 
 **Retry once, then skip.** On failure:
-1. Clean up the failed PipelineRun
-2. If `attempts < 2`: re-enqueue to pending, increment attempt count
-3. If `attempts >= 2`: mark as `failed`, log the error, move on
+1. Run failure diagnostics (see below)
+2. Clean up the failed PipelineRun
+3. If `attempts < 2`: re-enqueue to pending, increment attempt count
+4. If `attempts >= 2`: mark as `failed`, log the error, move on
 
 ### Monitoring
 
@@ -430,6 +431,133 @@ Polls `tkn pr describe <name> --context=X -o json` every 30 seconds. Extracts:
 - Failure reason (for error reporting)
 
 **Stall detection:** Tracks the last task state transition time. If no progress for 60 minutes, treats it as a timeout failure.
+
+### Failure diagnostics
+
+On **any** failure (pipeline failure, timeout, stall), before cleanup, the runner collects diagnostic data and runs basic triage. This is critical for new configurations (FP8, EP, DP, new models) that are likely to fail in novel ways.
+
+#### Data collection (all kubectl, no AI)
+
+```python
+def collect_diagnostics(exp_dir, exp, pipeline_run, context, namespace):
+    diag_dir = exp_dir / "diagnosis"
+    diag_dir.mkdir(exist_ok=True)
+
+    # 1. Pipeline run status + per-task breakdown
+    save(diag_dir / "pipeline-status.json",
+         run_cmd(f"tkn pr describe {pipeline_run} --context={context} -o json"))
+
+    # 2. Pod statuses (Pending? CrashLoopBackOff? OOMKilled?)
+    model_label = get_model_label(exp)
+    save(diag_dir / "pods.json",
+         run_cmd(f"kubectl get pods -n {namespace} -l app={model_label} "
+                 f"--context={context} -o json"))
+
+    # 3. Namespace events (scheduling failures, image pull errors)
+    save(diag_dir / "events.txt",
+         run_cmd(f"kubectl get events -n {namespace} --context={context} "
+                 f"--sort-by=.lastTimestamp"))
+
+    # 4. vLLM container logs (if pod started at all)
+    for pod in get_model_pods(namespace, model_label, context):
+        save(diag_dir / f"vllm-logs-{pod}.txt",
+             run_cmd(f"kubectl logs {pod} -n {namespace} -c vllm "
+                     f"--context={context} --tail=500",
+                     ignore_errors=True))
+
+    # 5. Helm release status
+    save(diag_dir / "helm-status.txt",
+         run_cmd(f"helm status {model_label} --context={context}",
+                 ignore_errors=True))
+
+    # 6. Node GPU state
+    gpu_label = clusters[exp["hw"]]
+    save(diag_dir / "gpu-nodes.txt",
+         run_cmd(f"kubectl get nodes -l {gpu_label['gpu_label_key']}="
+                 f"{gpu_label['gpu_label_value']} --context={context} "
+                 f"-o custom-columns=NAME:.metadata.name,"
+                 f"GPUs:.status.allocatable.nvidia\\.com/gpu,"
+                 f"STATUS:.status.conditions[-1].type"))
+
+    # 7. Triage
+    summary = run_triage(diag_dir)
+    save(diag_dir / "summary.txt", summary)
+    return summary
+```
+
+#### Automated triage (pattern matching)
+
+The runner scans collected data for known failure patterns:
+
+```python
+TRIAGE_PATTERNS = [
+    # Pod-level issues
+    ("pods.json",    pod_phase == "Pending",
+     "Model pod stuck in Pending — likely insufficient GPUs or resource quota"),
+    ("pods.json",    restart_count > 0,
+     "Model pod in CrashLoopBackOff — check vllm-logs-*.txt for startup error"),
+    ("pods.json",    terminated_reason == "OOMKilled",
+     "OOMKilled — model too large for this GPU/TP config"),
+
+    # vLLM startup errors
+    ("vllm-logs-*",  "CUDA out of memory",
+     "CUDA OOM during model loading — try higher TP or enable cpu_offload"),
+    ("vllm-logs-*",  "does not support FP8",
+     "Model or hardware does not support FP8 quantization"),
+    ("vllm-logs-*",  "trust_remote_code",
+     "Model requires --trust-remote-code flag"),
+    ("vllm-logs-*",  "torch.cuda.OutOfMemoryError",
+     "GPU OOM — insufficient GPU memory for model + KV cache"),
+    ("vllm-logs-*",  "expert_parallel",
+     "Expert parallelism configuration error — check TP/DP/EP compatibility"),
+
+    # Kubernetes scheduling
+    ("events.txt",   "FailedScheduling",
+     "Kubernetes couldn't schedule pod — check GPU availability and node affinity"),
+    ("events.txt",   "ImagePullBackOff",
+     "Failed to pull vLLM container image"),
+    ("events.txt",   "Insufficient nvidia.com/gpu",
+     "Not enough GPUs available on matching nodes"),
+
+    # Pipeline-level
+    ("pipeline-status.json", any_task_failed,
+     "Task '{task_name}' failed — see task-level logs in pipeline-status.json"),
+]
+```
+
+#### Output
+
+For each failed experiment, the runner:
+1. Saves raw diagnostics to `campaign/<exp-id>/diagnosis/`
+2. Prints a triage summary to stdout:
+
+```
+=== DIAGNOSIS: #15 DeepSeek-V3 H100 General (attempt 1/2) ===
+Failure type: timeout (no progress for 60 min)
+Failed at task: deploy-model-8
+
+Triage:
+  - Model pod stuck in Pending — likely insufficient GPUs or resource quota
+  - FailedScheduling: "0/4 nodes are available: insufficient nvidia.com/gpu"
+
+Raw diagnostics: campaign/15-deepseek-v3-h100-general/diagnosis/
+Retrying...
+```
+
+3. Records the triage summary in `campaign-state.json`:
+
+```json
+{
+  "15-deepseek-v3-h100-general": {
+    "status": "failed",
+    "attempts": 2,
+    "last_failure": "Model pod stuck in Pending — insufficient GPUs",
+    "diagnosis_path": "campaign/15-deepseek-v3-h100-general/diagnosis/"
+  }
+}
+```
+
+After the campaign completes, all failures are listed in the final summary with their triage, so you have a starting point to fix and re-run with `--only`.
 
 ---
 
