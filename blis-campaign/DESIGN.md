@@ -427,6 +427,61 @@ Data stays on PVC (S3 upload happens within the pipeline). PipelineRun gets clea
 3. If `attempts < 2`: re-enqueue to pending, increment attempt count
 4. If `attempts >= 2`: mark as `failed`, log the error, move on
 
+**Special case — model-pvc full:** If diagnostics identify "No space left on device" from the `download-model` task, run reactive model cleanup (see below) before retrying. This doesn't count as an extra attempt.
+
+### Model PVC reactive cleanup
+
+When an experiment fails because `model-pvc` is full (the `download-model` task can't write weights), the runner frees space by deleting model weights that aren't in use by currently running experiments on that cluster. The failed experiment then retries, and `download-model` re-downloads the model it needs into the freed space.
+
+All operations target the `diya` namespace via a busybox pod with `model-pvc` mounted.
+
+```python
+def handle_model_pvc_full(context, namespace, running_exps_on_cluster):
+    """Reactive cleanup: delete model weights not used by running experiments."""
+    # Models currently in use — DO NOT delete
+    protected = {
+        resolve_model(e["model"])  # e.g. "meta-llama/Llama-2-70b-hf"
+        for e in running_exps_on_cluster
+    }
+
+    # List all model dirs on the PVC
+    all_models = kubectl_exec_busybox(
+        "ls /models/", context=context, namespace=namespace, pvc="model-pvc"
+    ).split()
+
+    freed_gb = 0
+    for model_dir in all_models:
+        if model_dir not in protected:
+            size = kubectl_exec_busybox(
+                f"du -s /models/{model_dir} | cut -f1",
+                context=context, namespace=namespace, pvc="model-pvc"
+            )
+            log.info(f"Evicting {model_dir} ({int(size)//1048576} GB) from model-pvc")
+            kubectl_exec_busybox(
+                f"rm -rf /models/{model_dir}",
+                context=context, namespace=namespace, pvc="model-pvc"
+            )
+            freed_gb += int(size) // 1048576
+
+    log.info(f"Freed ~{freed_gb} GB from model-pvc on {context}")
+    return freed_gb
+```
+
+**Safety guarantees:**
+- Only deletes models **not used by currently running experiments** on that cluster. Pending experiments are not protected — they'll re-download when they start.
+- `download-model` is idempotent: if weights exist on the PVC it skips download; if they were deleted it re-downloads from HuggingFace. No corruption risk.
+- Per-cluster isolation: cleaning model-pvc on pokprod001 doesn't affect model-pvc on fmaas-vllmd.
+
+**Example output:**
+```
+FAILED #17 DeepSeek-V3 H100 general: download-model — "No space left on device" (attempt 1/2)
+  → model-pvc cleanup: deleting codellama/CodeLlama-34b-Instruct-hf (68 GB),
+    meta-llama/Llama-2-70b-hf (138 GB)
+  → Freed ~206 GB. Retrying #17...
+```
+
+**Cost:** Re-downloading an evicted model takes ~10-30 min depending on size and network. This only triggers when the PVC is actually full, which may never happen with a sufficiently large PVC (see sizing recommendations in the campaign config).
+
 ### Monitoring
 
 Polls `tkn pr describe <name> --context=X -o json` every 30 seconds. Extracts:
@@ -692,7 +747,8 @@ If verification fails after all retries:
 | `kubectl cp` corruption | Use `tar cf - \| tar xf -` pipe instead of `kubectl cp` |
 | Large file timeout | 10 min timeout on tar copy; retry once |
 | Local disk full | Check free space before download; if below 2 GB, **halt campaign** (not just skip) — all subsequent downloads would also fail. Log "disk full, pausing" and persist state. |
-| PVC filling up | After each experiment completes, check PVC free space via busybox `df`. Warn at 80% full. At 95% full, halt new experiment launches (data corruption risk). Log remaining space per experiment. |
+| **data-pvc** filling up | After each experiment completes, check data-pvc free space via busybox `df`. Warn at 80% full. At 95% full, halt new experiment launches (data corruption risk). Log remaining space per experiment. |
+| **model-pvc** filling up | Detected when `download-model` task fails with "No space left on device". Reactive cleanup: delete model weights not used by currently running experiments, then retry. See Model PVC Reactive Cleanup section. |
 | PipelineRun delete fails | Log warning, continue (not blocking) |
 | Orphaned helm release detected post-run | Log warning with exact `helm delete` command; don't auto-delete |
 
