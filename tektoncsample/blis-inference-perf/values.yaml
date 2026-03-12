@@ -10,6 +10,7 @@ stack:
   MAX_MODEL_LEN: 4096
   MAX_NUM_BATCHED_TOKENS: 2048
   MAX_NUM_SEQS: 128
+  extra_overrides: []
 
   model:
     helmValues:

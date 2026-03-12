@@ -135,6 +135,9 @@ spec:
                 # Update KV events subscriber output path
                 - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
                 {% endif %}
+                {% for override in stack.extra_overrides | default([]) %}
+                - {{ override }}
+                {% endfor %}
 
         - name: run-workload-{{ stackId }}
           description: Run workload against model server using inference-perf.
