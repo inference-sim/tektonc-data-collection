@@ -98,12 +98,22 @@ def make_experiment_id(exp):
     return f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}"
 
 
-def resolve_model(name, models):
-    """Returns (hf_id, extra_args_list)."""
+def resolve_model(name, models, precision=None):
+    """Returns (hf_id, extra_args_list, is_prequantized).
+
+    When precision='FP8' and the model has an fp8_hf_id, returns the
+    pre-quantized checkpoint ID and sets is_prequantized=True so the
+    caller knows to skip the --quantization=fp8 vLLM arg.
+    """
     entry = models[name]
     if isinstance(entry, str):
-        return entry, []
-    return entry["hf_id"], entry.get("extra_vllm_args", [])
+        return entry, [], False
+    hf_id = entry["hf_id"]
+    extra = entry.get("extra_vllm_args", [])
+    # Use pre-quantized FP8 checkpoint if available
+    if precision == "FP8" and "fp8_hf_id" in entry:
+        return entry["fp8_hf_id"], extra, True
+    return hf_id, extra, False
 
 
 def extract_pipeline_name(pipeline_yaml_path):
@@ -124,8 +134,10 @@ def build_values(exp, base_values, models, clusters, workloads):
     """Build per-experiment values.yaml from base template + experiment config."""
     v = copy.deepcopy(base_values)
 
-    # Resolve model
-    hf_id, extra_args = resolve_model(exp["model"], models)
+    # Resolve model (use pre-quantized FP8 checkpoint when available)
+    hf_id, extra_args, is_prequantized = resolve_model(
+        exp["model"], models, precision=exp["precision"]
+    )
 
     # Experiment identity
     exp_name = make_dns_name(f"blis-{exp['id']}-{exp['model']}-{exp['workload']}")
@@ -158,8 +170,10 @@ def build_values(exp, base_values, models, clusters, workloads):
         decode["annotations"] = {}
     decode["annotations"]["gpu-reaper.io/exclude"] = "true"
 
-    # Build extra_overrides
-    v["stack"]["extra_overrides"] = build_extra_overrides(exp, extra_args)
+    # Build extra_overrides (skip --quantization fp8 for pre-quantized checkpoints)
+    v["stack"]["extra_overrides"] = build_extra_overrides(
+        exp, extra_args, is_prequantized=is_prequantized
+    )
 
     # Workload profile
     wl = workloads[exp["workload"]]
@@ -169,12 +183,13 @@ def build_values(exp, base_values, models, clusters, workloads):
     return v
 
 
-def build_extra_overrides(exp, model_extra_args):
+def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
     """Build the list of Helm override strings for extra vLLM args."""
     overrides = []
 
-    # FP8 quantization
-    if exp["precision"] == "FP8":
+    # FP8 quantization — skip if using a pre-quantized checkpoint
+    # (weights are already FP8 on disk, vLLM auto-detects from config.json)
+    if exp["precision"] == "FP8" and not is_prequantized:
         overrides.append(
             'decode.containers[name="vllm"].args=--quantization fp8'
         )
@@ -327,7 +342,7 @@ def generate_campaign(args):
 
         # 4. Extract pipeline name and generate pipelinerun.yaml
         pipeline_name = extract_pipeline_name(exp_dir / "pipeline.yaml")
-        hf_id, _ = resolve_model(exp["model"], models)
+        hf_id, _, _ = resolve_model(exp["model"], models, precision=exp["precision"])
         experiment_id = make_experiment_id(exp)
         pr_yaml = build_pipelinerun(
             pipeline_name, experiment_id, hf_id, clusters["namespace"]
