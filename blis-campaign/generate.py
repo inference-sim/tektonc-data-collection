@@ -314,7 +314,12 @@ def generate_campaign(args):
     )
 
     generated = 0
+    skipped = 0
     for exp in experiments:
+        if exp.get("done", False):
+            skipped += 1
+            continue
+
         dir_name = make_dir_name(exp)
         exp_dir = output_dir / dir_name
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -353,5 +358,7 @@ def generate_campaign(args):
         print(f"  [{generated}/{len(experiments)}] #{exp['id']} {exp['model']} "
               f"{exp['hw']} {exp['workload']}")
 
-    print(f"\nGenerated {generated} experiments in {output_dir}/")
+    if skipped:
+        print(f"\nSkipped {skipped} already-done experiments")
+    print(f"Generated {generated} experiments in {output_dir}/")
     return 0
