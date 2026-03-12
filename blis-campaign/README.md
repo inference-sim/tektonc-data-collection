@@ -61,15 +61,61 @@ By default, only experiments marked `"safe": "safe"` in `experiment.json` are ru
 
 ### 3. Monitor progress
 
-From another terminal:
+All monitoring commands run from a **separate terminal** while the campaign is active.
+
+#### Status snapshot
 
 ```bash
-# Live log
-tail -f blis-campaign/campaign/campaign.log
-
-# Status summary
 python blis-campaign status --campaign blis-campaign/campaign/
 ```
+
+Shows a summary of the campaign state:
+- Aggregate counts by status (completed, running, deploying, pending, failed, skipped)
+- Progress fraction (e.g. `Progress: 12/53 completed`)
+- Active experiments with their PipelineRun names and start times
+- Failed experiments with failure reasons and attempt counts
+
+This reads `campaign-state.json` atomically, so it's safe to run concurrently with the runner.
+
+#### Live log
+
+```bash
+tail -f blis-campaign/campaign/campaign.log
+```
+
+The runner logs to both stdout and `campaign.log`. Key events to look for:
+
+| Log message | Meaning |
+|-------------|---------|
+| `STARTED #16 Llama-3.1-8b (1 GPUs) -> blis-16-attempt1-...` | Experiment deployed |
+| `16-llama-3-1-8b-h100-general: deploy-model (Running)` | Task progress update |
+| `SUCCEEDED 16-llama-3-1-8b-h100-general` | Pipeline finished, downloading results |
+| `COMPLETED 16-llama-3-1-8b-h100-general` | Results downloaded successfully |
+| `FAILED #17 DeepSeek-V3 H100 general: OOM (attempt 1/2)` | Experiment failed (will retry) |
+| `TIMEOUT ...: no progress for 180 min` | Stall detected, auto-failing |
+
+#### Deep-dive with Tekton CLI
+
+PipelineRun names follow the pattern `blis-{id}-attempt{N}-{timestamp}`. Get the name from the status command or log, then:
+
+```bash
+# List all pipeline runs
+tkn pr list -n diya
+
+# Watch live logs of a running pipeline
+tkn pr logs blis-16-attempt1-1718000000 -n diya -f
+
+# Full task breakdown and status
+tkn pr describe blis-16-attempt1-1718000000 -n diya
+```
+
+#### Raw state file
+
+```bash
+python -m json.tool blis-campaign/campaign/campaign-state.json
+```
+
+The state file tracks every experiment's status, current attempt, PipelineRun name, and failure history. It persists across runner restarts.
 
 ## Running Directly (without wrapper)
 
@@ -121,7 +167,9 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
   "gpu_mem": 0.9,
   "tp": 8,
   "dp": 1,
-  "notes": ""
+  "safe": "blocked",
+  "done": false,
+  "notes": "FP8 MoE OOM — blocked"
 }
 ```
 
@@ -137,7 +185,11 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
 | `gpu_mem` | GPU memory utilization (0.0-1.0) |
 | `tp` | Tensor parallelism degree |
 | `dp` | Data parallelism degree (null = 1) |
+| `safe` | Calibration status: `safe`, `unsafe`, `blocked`, or `uncalibrated` |
+| `done` | Whether the experiment has been completed (`true`/`false`) |
 | `notes` | Free-text notes (e.g., "completed", "mbt sweep") |
+
+The `safe` field controls runtime filtering: by default, `run` only executes experiments where `safe` is `"safe"`. The `done` field controls generation: `generate` skips experiments where `done` is `true`.
 
 ## File Structure
 
