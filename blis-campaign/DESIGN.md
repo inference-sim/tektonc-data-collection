@@ -117,12 +117,12 @@ H100:
   gpu_label_value: "NVIDIA-H100-80GB-HBM3"
 
 A100-80GB:
-  context: "fmaas"
+  context: "fmaas-vllmd"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-A100-SXM4-80GB"
 
 L40S:
-  context: "fmaas"
+  context: "fmaas-platform-eval"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-L40S"
 ```
