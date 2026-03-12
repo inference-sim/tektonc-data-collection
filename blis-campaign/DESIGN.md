@@ -77,6 +77,12 @@ Optional fields: `dp` (defaults to null), `notes`.
 
 Valid `precision` values: `"FP16"` (default, no extra vLLM arg) and `"FP8"` (adds `--quantization fp8`).
 
+**FP8 quantization approach** ([discussion](https://github.com/inference-sim/inference-sim/discussions/598#discussioncomment-16099342)): Online dynamic FP8 via `--quantization fp8`. Loads standard BF16 checkpoints from HuggingFace (same `modelArtifacts.uri` as FP16 experiments), quantizes Linear layer weights to FP8_E4M3 at initialization, computes activation scales dynamically per forward pass. No pre-quantized models or calibration data needed.
+
+Hardware behavior:
+- **H100**: Native FP8 tensor cores — full memory + throughput benefit.
+- **A100**: No native FP8 compute — vLLM uses W8A16 via Marlin kernels (weights in FP8, upcasted to FP16 for matrix multiply). Memory savings preserved, reduced throughput gains.
+
 ### Model config (`config/models.yaml`)
 
 Maps table model names to HuggingFace IDs. Most entries are a plain string. Models needing extra vLLM args use an object:
