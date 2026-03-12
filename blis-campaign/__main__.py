@@ -26,6 +26,8 @@ def main():
     run.add_argument("--only", help="Comma-separated experiment IDs")
     run.add_argument("--max-gpus", type=int, default=16,
                      help="Max GPUs to use concurrently (default: 16)")
+    run.add_argument("--all", dest="safe_only", action="store_false", default=True,
+                     help="Include unsafe/blocked/uncalibrated experiments (default: safe only)")
 
     # status
     st = sub.add_parser("status", help="Show campaign status")

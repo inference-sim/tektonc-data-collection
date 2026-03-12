@@ -52,7 +52,12 @@ To limit GPU usage or run a subset:
 
 # Run specific experiments by ID
 ./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --only 16,17,18
+
+# Include unsafe/blocked/uncalibrated experiments (default: safe only)
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --all
 ```
+
+By default, only experiments marked `"safe": "safe"` in `experiment.json` are run. Use `--all` to override this and include unsafe, blocked, or uncalibrated experiments.
 
 ### 3. Monitor progress
 
