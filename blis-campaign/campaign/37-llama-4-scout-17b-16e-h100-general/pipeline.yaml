@@ -154,6 +154,8 @@ spec:
           - name: data
             persistentVolumeClaim:
               claimName: data-pvc
+          annotations:
+            gpu-reaper.io/exclude: 'true'
     - name: overrides
       value:
       - decode.parallelism.tensor=2
@@ -164,7 +166,7 @@ spec:
       - decode.containers[name="vllm"].args=--quantization fp8
       - decode.containers[name="vllm"].args=--data-parallel-size 4
       - decode.containers[name="vllm"].args=--enable-expert-parallel
-      - decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}
+      - 'decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}'
   - name: run-workload-2
     description: Run workload against model server using inference-perf.
     taskRef:

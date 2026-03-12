@@ -87,6 +87,8 @@ stack:
         - name: data
           persistentVolumeClaim:
             claimName: data-pvc
+        annotations:
+          gpu-reaper.io/exclude: 'true'
 workload:
   harness: inference-perf
   profileTemplate:

@@ -154,6 +154,8 @@ spec:
           - name: data
             persistentVolumeClaim:
               claimName: data-pvc
+          annotations:
+            gpu-reaper.io/exclude: 'true'
     - name: overrides
       value:
       - decode.parallelism.tensor=4

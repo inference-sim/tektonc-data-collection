@@ -1,6 +1,7 @@
 """GPU-aware single-cluster campaign runner."""
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -8,6 +9,7 @@ from collections import deque
 from pathlib import Path
 
 from cluster import run_cmd, kubectl_json, get_available_gpus, preflight_check
+from generate import load_yaml
 from state import CampaignState, iso_now
 from download import download_and_verify, DownloadError
 from cleanup import cleanup_pipeline_run, collect_diagnostics
@@ -27,12 +29,17 @@ MAX_ATTEMPTS = 2
 def parse_range(range_str):
     """Parse '13-35' into (13, 35) tuple."""
     parts = range_str.split("-")
-    return int(parts[0]), int(parts[1])
+    if len(parts) != 2:
+        raise ValueError(f"Invalid range format '{range_str}', expected 'LO-HI' (e.g. 13-35)")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"Invalid range '{range_str}', both values must be integers")
 
 
 def parse_only(only_str):
     """Parse '13,25,30' into set of ints."""
-    return {int(x.strip()) for x in only_str.split(",")}
+    return {int(x.strip()) for x in only_str.split(",") if x.strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -40,9 +47,15 @@ def parse_only(only_str):
 # ---------------------------------------------------------------------------
 
 
+def _numeric_sort_key(d):
+    """Sort directories by leading numeric ID (e.g. '13-qwen3...' sorts as 13)."""
+    m = re.match(r'(\d+)', d.name)
+    return int(m.group(1)) if m else float('inf')
+
+
 def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None):
-    """Return experiment directories matching the filters, sorted by ID."""
-    exp_dirs = sorted(Path(campaign_dir).iterdir())
+    """Return experiment directories matching the filters, sorted by numeric ID."""
+    exp_dirs = sorted(Path(campaign_dir).iterdir(), key=_numeric_sort_key)
     result = []
     for d in exp_dirs:
         if not d.is_dir() or not (d / "experiment.json").exists():
@@ -271,14 +284,6 @@ def print_campaign_summary(state, campaign_dir):
 # ---------------------------------------------------------------------------
 
 
-def load_yaml(path):
-    """Load YAML file."""
-    import yaml
-
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
 def run_campaign(args):
     """Main entry point for 'blis-campaign run'."""
     config_dir = Path(__file__).parent / "config"
@@ -376,12 +381,17 @@ def run_campaign(args):
                     )
                 except Exception as e:
                     log.error(f"DEPLOY FAILED #{exp['id']}: {e}")
-                    state.set_status(
-                        exp_dir.name,
-                        "failed",
-                        attempts=attempt,
-                        last_failure=str(e),
-                    )
+                    if attempt < MAX_ATTEMPTS:
+                        log.info(f"  -> Will retry #{exp['id']} next cycle")
+                        state.set_status(
+                            exp_dir.name, "retrying",
+                            attempts=attempt, last_failure=str(e),
+                        )
+                    else:
+                        state.set_status(
+                            exp_dir.name, "failed",
+                            attempts=attempt, last_failure=str(e),
+                        )
                     started.append(exp_dir)  # remove from pending
 
         for d in started:

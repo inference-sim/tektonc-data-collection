@@ -22,6 +22,21 @@ def run_cmd(cmd, context=None, namespace=None, timeout=60, ignore_errors=False):
     return result
 
 
+def helm_cmd(cmd, context=None, namespace=None, timeout=60, ignore_errors=False):
+    """Run a helm command with --kube-context and --namespace flags.
+
+    Helm uses different flag names than kubectl.
+    """
+    if context:
+        cmd = f"{cmd} --kube-context={context}"
+    if namespace:
+        cmd = f"{cmd} --namespace {namespace}"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0 and not ignore_errors:
+        raise RuntimeError(f"Command failed: {cmd}\nstderr: {result.stderr.strip()}")
+    return result
+
+
 def kubectl_json(cmd, context=None, namespace=None, timeout=60):
     """Run kubectl command and parse JSON output."""
     result = run_cmd(f"kubectl {cmd} -o json", context=context, namespace=namespace, timeout=timeout)

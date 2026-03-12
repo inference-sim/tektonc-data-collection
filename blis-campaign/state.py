@@ -47,7 +47,14 @@ class CampaignState:
         self.save()
 
     def set_status(self, exp_id, status, **extra):
-        """Set experiment status with optional extra fields."""
+        """Set experiment status with transition validation."""
+        current = self.get(exp_id).get("status", "pending")
+        allowed = VALID_TRANSITIONS.get(current, set())
+        if status not in allowed:
+            raise ValueError(
+                f"Invalid state transition for {exp_id}: {current} -> {status} "
+                f"(allowed: {allowed})"
+            )
         self.update(exp_id, status=status, updated_at=iso_now(), **extra)
 
     def mark_started(self):

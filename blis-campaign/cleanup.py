@@ -3,7 +3,7 @@ import json
 import logging
 from pathlib import Path
 
-from cluster import run_cmd, kubectl_json
+from cluster import run_cmd, kubectl_json, helm_cmd
 
 log = logging.getLogger("blis-campaign")
 
@@ -50,8 +50,7 @@ def collect_diagnostics(exp_dir, exp, pipeline_run, context, namespace):
     except Exception as e:
         log.warning(f"Could not fetch events: {e}")
 
-    # Pods related to this experiment
-    model_label = f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}"
+    # Pods in non-succeeded state (useful for debugging)
     try:
         result = run_cmd(
             f"kubectl get pods --field-selector=status.phase!=Succeeded",
@@ -63,8 +62,8 @@ def collect_diagnostics(exp_dir, exp, pipeline_run, context, namespace):
 
     # Helm releases
     try:
-        result = run_cmd(
-            f"helm list",
+        result = helm_cmd(
+            "helm list",
             context=context, namespace=namespace, ignore_errors=True,
         )
         (diag_dir / "helm-releases.txt").write_text(result.stdout)
@@ -121,8 +120,8 @@ def run_triage(diag_dir):
 def check_orphaned_helm(context, namespace):
     """Warn about orphaned helm releases that may be holding GPU resources."""
     try:
-        result = run_cmd(
-            f"helm list --filter 'blis-|exp-'",
+        result = helm_cmd(
+            "helm list --filter 'blis-|exp-'",
             context=context, namespace=namespace, ignore_errors=True,
         )
         lines = result.stdout.strip().split('\n')

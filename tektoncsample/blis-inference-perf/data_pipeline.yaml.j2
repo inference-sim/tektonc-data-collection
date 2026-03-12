@@ -136,7 +136,7 @@ spec:
                 - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
                 {% endif %}
                 {% for override in stack.extra_overrides | default([]) %}
-                - {{ override }}
+                - '{{ override }}'
                 {% endfor %}
 
         - name: run-workload-{{ stackId }}

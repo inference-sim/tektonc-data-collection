@@ -1,0 +1,131 @@
+experiment:
+  name: blis-8-llama-2-70b-reasoning
+  description: 'Exp #8: Llama-2-70b FP16 TP4 reasoning on H100'
+stack:
+  treatments:
+    tensorParallelism:
+    - 4
+  MAX_MODEL_LEN: 4096
+  MAX_NUM_BATCHED_TOKENS: 2048
+  MAX_NUM_SEQS: 128
+  extra_overrides:
+  - decode.containers[name="vllm"].args=--cpu-offload-gb 4
+  model:
+    helmValues:
+      fullnameOverride: FULLNAME
+      serviceAccountOverride: default
+      multinode: false
+      modelArtifacts:
+        uri: pvc://model-pvc/models/MODEL
+        size: 300Gi
+        authSecretName: hf-secret
+        name: MODEL
+        labels:
+          llm-d.ai/inferenceServing: 'true'
+          llm-d.ai/model: FULLNAME
+      routing:
+        servicePort: 8000
+        proxy:
+          enabled: false
+      prefill:
+        create: false
+      decode:
+        create: true
+        replicas: 1
+        acceleratorTypes:
+          labelKey: nvidia.com/gpu.product
+          labelValues:
+          - NVIDIA-H100-80GB-HBM3
+        parallelism:
+          data: 1
+          tensor: 4
+        containers:
+        - name: vllm
+          env:
+          - name: VLLM_CONFIGURE_LOGGING
+            value: '1'
+          - name: VLLM_LOGGING_CONFIG_PATH
+            value: /workspace/vllm_logging.json
+          - name: HF_HOME
+            value: /mnt/exp/.cache/huggingface
+          - name: TRANSFORMERS_CACHE
+            value: /mnt/exp/.cache/huggingface
+          mountModelVolume: true
+          image: vllm/vllm-openai:v0.15.1
+          modelCommand: vllmServe
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: '32'
+            requests:
+              memory: 128Gi
+              cpu: '32'
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-pvc
+        annotations:
+          gpu-reaper.io/exclude: 'true'
+workload:
+  harness: inference-perf
+  profileTemplate:
+    load:
+      type: constant
+      stages:
+      - rate: 4.0
+        duration: 1200
+    api:
+      type: completion
+      streaming: true
+    server:
+      type: vllm
+      model_name: MODEL
+      base_url: STACK_ENDPOINT
+      ignore_eos: true
+    tokenizer:
+      pretrained_model_name_or_path: TOKENIZER
+    data:
+      type: shared_prefix
+      shared_prefix:
+        num_unique_system_prompts: 23
+        num_users_per_system_prompt: 1
+        system_prompt_len: 100
+        question_len: 934
+        output_len: 1448
+        enable_multi_turn_chat: true
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: true
+    storage:
+      local_storage:
+        path: PATH
+upload_target:
+  type: s3
+  configuration:
+    bucket: cloud-object-storage-cos-standard-ere
+    endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud

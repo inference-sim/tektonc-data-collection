@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from cluster import run_cmd
+from generate import make_experiment_id
 
 log = logging.getLogger("blis-campaign")
 
@@ -145,8 +146,7 @@ def download_and_verify(campaign_dir, dir_name, context, namespace):
     exp_dir = Path(campaign_dir) / dir_name
     exp = json.loads((exp_dir / "experiment.json").read_text())
 
-    # Build experiment ID for PVC path (matches make_experiment_id from generate.py)
-    experiment_id = f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}"
+    experiment_id = make_experiment_id(exp)
 
     local_dest = exp_dir / "data"
 

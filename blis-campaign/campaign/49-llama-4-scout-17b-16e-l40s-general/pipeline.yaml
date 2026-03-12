@@ -154,6 +154,8 @@ spec:
           - name: data
             persistentVolumeClaim:
               claimName: data-pvc
+          annotations:
+            gpu-reaper.io/exclude: 'true'
     - name: overrides
       value:
       - decode.parallelism.tensor=4
@@ -162,7 +164,7 @@ spec:
       - decode.containers[name="vllm"].args=--max-num-seqs=128
       - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/$(params.experimentId)-4/vllm_logging.json"
       - decode.containers[name="vllm"].args=--quantization fp8
-      - decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}
+      - 'decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}'
   - name: run-workload-4
     description: Run workload against model server using inference-perf.
     taskRef:

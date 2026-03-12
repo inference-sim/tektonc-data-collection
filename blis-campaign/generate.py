@@ -152,6 +152,12 @@ def build_values(exp, base_values, models, clusters, workloads):
         v["stack"]["model"]["helmValues"]["decode"]["parallelism"]["data"] = dp
         v["stack"]["model"]["helmValues"]["decode"]["replicas"] = dp
 
+    # GPU reaper exclusion — prevent reaper from killing experiment deployments
+    decode = v["stack"]["model"]["helmValues"]["decode"]
+    if "annotations" not in decode:
+        decode["annotations"] = {}
+    decode["annotations"]["gpu-reaper.io/exclude"] = "true"
+
     # Build extra_overrides
     v["stack"]["extra_overrides"] = build_extra_overrides(exp, extra_args)
 
