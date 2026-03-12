@@ -1,0 +1,13 @@
+{
+  "id": 26,
+  "model": "Llama-3.1-8b",
+  "precision": "FP16",
+  "hw": "H100",
+  "workload": "general",
+  "mbt": 8192,
+  "cpu_offload": false,
+  "gpu_mem": 0.9,
+  "tp": 1,
+  "dp": null,
+  "notes": "mbt sweep"
+}

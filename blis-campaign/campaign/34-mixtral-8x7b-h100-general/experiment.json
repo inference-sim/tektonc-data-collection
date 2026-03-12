@@ -1,0 +1,13 @@
+{
+  "id": 34,
+  "model": "Mixtral-8x7B",
+  "precision": "FP16",
+  "hw": "H100",
+  "workload": "general",
+  "mbt": 2048,
+  "cpu_offload": false,
+  "gpu_mem": 0.9,
+  "tp": 4,
+  "dp": 1,
+  "notes": "TP sweep (2x default)"
+}

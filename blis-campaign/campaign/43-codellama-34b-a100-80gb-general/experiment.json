@@ -1,0 +1,13 @@
+{
+  "id": 43,
+  "model": "Codellama-34b",
+  "precision": "FP16",
+  "hw": "A100-80GB",
+  "workload": "general",
+  "mbt": 2048,
+  "cpu_offload": false,
+  "gpu_mem": 0.9,
+  "tp": 2,
+  "dp": null,
+  "notes": ""
+}

@@ -1,0 +1,13 @@
+{
+  "id": 22,
+  "model": "DeepSeek-V3",
+  "precision": "FP8",
+  "hw": "H100",
+  "workload": "roleplay",
+  "mbt": 2048,
+  "cpu_offload": false,
+  "gpu_mem": 0.9,
+  "tp": 8,
+  "dp": 1,
+  "notes": ""
+}
