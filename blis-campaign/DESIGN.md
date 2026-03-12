@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-You have ~53 experiments to run across two clusters (pokprod001 for H100, fmaas for A100/L40S). Today you run them one at a time via a Claude skill that generates YAML on the fly — slow, error-prone, no retries, no batch support.
+You have 53 experiments to run across three clusters (pokprod001 for H100, fmaas-vllmd for A100, fmaas-platform-eval for L40S). Today you run them one at a time via a Claude skill that generates YAML on the fly — slow, error-prone, no retries, no batch support.
 
 The campaign runner replaces this with two steps:
 
@@ -15,7 +15,7 @@ The campaign runner replaces this with two steps:
 
    - You configure how many GPUs are available per cluster (e.g., 8 H100s on pokprod001, 8 A100s on fmaas).
    - Each experiment needs `tp * dp` GPUs (e.g., experiment #13 needs 1 H100, experiment #15 needs 8 H100s).
-   - The runner walks the experiment list **in table order** and starts each experiment if there are enough free GPUs on its cluster. So if you have 8 H100s, it might start experiments #13 (1 GPU), #14 (1 GPU), #16 (2 GPUs), and #17 (1 GPU) all at the same time — that's 5 GPUs in use, 3 free.
+   - The runner walks the experiment list **in table order** and starts each experiment if there are enough free GPUs on its cluster. So if you have 8 H100s, it might start experiments #13 (1 GPU), #14 (1 GPU), #15 (1 GPU), and #16 (1 GPU) all at the same time — that's 4 GPUs in use, 4 free.
    - When an experiment finishes, its GPUs are freed. The runner immediately checks: can the next pending experiment (in table order) fit now? If yes, start it. If no (e.g., it needs 8 GPUs but only 3 are free), look ahead for a smaller experiment that fits.
    - Different clusters run independently — an H100 experiment and an A100 experiment run in parallel on their respective clusters.
 
@@ -45,7 +45,7 @@ Reads an experiment matrix (JSON) and produces a self-contained directory per ex
 
 | File | Description |
 |------|-------------|
-| `experiments.json` | Flat array mirroring the [#598 table](https://github.com/inference-sim/inference-sim/discussions/598). One entry per experiment. |
+| `experiments.json` | Flat array mirroring the [#598 table](https://github.com/inference-sim/inference-sim/discussions/598) (53 experiments, rows 1-53, phases 0-9). One entry per experiment. |
 | `config/models.yaml` | Short model name → HuggingFace ID + optional extra vLLM args |
 | `config/clusters.yaml` | HW type → kubectl context, GPU label, GPU capacity |
 | `workloads.yaml` | Workload profiles (existing file in repo root) |
@@ -92,15 +92,17 @@ Llama-3.1-8b: "meta-llama/Llama-3.1-8B-Instruct"
 Qwen3-14B: "Qwen/Qwen3-14B"
 Codellama-34b: "codellama/CodeLlama-34b-Instruct-hf"
 Llama-2-70b: "meta-llama/Llama-2-70b-hf"
-Mixtral-8x7B: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+Mixtral-8x7B: "mistralai/Mixtral-8x7B-v0.1"
 DeepSeek-V3: "deepseek-ai/DeepSeek-V3"
 Llama-2-7b-hf: "meta-llama/Llama-2-7b-hf"
 
 Llama-4-Scout-17B-16E:
-  hf_id: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+  hf_id: "meta-llama/Llama-4-Scout-17B-16E"
   extra_vllm_args:
     - '--override-generation-config={"attn_temperature_tuning": true}'
 ```
+
+**Note:** Model IDs match the HuggingFace links in the [#598 discussion](https://github.com/inference-sim/inference-sim/discussions/598). Mixtral uses the base model (`v0.1`), not Instruct. Llama-4-Scout uses the base, not Instruct.
 
 Resolution logic:
 
