@@ -301,15 +301,6 @@ def generate_campaign(args):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load existing campaign state to skip completed experiments
-    state_path = output_dir / "campaign-state.json"
-    completed = set()
-    if state_path.exists():
-        state_data = json.loads(state_path.read_text())
-        for name, entry in state_data.get("experiments", {}).items():
-            if entry.get("status") in ("completed", "download_failed"):
-                completed.add(name)
-
     # Validate all experiments first (fail-fast)
     errors = validate_all(experiments, models, clusters, workloads)
     if errors:
@@ -323,15 +314,8 @@ def generate_campaign(args):
     )
 
     generated = 0
-    skipped = 0
     for exp in experiments:
         dir_name = make_dir_name(exp)
-
-        # Skip already-completed experiments
-        if dir_name in completed:
-            skipped += 1
-            continue
-
         exp_dir = output_dir / dir_name
         exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -369,7 +353,5 @@ def generate_campaign(args):
         print(f"  [{generated}/{len(experiments)}] #{exp['id']} {exp['model']} "
               f"{exp['hw']} {exp['workload']}")
 
-    if skipped:
-        print(f"\nSkipped {skipped} already-completed experiments")
-    print(f"Generated {generated} experiments in {output_dir}/")
+    print(f"\nGenerated {generated} experiments in {output_dir}/")
     return 0
