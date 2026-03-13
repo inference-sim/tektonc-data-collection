@@ -1,11 +1,13 @@
 """PVC data download via tar pipe + file verification."""
+import json
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
 
 from cluster import run_cmd
-from generate import make_experiment_id
+from generate import load_yaml, make_experiment_id
 
 log = logging.getLogger("blis-campaign")
 
@@ -92,7 +94,10 @@ def tar_copy(pod_name, remote_path, local_dest, context, namespace):
         f"kubectl exec {pod_name} --context={context} -n {namespace} -- "
         f"tar cf - -C /data {remote_path} | tar xf - -C {local_dest}"
     )
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise DownloadError("tar pipe timed out after 600s")
     if result.returncode != 0:
         raise DownloadError(f"tar pipe failed: {result.stderr}")
 
@@ -141,20 +146,91 @@ def download_and_verify(campaign_dir, dir_name, context, namespace):
 
     Downloads experiment data from the PVC to campaign_dir/dir_name/data/.
     """
-    import json
-
     exp_dir = Path(campaign_dir) / dir_name
     exp = json.loads((exp_dir / "experiment.json").read_text())
 
     experiment_id = make_experiment_id(exp)
+    # PVC data dir matches the template's stackModelLabel: "$(params.experimentId)-{{ tp }}"
+    pvc_data_dir = f"{experiment_id}-{exp['tp']}"
 
     local_dest = exp_dir / "data"
 
     pod_name = None
     try:
         pod_name = create_busybox_pod(context, namespace)
-        tar_copy(pod_name, experiment_id, local_dest, context, namespace)
-        verify_download(local_dest, experiment_id)
+        tar_copy(pod_name, pvc_data_dir, local_dest, context, namespace)
+        verify_download(local_dest, pvc_data_dir)
     finally:
         if pod_name:
             delete_busybox_pod(pod_name, context, namespace)
+
+
+def retry_downloads(args):
+    """Retry downloads for experiments stuck in download_failed status."""
+    from state import CampaignState, iso_now
+
+    config_dir = Path(__file__).parent / "config"
+    clusters = load_yaml(config_dir / "clusters.yaml")
+
+    if args.hw not in clusters:
+        print(
+            f"ERROR: Unknown hardware type '{args.hw}'. "
+            f"Valid: {[k for k in clusters if k != 'namespace']}"
+        )
+        return 1
+
+    cluster = clusters[args.hw]
+    context = cluster["context"]
+    namespace = clusters["namespace"]
+
+    campaign_dir = Path(args.campaign)
+    state = CampaignState(campaign_dir)
+
+    only_ids = None
+    if args.only:
+        only_ids = {int(x.strip()) for x in args.only.split(",") if x.strip()}
+
+    # Find experiments in download_failed status matching filters
+    targets = []
+    for d in sorted(campaign_dir.iterdir(), key=lambda p: _numeric_sort_key(p)):
+        if not d.is_dir() or not (d / "experiment.json").exists():
+            continue
+        exp = json.loads((d / "experiment.json").read_text())
+        if exp["hw"] != args.hw:
+            continue
+        if only_ids and exp["id"] not in only_ids:
+            continue
+        entry = state.get(d.name)
+        if entry["status"] != "download_failed":
+            continue
+        targets.append(d)
+
+    if not targets:
+        print("No download_failed experiments match the specified filters.")
+        return 0
+
+    print(f"Retrying downloads for {len(targets)} experiment(s)...")
+
+    succeeded, failed = [], []
+    for exp_dir in targets:
+        dir_name = exp_dir.name
+        print(f"\n  Retrying {dir_name}...")
+        state.set_status(dir_name, "downloading")
+        try:
+            download_and_verify(str(campaign_dir), dir_name, context, namespace)
+            state.set_status(dir_name, "completed", completed_at=iso_now())
+            print(f"  -> {dir_name}: OK")
+            succeeded.append(dir_name)
+        except DownloadError as e:
+            print(f"  -> {dir_name}: FAILED ({e})")
+            state.set_status(dir_name, "download_failed", last_failure=str(e))
+            failed.append(dir_name)
+
+    print(f"\nRetry summary: {len(succeeded)} succeeded, {len(failed)} failed")
+    return 0 if not failed else 1
+
+
+def _numeric_sort_key(p):
+    """Sort paths by leading numeric ID (e.g. '13-qwen3...' sorts as 13)."""
+    m = re.match(r"(\d+)", p.name)
+    return int(m.group(1)) if m else float("inf")

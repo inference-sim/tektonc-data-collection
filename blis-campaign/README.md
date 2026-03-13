@@ -33,7 +33,7 @@ tmux new -s blis
 ```
 
 This is the recommended way to run. The wrapper:
-- Runs all matching experiments with GPU-aware parallel scheduling (default: up to 16 GPUs)
+- Runs all matching experiments with GPU-aware parallel scheduling (default: up to 16 GPUs, 4 concurrent PipelineRuns)
 - Retries each experiment once on failure, with full diagnostics
 - Restarts the runner up to 3 times if it crashes (network blip, kubectl timeout, etc.)
 - Picks up where it left off on restart — state is persisted to `campaign-state.json`
@@ -46,6 +46,9 @@ To limit GPU usage or run a subset:
 ```bash
 # Use at most 8 GPUs
 ./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --max-gpus 8
+
+# Limit to 2 concurrent PipelineRuns (default: 4)
+./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --max-concurrent 2
 
 # Run only experiments 13 through 24
 ./blis-campaign/run-campaign.sh --campaign blis-campaign/campaign/ --hw H100 --range 13-24
@@ -225,4 +228,24 @@ blis-campaign/
 python blis-campaign run --campaign blis-campaign/campaign/ --hw H100 --only 17,18
 ```
 
-**Stalled experiment**: If no progress is detected for 60 minutes, the runner times out the experiment, collects diagnostics, and retries once.
+**Retrying failed downloads**: If experiments are stuck in `download_failed` (the PVC data is still intact), retry just the download step:
+```bash
+python blis-campaign retry-downloads --campaign blis-campaign/campaign/ --hw H100
+
+# Retry specific experiments only
+python blis-campaign retry-downloads --campaign blis-campaign/campaign/ --hw H100 --only 17,18
+```
+
+**Recovering orphaned experiments**: If the runner was interrupted while experiments were running, use `harvest` to recover their data:
+```bash
+python blis-campaign harvest --campaign blis-campaign/campaign/ --hw H100
+
+# Wait for still-running experiments to finish
+python blis-campaign harvest --campaign blis-campaign/campaign/ --hw H100 --wait
+```
+
+The runner also automatically recovers orphans on restart — any experiments stuck in `running`, `deploying`, or `downloading` status will be resolved before new experiments launch.
+
+**Graceful shutdown**: Press Ctrl-C once to stop launching new experiments while letting running ones finish. Press Ctrl-C again to force exit immediately.
+
+**Stalled experiment**: If no new Tekton task starts for 3 hours (`STALL_TIMEOUT` in `run.py`), the runner times out the experiment, collects diagnostics, and retries once. The timer resets each time the pipeline advances to a new task, so long pipelines are fine — only genuinely stuck experiments get timed out.

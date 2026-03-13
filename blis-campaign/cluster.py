@@ -70,8 +70,29 @@ def get_available_gpus(context, gpu_label_key, gpu_label_value):
             )
 
     available = total - allocated
-    log.info(f"GPUs on {context}: {available} available ({total} total, {allocated} allocated)")
+    log.info(f"Cluster GPUs: {available} free / {total} total")
     return available
+
+
+def get_campaign_gpu_usage(context, namespace, pr_names):
+    """Query actual GPU usage in the campaign namespace.
+
+    Counts all nvidia.com/gpu requests from running pods in the namespace.
+    This includes model-serving pods (Helm Deployments) and Tekton task pods,
+    since model-serving pods don't carry tekton.dev/pipelineRun labels.
+    """
+    pods = kubectl_json(
+        "get pods --field-selector=status.phase=Running",
+        context=context,
+        namespace=namespace,
+    )
+    gpus = 0
+    for p in pods.get("items", []):
+        for c in p["spec"].get("containers", []):
+            gpus += int(
+                c.get("resources", {}).get("requests", {}).get("nvidia.com/gpu", 0)
+            )
+    return gpus
 
 
 def preflight_check(hw, clusters):

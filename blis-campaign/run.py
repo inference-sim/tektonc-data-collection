@@ -2,13 +2,14 @@
 import json
 import logging
 import re
+import signal
 import subprocess
 import sys
 import time
 from collections import deque
 from pathlib import Path
 
-from cluster import run_cmd, kubectl_json, get_available_gpus, preflight_check
+from cluster import run_cmd, kubectl_json, get_available_gpus, get_campaign_gpu_usage, preflight_check
 from generate import load_yaml
 from state import CampaignState, iso_now
 from download import download_and_verify, DownloadError
@@ -19,6 +20,22 @@ log = logging.getLogger("blis-campaign")
 POLL_INTERVAL = 30  # seconds between polling cycles
 STALL_TIMEOUT = 10800  # 3 hours without progress = stall (large model downloads can take 1-2h)
 MAX_ATTEMPTS = 2
+
+_draining = False
+
+
+def _sigint_handler(signum, frame):
+    """Graceful shutdown: first Ctrl-C drains, second force-exits."""
+    global _draining
+    if _draining:
+        # Second Ctrl-C: restore default handler and raise
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        raise KeyboardInterrupt
+    _draining = True
+    log.warning(
+        "SIGINT received: draining. No new experiments will launch. "
+        "Running experiments will complete. Press Ctrl-C again to force exit."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +202,19 @@ def handle_success(dir_name, run_info, state, context, namespace, campaign_dir):
     log.info(f"SUCCEEDED {dir_name}")
     state.set_status(dir_name, "downloading")
 
-    try:
-        download_and_verify(campaign_dir, dir_name, context, namespace)
-        state.set_status(dir_name, "completed", completed_at=iso_now())
-        log.info(f"COMPLETED {dir_name}")
-    except DownloadError as e:
-        log.error(f"DOWNLOAD FAILED {dir_name}: {e}")
-        state.set_status(dir_name, "download_failed", last_failure=str(e))
+    for attempt in range(1, 3):  # up to 2 attempts
+        try:
+            download_and_verify(campaign_dir, dir_name, context, namespace)
+            state.set_status(dir_name, "completed", completed_at=iso_now())
+            log.info(f"COMPLETED {dir_name}")
+            break
+        except DownloadError as e:
+            if attempt < 2:
+                log.warning(f"Download attempt {attempt} failed for {dir_name}: {e} — retrying")
+                time.sleep(10)
+            else:
+                log.error(f"DOWNLOAD FAILED {dir_name}: {e}")
+                state.set_status(dir_name, "download_failed", last_failure=str(e))
 
     # Cleanup PipelineRun (best-effort)
     cleanup_pipeline_run(run_info["pr_name"], context, namespace)
@@ -291,6 +314,14 @@ def print_campaign_summary(state, campaign_dir):
 # ---------------------------------------------------------------------------
 
 
+def find_orphans_count(state):
+    """Quick check if any experiments are in orphan-like states."""
+    return sum(
+        1 for e in state.data.get("experiments", {}).values()
+        if e.get("status") in {"running", "deploying", "downloading"}
+    )
+
+
 def run_campaign(args):
     """Main entry point for 'blis-campaign run'."""
     config_dir = Path(__file__).parent / "config"
@@ -312,12 +343,14 @@ def run_campaign(args):
     setup_logging(campaign_dir)
 
     max_gpus = args.max_gpus
+    max_concurrent = args.max_concurrent
 
     log.info("BLIS Campaign Runner starting")
     log.info(f"  Target: {args.hw} ({context})")
     log.info(f"  Campaign: {campaign_dir}")
     if max_gpus:
         log.info(f"  Max GPUs: {max_gpus}")
+    log.info(f"  Max concurrent PipelineRuns: {max_concurrent}")
     if not getattr(args, "safe_only", True):
         log.info("  Safe filter: DISABLED (--all)")
 
@@ -341,80 +374,111 @@ def run_campaign(args):
     state = CampaignState(campaign_dir)
     state.mark_started()
 
-    # Build pending queue (skip completed/download_failed experiments)
+    # Install graceful-shutdown handler
+    global _draining
+    _draining = False
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    # Build pending queue (skip terminal experiments)
     skip_statuses = {"completed", "download_failed", "skipped"}
     pending = deque(
         d for d in exp_dirs if state.get(d.name)["status"] not in skip_statuses
     )
     running = {}  # dir_name -> {pr_name, gpus, started_at, last_task, last_change}
 
-    log.info(f"Campaign: {len(pending)} pending, {len(exp_dirs)} total for {args.hw}")
+    # Recover orphaned experiments from a previous interrupted run
+    from harvest import recover_in_flight
+    recovered = recover_in_flight(state, context, namespace, str(campaign_dir), pending, running)
+    if recovered or find_orphans_count(state):
+        # Rebuild pending to avoid duplicates after recovery
+        skip_after = {"completed", "download_failed", "skipped", "failed"}
+        pending = deque(
+            d for d in exp_dirs
+            if state.get(d.name)["status"] not in skip_after
+            and d.name not in running
+        )
+
+    log.info(f"Campaign: {len(pending)} pending, {len(running)} running, {len(exp_dirs)} total for {args.hw}")
 
     while pending or running:
-        # Query GPU availability
-        try:
-            available = get_available_gpus(
-                context, cluster["gpu_label_key"], cluster["gpu_label_value"]
+        # Drain mode: stop launching, wait for running to finish
+        if _draining and not running:
+            log.info("Drain complete: all running experiments finished.")
+            break
+        # Launch phase: skip if draining
+        if not _draining:
+            # Query GPU availability
+            try:
+                available = get_available_gpus(
+                    context, cluster["gpu_label_key"], cluster["gpu_label_value"]
+                )
+            except Exception as e:
+                log.warning(f"GPU query failed: {e}, retrying next cycle")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # Cap by --max-gpus (subtract GPUs already used by this campaign)
+            pr_names = [r["pr_name"] for r in running.values()]
+            campaign_gpus = get_campaign_gpu_usage(context, namespace, pr_names) if pr_names else 0
+            if max_gpus is not None:
+                available = min(available, max_gpus - campaign_gpus)
+            log.info(
+                f"Campaign using {campaign_gpus}/{max_gpus} GPUs, "
+                f"{len(running)}/{max_concurrent} runs — "
+                f"{available} GPUs schedulable"
             )
-        except Exception as e:
-            log.warning(f"GPU query failed: {e}, retrying next cycle")
-            time.sleep(POLL_INTERVAL)
-            continue
 
-        # Cap by --max-gpus (subtract GPUs already used by this campaign)
-        if max_gpus is not None:
-            campaign_gpus = sum(r["gpus"] for r in running.values())
-            available = min(available, max_gpus - campaign_gpus)
+            # Try to start experiments (order-preserving greedy backfill)
+            started = []
+            for exp_dir in list(pending):
+                if len(running) >= max_concurrent:
+                    break
+                exp = json.loads((exp_dir / "experiment.json").read_text())
+                gpus_needed = exp["tp"] * max(exp.get("dp") or 1, 1)
 
-        # Try to start experiments (order-preserving greedy backfill)
-        started = []
-        for exp_dir in list(pending):
-            exp = json.loads((exp_dir / "experiment.json").read_text())
-            gpus_needed = exp["tp"] * max(exp.get("dp") or 1, 1)
-
-            if available >= gpus_needed:
-                attempt = state.get(exp_dir.name).get("attempts", 0) + 1
-                try:
-                    state.set_status(exp_dir.name, "deploying", attempts=attempt)
-                    pr_name = deploy(exp_dir, context, namespace, attempt)
-                    running[exp_dir.name] = {
-                        "pr_name": pr_name,
-                        "gpus": gpus_needed,
-                        "started_at": time.time(),
-                        "last_task": None,
-                        "last_change": time.time(),
-                    }
-                    state.set_status(
-                        exp_dir.name,
-                        "running",
-                        pipeline_run=pr_name,
-                        attempts=attempt,
-                        started_at=iso_now(),
-                    )
-                    available -= gpus_needed
-                    started.append(exp_dir)
-                    log.info(
-                        f"STARTED #{exp['id']} {exp['model']} "
-                        f"({gpus_needed} GPU{'s' if gpus_needed > 1 else ''}) "
-                        f"-> {pr_name}"
-                    )
-                except Exception as e:
-                    log.error(f"DEPLOY FAILED #{exp['id']}: {e}")
-                    if attempt < MAX_ATTEMPTS:
-                        log.info(f"  -> Will retry #{exp['id']} next cycle")
+                if available >= gpus_needed:
+                    attempt = state.get(exp_dir.name).get("attempts", 0) + 1
+                    try:
+                        state.set_status(exp_dir.name, "deploying", attempts=attempt)
+                        pr_name = deploy(exp_dir, context, namespace, attempt)
+                        running[exp_dir.name] = {
+                            "pr_name": pr_name,
+                            "gpus": gpus_needed,
+                            "started_at": time.time(),
+                            "last_task": None,
+                            "last_change": time.time(),
+                        }
                         state.set_status(
-                            exp_dir.name, "retrying",
-                            attempts=attempt, last_failure=str(e),
+                            exp_dir.name,
+                            "running",
+                            pipeline_run=pr_name,
+                            attempts=attempt,
+                            started_at=iso_now(),
                         )
-                    else:
-                        state.set_status(
-                            exp_dir.name, "failed",
-                            attempts=attempt, last_failure=str(e),
+                        available -= gpus_needed
+                        started.append(exp_dir)
+                        log.info(
+                            f"STARTED #{exp['id']} {exp['model']} "
+                            f"({gpus_needed} GPU{'s' if gpus_needed > 1 else ''}) "
+                            f"-> {pr_name}"
                         )
-                    started.append(exp_dir)  # remove from pending
+                    except Exception as e:
+                        log.error(f"DEPLOY FAILED #{exp['id']}: {e}")
+                        if attempt < MAX_ATTEMPTS:
+                            log.info(f"  -> Will retry #{exp['id']} next cycle")
+                            state.set_status(
+                                exp_dir.name, "retrying",
+                                attempts=attempt, last_failure=str(e),
+                            )
+                        else:
+                            state.set_status(
+                                exp_dir.name, "failed",
+                                attempts=attempt, last_failure=str(e),
+                            )
+                        started.append(exp_dir)  # remove from pending
 
-        for d in started:
-            pending.remove(d)
+            for d in started:
+                pending.remove(d)
 
         # Wait before polling
         time.sleep(POLL_INTERVAL)
@@ -467,6 +531,9 @@ def run_campaign(args):
 
             elif current_task:
                 log.info(f"  {dir_name}: {current_task} ({status})")
+
+    # Restore default signal handler
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     # Print final summary
     print_campaign_summary(state, str(campaign_dir))

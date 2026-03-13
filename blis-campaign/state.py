@@ -6,12 +6,12 @@ from pathlib import Path
 
 VALID_TRANSITIONS = {
     "pending": {"deploying", "skipped"},
-    "deploying": {"running", "retrying", "failed"},
+    "deploying": {"running", "retrying", "failed", "downloading"},
     "running": {"downloading", "retrying", "failed"},
     "downloading": {"completed", "download_failed"},
     "retrying": {"deploying"},
     "failed": {"deploying"},  # for --only re-runs
-    "download_failed": set(),
+    "download_failed": {"downloading"},  # for retry-downloads
     "completed": set(),
     "skipped": set(),
 }

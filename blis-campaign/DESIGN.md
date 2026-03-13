@@ -192,23 +192,23 @@ Constructs `stack.extra_overrides` list from experiment parameters. These become
 |-----------------|-----------|-------------------|
 | `precision` | `== "FP8"` | `--quantization fp8` |
 | `gpu_mem` | `!= 0.9` | `--gpu-memory-utilization=<value>` |
-| `cpu_offload` | `== true` | `--cpu-offload-gb <DEFAULT_CPU_OFFLOAD_GB>` |
-| `dp` | `> 1` | `--data-parallel-size <dp>` |
+| `cpu_offload` | `== true` | `--kv-offloading-size=<DEFAULT_KV_OFFLOAD_GB>` |
+| `dp` | `> 1` | (auto-injected by Helm chart from `decode.parallelism.data`) |
 | `dp` + MoE model | `dp > 1` and model is MoE | `--enable-expert-parallel` |
 | model-specific | from `models.yaml` | e.g., `--override-generation-config=...` |
 
 **Constants (configurable at top of generator):**
 
 ```python
-DEFAULT_CPU_OFFLOAD_GB = 4  # GiB per GPU when cpu_offload=true
+DEFAULT_KV_OFFLOAD_GB = 8  # GiB total across TP ranks when cpu_offload=true
 
 # Models that use expert parallelism when dp > 1
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 ```
 
 **Important vLLM flag corrections** (verified against v0.15.1 source):
-- CPU offloading is `--cpu-offload-gb <N>` (float, per-GPU GiB), NOT `--enable-cpu-offload` (does not exist)
-- Data parallelism requires `--data-parallel-size <N>` as a vLLM arg, in addition to Helm values for GPU allocation
+- KV cache offloading is `--kv-offloading-size=<N>` (float, total GiB across TP ranks), NOT `--cpu-offload-gb` (that's model weight offloading, a different feature)
+- Data parallelism: `--data-parallel-size` is auto-injected by the Helm chart from `decode.parallelism.data`; no manual override needed
 - Expert parallelism (`--enable-expert-parallel`) is only for MoE models with dp > 1; it shards experts across TP*DP GPUs
 
 ### Pipeline compilation

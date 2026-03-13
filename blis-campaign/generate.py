@@ -94,8 +94,8 @@ def make_dir_name(exp):
 
 
 def make_experiment_id(exp):
-    """e.g. '13-Qwen3-14B-tp1-general' -- used as PVC data path."""
-    return f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}"
+    """e.g. '13-qwen3-14b-tp1-general' -- used as PVC data path and Helm label."""
+    return make_dns_name(f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}")
 
 
 def resolve_model(name, models, precision=None):
@@ -126,7 +126,7 @@ def extract_pipeline_name(pipeline_yaml_path):
 # Values builder (the core logic)
 # ---------------------------------------------------------------------------
 
-DEFAULT_CPU_OFFLOAD_GB = 4
+DEFAULT_KV_OFFLOAD_GB = 8.0
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
 
@@ -158,10 +158,11 @@ def build_values(exp, base_values, models, clusters, workloads):
     ]
     v["stack"]["model"]["helmValues"]["decode"]["parallelism"]["tensor"] = exp["tp"]
 
-    # Data parallelism (if set)
+    # Data parallelism: use horizontal replicas (separate pods), NOT
+    # decode.parallelism.data which injects --data-parallel-size and expects
+    # all dp ranks in one pod with tp*dp GPUs.
     dp = exp.get("dp")
     if dp and dp > 1:
-        v["stack"]["model"]["helmValues"]["decode"]["parallelism"]["data"] = dp
         v["stack"]["model"]["helmValues"]["decode"]["replicas"] = dp
 
     # GPU reaper exclusion — prevent reaper from killing experiment deployments
@@ -191,7 +192,7 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
     # (weights are already FP8 on disk, vLLM auto-detects from config.json)
     if exp["precision"] == "FP8" and not is_prequantized:
         overrides.append(
-            'decode.containers[name="vllm"].args=--quantization fp8'
+            'decode.containers[name="vllm"].args=--quantization=fp8'
         )
 
     # GPU memory utilization (only if non-default)
@@ -200,23 +201,25 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
             f'decode.containers[name="vllm"].args=--gpu-memory-utilization={exp["gpu_mem"]}'
         )
 
-    # CPU offloading
+    # KV cache offloading (total GiB across TP ranks)
+    # Stock vLLM v0.15.1 enables HMA by default which conflicts with
+    # OffloadingConnector, so we also disable HMA when offloading is on.
     if exp.get("cpu_offload"):
         overrides.append(
-            f'decode.containers[name="vllm"].args=--cpu-offload-gb {DEFAULT_CPU_OFFLOAD_GB}'
+            f'decode.containers[name="vllm"].args=--kv-offloading-size={DEFAULT_KV_OFFLOAD_GB}'
+        )
+        overrides.append(
+            'decode.containers[name="vllm"].args=--disable-hybrid-kv-cache-manager'
         )
 
-    # Data parallelism vLLM arg
+    # Expert parallelism for MoE models with multiple replicas.
+    # We use horizontal replicas (separate pods) for dp, so each pod runs
+    # with the base TP size. EP is additive to TP within each pod.
     dp = exp.get("dp")
-    if dp and dp > 1:
+    if dp and dp > 1 and exp["model"] in MOE_MODELS:
         overrides.append(
-            f'decode.containers[name="vllm"].args=--data-parallel-size {dp}'
+            'decode.containers[name="vllm"].args=--enable-expert-parallel'
         )
-        # Expert parallelism for MoE models with dp > 1
-        if exp["model"] in MOE_MODELS:
-            overrides.append(
-                'decode.containers[name="vllm"].args=--enable-expert-parallel'
-            )
 
     # Model-specific extra args
     for arg in model_extra_args:
@@ -298,6 +301,17 @@ def generate_campaign(args):
         / "tektoncsample/blis-inference-perf/values.yaml"
     )
 
+    # Filter to specific IDs if --only is given
+    only_ids = None
+    if getattr(args, "only", None):
+        only_ids = {int(x.strip()) for x in args.only.split(",")}
+        experiments = [e for e in experiments if e["id"] in only_ids]
+
+    # Skip done experiments unless --all or --only
+    include_all = getattr(args, "all", False)
+    if not include_all and not only_ids:
+        experiments = [e for e in experiments if not e.get("done", False)]
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -314,12 +328,7 @@ def generate_campaign(args):
     )
 
     generated = 0
-    skipped = 0
     for exp in experiments:
-        if exp.get("done", False):
-            skipped += 1
-            continue
-
         dir_name = make_dir_name(exp)
         exp_dir = output_dir / dir_name
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -358,7 +367,5 @@ def generate_campaign(args):
         print(f"  [{generated}/{len(experiments)}] #{exp['id']} {exp['model']} "
               f"{exp['hw']} {exp['workload']}")
 
-    if skipped:
-        print(f"\nSkipped {skipped} already-done experiments")
     print(f"Generated {generated} experiments in {output_dir}/")
     return 0
