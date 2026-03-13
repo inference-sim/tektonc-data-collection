@@ -1,0 +1,100 @@
+experiment:
+  name: cal-h100
+
+# 2 pending calibrations — Llama-2-70b (partial download fixed) + Scout (RedHatAI FP8)
+# Previously completed: llama2-7b tp1, llama31-8b tp1/tp2, qwen3-14b tp1,
+# codellama-34b tp2, mixtral-8x7b tp2, mixtral-8x7b tp4. DeepSeek-V3 deprioritized.
+configs:
+  - label: llama2-70b-h100-tp4
+    model_short: Llama-2-70b
+    hf_id: "meta-llama/Llama-2-70b-hf"
+    tp: 4
+    extra_overrides: []
+
+  - label: scout-17b-h100-tp2
+    model_short: Llama-4-Scout-17B-16E
+    hf_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic"
+    tp: 2
+    extra_overrides:
+      - 'decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}'
+
+# Model deployment config — same base as blis-inference-perf
+stack:
+  MAX_MODEL_LEN: 4096
+  MAX_NUM_BATCHED_TOKENS: 2048
+  MAX_NUM_SEQS: 128
+
+  model:
+    helmValues:
+      fullnameOverride: FULLNAME
+      serviceAccountOverride: default
+      multinode: false
+      modelArtifacts:
+        uri: pvc://model-pvc/models/MODEL
+        size: 300Gi
+        authSecretName: "hf-secret"
+        name: MODEL
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: FULLNAME
+      routing:
+        servicePort: 8000
+        proxy:
+          enabled: false
+      prefill:
+        create: false
+      decode:
+        create: true
+        replicas: 1
+        acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+              - NVIDIA-H100-80GB-HBM3
+        parallelism:
+          data: 1
+          tensor: 1
+        containers:
+        - name: "vllm"
+          env:
+            - name: HF_HOME
+              value: "/mnt/exp/.cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/mnt/exp/.cache/huggingface"
+          mountModelVolume: true
+          image: "vllm/vllm-openai:v0.15.1"
+          modelCommand: vllmServe
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: "32"
+            requests:
+              memory: 128Gi
+              cpu: "32"
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
+
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-pvc
