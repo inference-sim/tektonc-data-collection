@@ -4,7 +4,7 @@
 **Cluster:** pokprod001 (14 nodes x 8 H100-80GB-HBM3)
 **Namespace:** diya
 **vLLM version:** vllm/vllm-openai:v0.15.1
-**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs
+**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs, cal-h100-q44rd
 
 ## Method
 
@@ -71,26 +71,21 @@ Model-specific flags applied where needed (FP8 quantization, generation config o
 | mixtral-8x7b-h100-tp4 | mistralai/Mixtral-8x7B-v0.1 | 4 | FP16 | 4.424 | 6.1 | 249 |
 | scout-17b-h100-tp2 | RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic | 2 | FP8 | 9.948 | 212.1 | 249 |
 | llama2-70b-h100-tp4 | meta-llama/Llama-2-70b-hf | 4 | FP16 | 18.252 | 30.6 | 249 |
+| mixtral-8x22b-h100-tp8 | mistralai/Mixtral-8x22B-Instruct-v0.1 | 8 | FP16 | 7.340 | 10.7 | 249 |
 
-### Failed (vLLM v0.15.1 FP8 MoE OOM)
+### Previously failed (vLLM v0.15.1 FP8 MoE OOM)
 
-| Config | Model | TP | Error |
-|--------|-------|----|-------|
-| deepseek-v3-h100-tp8 | deepseek-ai/DeepSeek-V3 | 8 | CUDA OOM during FP8 MoE weight init (76.6 GiB allocated, needs 896 MiB more) |
-| scout-17b-h100-tp2 | meta-llama/Llama-4-Scout-17B-16E | 2 | ~~CUDA OOM~~ **Resolved** — switched to `RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic` |
+| Config | Model | TP | Error | Resolution |
+|--------|-------|----|-------|------------|
+| scout-17b-h100-tp2 | meta-llama/Llama-4-Scout-17B-16E | 2 | CUDA OOM during FP8 MoE weight init | **Resolved** — switched to `RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic` |
 
 **Root cause:** vLLM v0.15.1's online dynamic FP8 quantization (`--quantization fp8`) loads
 BF16 weights from the checkpoint and quantizes to FP8 during model construction. For large
 MoE models, the peak memory during this conversion (BF16 source + FP8 target buffers
-coexisting) exceeds the 80 GB per H100 GPU, even at TP=8 (DeepSeek-V3) or TP=2 (Scout).
+coexisting) exceeds the 80 GB per H100 GPU. The FP8 weights themselves fit — the issue is
+transient peak memory during initialization, not steady-state.
 
-The FP8 model weights themselves fit comfortably (DeepSeek-V3: ~84 GB FP8 / 8 GPUs = ~10.5 GB
-per GPU; Scout: ~54.5 GB FP8 / 2 GPUs = ~27 GB per GPU). The issue is transient peak memory
-during initialization, not steady-state.
-
-**Resolutions:**
-- **Scout:** Switched to pre-quantized checkpoint `RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic` (llm-compressor, dynamic FP8, vLLM compatible). Needs re-calibration with new checkpoint.
-- **DeepSeek-V3:** No suitable pre-quantized FP8 checkpoint exists. Needs vLLM upgrade or self-quantization with llm-compressor. **Experiments deprioritized.**
+**Note:** DeepSeek-V3 was replaced by Mixtral-8x22B (FP16, no FP8 needed) in the experiment matrix.
 
 ---
 
@@ -144,12 +139,12 @@ Default config: mbt=2048, max_num_seqs=128 (unless noted).
 | 14 | Qwen3-14B | 1 | codegen | 10.916 | 23.7 | 10.0 | ok |
 | 15 | Qwen3-14B | 1 | roleplay | 10.916 | 23.4 | 6.0 | ok |
 | 16 | Llama-3.1-8b | 1 | general | 6.257 | 41.2 | 20.0 | ok |
-| 17 | DeepSeek-V3 | 8 | general | — | — | 20.0 | failed (OOM) |
+| 17 | Mixtral-8x22B | 8 | general | 7.340 | 35.2 | 20.0 | ok |
 | 18 | Scout-17B-16E | 2 | general | 9.948 | 25.9 | 20.0 | ok |
 | 19 | Llama-3.1-8b | 1 | codegen | 6.257 | 41.4 | 10.0 | ok |
 | 20 | Llama-3.1-8b | 1 | roleplay | 6.257 | 40.8 | 6.0 | ok |
-| 21 | DeepSeek-V3 | 8 | codegen | — | — | 10.0 | failed (OOM) |
-| 22 | DeepSeek-V3 | 8 | roleplay | — | — | 6.0 | failed (OOM) |
+| 21 | Mixtral-8x22B | 8 | codegen | 7.340 | 35.3 | 10.0 | ok |
+| 22 | Mixtral-8x22B | 8 | roleplay | 7.340 | 34.7 | 6.0 | ok |
 | 23 | Scout-17B-16E | 2 | codegen | 9.948 | 26.0 | 10.0 | ok |
 | 24 | Scout-17B-16E | 2 | roleplay | 9.948 | 25.6 | 6.0 | ok |
 | 25 | Llama-3.1-8b | 1 | general (mbt=1024) | 6.257 | 41.2 | 20.0 | ok |
@@ -168,7 +163,7 @@ Default config: mbt=2048, max_num_seqs=128 (unless noted).
 | 38 | Llama-2-7b-hf | 1 | general (dp=2) | 5.841 | 44.2 | 20.0 | ok |
 | 50 | Llama-3.1-8b | 1 | reasoning | 6.257 | 7.1 | 4.0 | ok |
 | 51 | Qwen3-14B | 1 | reasoning | 10.916 | 4.0 | 4.0 | **BORDERLINE** |
-| 52 | DeepSeek-V3 | 8 | reasoning | — | — | 4.0 | failed (OOM) |
+| 52 | Mixtral-8x22B | 8 | reasoning | 7.340 | 6.0 | 4.0 | ok |
 | 53 | Scout-17B-16E | 2 | reasoning | 9.948 | 4.4 | 4.0 | ok |
 
 **Note:** For mbt sweep experiments (25-26, 30-31), the safe_rps is the same because
@@ -185,9 +180,8 @@ doesn't change the safe rate when the seq limit dominates.
 2. **Qwen3-14B reasoning is borderline.** safe_rps = 4.0 exactly matches the peak rate,
    leaving zero headroom. **Recommendation:** Lower to 3.5 rps or accept the risk.
 
-3. **FP8 MoE models:** DeepSeek-V3 cannot load on vLLM v0.15.1 with online dynamic
-   quantization (deprioritized). Scout OOM resolved by switching to pre-quantized
-   `RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic` — calibration in progress.
+3. **Mixtral-8x22B at 7.3 ms/token** (TP8, FP16) — comfortably safe across all workloads.
+   Tightest margin is Reasoning at 6.0 safe vs 4.0 peak (50% headroom).
 
 4. **Llama-2-70b is the slowest model at 18.3 ms/token** (at TP4). General workload
    (safe 14.1 vs peak 20) and Reasoning (safe 2.4 vs peak 4) are both unsafe.
@@ -211,6 +205,6 @@ doesn't change the safe rate when the seq limit dominates.
 - [x] ~~Scout calibration~~ → 9.948 ms/token (pipeline run `cal-h100-r8r2g`, RedHatAI FP8-dynamic checkpoint)
 - [x] ~~Llama-2-70b calibration~~ → 18.252 ms/token (pipeline run `cal-h100-r8r2g`; partial download fixed)
 - [x] ~~Resolve FP8 MoE OOM for Scout~~ → switched to `RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic`
-- [ ] Resolve FP8 MoE OOM for DeepSeek-V3 (no pre-quantized checkpoint; experiments deprioritized)
+- [x] ~~Mixtral-8x22B calibration~~ → 7.340 ms/token (pipeline run `cal-h100-q44rd`)
 - [x] ~~Decide on rate adjustments~~ → Codellama-34b #1/#4, Llama-2-70b #5/#8 deprioritized as unsafe
-- **All H100 calibrations complete** (9/10 configs; DeepSeek-V3 deprioritized)
+- **All H100 calibrations complete** (10/10 configs)
