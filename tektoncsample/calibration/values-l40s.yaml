@@ -1,16 +1,27 @@
 experiment:
-  name: blis-inference-perf
-  description: BLIS with inference-perf harness
+  name: cal-l40s
 
+# L40S calibration — 2 configs (2 GPUs total if parallel)
+# All experiments use General workload baseline: mbt=2048, cpu_offload=false, gpu_mem=0.9
+# Mixtral-8x7B (TP=2) and Scout-17B-16E (TP=2) exceed L40S memory capacity
+configs:
+  - label: qwen3-14b-l40s-tp1
+    model_short: Qwen3-14B
+    hf_id: "Qwen/Qwen3-14B"
+    tp: 1
+    extra_overrides: []
+
+  - label: llama31-8b-l40s-tp1
+    model_short: Llama-3.1-8b
+    hf_id: "meta-llama/Llama-3.1-8B-Instruct"
+    tp: 1
+    extra_overrides: []
+
+# Model deployment config
 stack:
-  treatments:
-    tensorParallelism:
-      - 1
-
   MAX_MODEL_LEN: 4096
   MAX_NUM_BATCHED_TOKENS: 2048
   MAX_NUM_SEQS: 128
-  extra_overrides: []
 
   model:
     helmValues:
@@ -25,8 +36,6 @@ stack:
         labels:
           llm-d.ai/inferenceServing: "true"
           llm-d.ai/model: FULLNAME
-          owner: dipanwita.guhathakurta3_ibm.com
-          team: inference-research
       routing:
         servicePort: 8000
         proxy:
@@ -39,18 +48,13 @@ stack:
         acceleratorTypes:
             labelKey: nvidia.com/gpu.product
             labelValues:
-              - NVIDIA-H100-80GB-HBM3
+              - NVIDIA-L40S  # L40S GPU
         parallelism:
           data: 1
           tensor: 1
         containers:
         - name: "vllm"
           env:
-            - name: VLLM_CONFIGURE_LOGGING
-              value: "1"
-            - name: VLLM_LOGGING_CONFIG_PATH
-              value: "/workspace/vllm_logging.json"
-            # Fix cache permission issue
             - name: HF_HOME
               value: "/mnt/exp/.cache/huggingface"
             - name: TRANSFORMERS_CACHE
@@ -60,11 +64,11 @@ stack:
           modelCommand: vllmServe
           resources:
             limits:
-              memory: 128Gi
-              cpu: "32"
+              memory: 80Gi
+              cpu: "16"
             requests:
-              memory: 128Gi
-              cpu: "32"
+              memory: 80Gi
+              cpu: "16"
           extraConfig:
             startupProbe:
               httpGet:
@@ -93,54 +97,3 @@ stack:
         - name: data
           persistentVolumeClaim:
             claimName: data-pvc
-
-workload:
-  harness: inference-perf
-
-  profileTemplate:
-    load:
-      type: constant
-      stages:
-      - rate: 8.0
-        duration: 600      # Low traffic period (0-600s)
-      - rate: 20.0
-        duration: 600      # Peak traffic period (600-1200s)
-
-    api:
-      type: completion
-      streaming: true
-
-    server:
-      type: vllm
-      model_name: MODEL
-      base_url: STACK_ENDPOINT
-      ignore_eos: true
-
-    tokenizer:
-      pretrained_model_name_or_path: TOKENIZER
-
-    data:
-      type: shared_prefix
-      shared_prefix:
-        num_unique_system_prompts: 9
-        num_users_per_system_prompt: 5
-        system_prompt_len: 100
-        question_len: 447
-        output_len: 248
-        enable_multi_turn_chat: true
-
-    report:
-      request_lifecycle:
-        summary: true
-        per_stage: true
-        per_request: true
-
-    storage:
-      local_storage:
-        path: PATH
-
-upload_target:
-  type: s3
-  configuration:
-    bucket: cloud-object-storage-cos-standard-ere
-    endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud

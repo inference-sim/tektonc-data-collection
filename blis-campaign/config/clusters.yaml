@@ -14,3 +14,4 @@ L40S:
   context: "diya/api-fmaas-platform-eval-fmaas-res-ibm-com:6443/dipanwita.guhathakurta3@ibm.com"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-L40S"
+  use_inline_tasks: true  # platform-eval doesn't support StepActions

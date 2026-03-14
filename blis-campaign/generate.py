@@ -181,6 +181,10 @@ def build_values(exp, base_values, models, clusters, workloads):
     v["workload"]["profileTemplate"]["load"] = wl["load"]
     v["workload"]["profileTemplate"]["data"] = wl["data"]
 
+    # Task variant selection (inline vs standard)
+    # platform-eval (L40S) doesn't support StepActions, needs inline tasks
+    v["use_inline_tasks"] = cluster.get("use_inline_tasks", False)
+
     return v
 
 

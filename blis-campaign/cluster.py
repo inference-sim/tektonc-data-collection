@@ -44,9 +44,11 @@ def kubectl_json(cmd, context=None, namespace=None, timeout=60):
 
 
 def get_available_gpus(context, gpu_label_key, gpu_label_value):
-    """Query actual free GPUs on nodes matching the GPU label.
+    """Query total allocatable GPUs on nodes matching the GPU label.
 
-    Returns count of available (allocatable - allocated) GPUs.
+    Returns count of allocatable GPUs on matching nodes.
+    Note: Does not check cluster-wide allocation (requires cluster-scope permissions).
+    The campaign runner tracks its own namespace GPU usage via get_campaign_gpu_usage().
     """
     # Get total allocatable GPUs on matching nodes
     nodes = kubectl_json(
@@ -57,21 +59,8 @@ def get_available_gpus(context, gpu_label_key, gpu_label_value):
         for n in nodes.get("items", [])
     )
 
-    # Get allocated GPUs from running pods
-    pods = kubectl_json(
-        "get pods --all-namespaces --field-selector=status.phase=Running",
-        context=context
-    )
-    allocated = 0
-    for p in pods.get("items", []):
-        for c in p["spec"].get("containers", []):
-            allocated += int(
-                c.get("resources", {}).get("requests", {}).get("nvidia.com/gpu", 0)
-            )
-
-    available = total - allocated
-    log.info(f"Cluster GPUs: {available} free / {total} total")
-    return available
+    log.info(f"Cluster GPUs: {total} allocatable on matching nodes")
+    return total
 
 
 def get_campaign_gpu_usage(context, namespace, pr_names):
@@ -109,20 +98,29 @@ def preflight_check(hw, clusters):
             raise RuntimeError(f"Required binary not found: {binary}")
     log.info("  Binaries: kubectl, tkn, helm found")
 
-    # Check cluster reachable
-    run_cmd(f"kubectl cluster-info", context=context, timeout=15)
+    # Check cluster reachable (using get nodes instead of cluster-info to avoid kube-system access requirement)
+    run_cmd(f"kubectl get nodes --request-timeout=15s", context=context, timeout=20)
     log.info(f"  Cluster {context}: reachable")
 
     # Check namespace exists
     run_cmd(f"kubectl get namespace {namespace}", context=context)
     log.info(f"  Namespace {namespace}: exists")
 
-    # Check required Tekton tasks
-    required_tasks = [
-        "download-model", "deploy-model", "delete-model",
-        "create-exp-config", "install-inference-perf-blis",
-        "run-workload-inference-perf-blis", "upload-s3",
-    ]
+    # Check required Tekton tasks (cluster-specific)
+    # H100/A100 use regular tasks with StepActions, L40S uses inline tasks
+    use_inline = cluster.get("use_inline_tasks", False)
+    if use_inline:
+        required_tasks = [
+            "download-model", "deploy-model-inline", "delete-model-inline",
+            "create-exp-config", "install-inference-perf-blis",
+            "run-workload-inference-perf-blis", "upload-s3",
+        ]
+    else:
+        required_tasks = [
+            "download-model", "deploy-model", "delete-model",
+            "create-exp-config", "install-inference-perf-blis",
+            "run-workload-inference-perf-blis", "upload-s3",
+        ]
     result = run_cmd(f"kubectl get tasks -n {namespace}", context=context, ignore_errors=True)
     missing = []
     for task in required_tasks:
