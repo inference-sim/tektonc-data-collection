@@ -1,13 +1,13 @@
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
-  generateName: cal-a100-
+  generateName: cal-l40s-
 spec:
   timeouts:
     pipeline: 4h
     tasks: 3h30m
   pipelineRef:
-    name: cal-a100
+    name: cal-l40s
   params:
     - name: namespace
       value: diya

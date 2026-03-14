@@ -37,15 +37,20 @@ spec:
         export HF_TOKEN=$(cat "$(workspaces.hf-credentials.path)/HF_TOKEN")
         export PATH="${PATH}:${HOME}/.local/bin"
 
-        # Check if model already exists on PVC
-        if [ -d "${MOUNT_PATH}/${MODEL_PATH}" ] && [ -n "$(ls -A ${MOUNT_PATH}/${MODEL_PATH} 2>/dev/null)" ]; then
+        # Check if model already exists on PVC (config.json = complete download)
+        if [ -f "${MOUNT_PATH}/${MODEL_PATH}/config.json" ]; then
           echo "Model already exists at ${MOUNT_PATH}/${MODEL_PATH}, skipping download"
           ls -la "${MOUNT_PATH}/${MODEL_PATH}" | head -20
           exit 0
         fi
 
+        # Clean up partial downloads (metadata without weights)
+        if [ -d "${MOUNT_PATH}/${MODEL_PATH}" ]; then
+          echo "Partial download detected, cleaning up ${MOUNT_PATH}/${MODEL_PATH}"
+          rm -rf "${MOUNT_PATH}/${MODEL_PATH}"
+        fi
+
         echo "Model not found, downloading ${HF_MODEL_ID}..."
         mkdir -p "${MOUNT_PATH}/${MODEL_PATH}"
-        python -m pip install huggingface_hub
-        hf auth login --token "${HF_TOKEN}"
-        hf download "${HF_MODEL_ID}" --local-dir "/cache/${MODEL_PATH}"
+        pip install huggingface_hub
+        python -c "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['HF_MODEL_ID'], local_dir=os.path.join('/cache', os.environ['MODEL_PATH'])); print('Download complete')"

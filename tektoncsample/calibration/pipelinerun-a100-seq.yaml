@@ -23,8 +23,3 @@ spec:
         claimName: data-pvc
   taskRunTemplate:
     serviceAccountName: helm-installer
-    podTemplate:
-      securityContext:
-        seLinuxOptions:
-          type: spc_t  # Disable SELinux restrictions
-        fsGroup: 0

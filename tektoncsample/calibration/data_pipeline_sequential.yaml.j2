@@ -27,7 +27,7 @@ spec:
     - name: download-model-{{ cfg.label | dns }}
       taskRef: { name: download-model }
       {% if loop.index > 1 %}
-      runAfter: [ "delete-model-{{ configs[loop.index0 - 1].label | dns }}" ]
+      runAfter: [ "cleanup-files-{{ configs[loop.index0 - 1].label | dns }}" ]
       {% endif %}
       workspaces:
         - name: model-cache
@@ -72,6 +72,14 @@ spec:
       params:
         - { name: namespace, value: "$(params.namespace)" }
         - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
+
+    - name: cleanup-files-{{ cfg.label | dns }}
+      runAfter: [ "delete-model-{{ cfg.label | dns }}" ]
+      taskRef: { name: cleanup-model-files }
+      workspaces:
+        - name: model-cache
+      params:
+        - { name: model, value: "{{ cfg.hf_id }}" }
 
     {% endfor %}
 

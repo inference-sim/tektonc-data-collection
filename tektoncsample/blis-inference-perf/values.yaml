@@ -27,6 +27,8 @@ stack:
         labels:
           llm-d.ai/inferenceServing: "true"
           llm-d.ai/model: FULLNAME
+          owner: dipanwita.guhathakurta3_ibm.com
+          team: inference-research
       routing:
         servicePort: 8000
         proxy:

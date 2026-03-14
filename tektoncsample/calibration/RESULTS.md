@@ -1,10 +1,12 @@
-# H100 Rate Calibration Results
+# Rate Calibration Results
 
-**Date:** 2026-03-12
-**Cluster:** pokprod001 (14 nodes x 8 H100-80GB-HBM3)
+**Date:** 2026-03-12 (H100), 2026-03-13 (L40S)
+**Clusters:**
+  - H100: pokprod001 (14 nodes x 8 H100-80GB-HBM3)
+  - L40S: platform-eval (5 nodes x 2 L40S-48GB)
 **Namespace:** diya
 **vLLM version:** vllm/vllm-openai:v0.15.1
-**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs, cal-h100-q44rd
+**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs, cal-h100-q44rd (H100); cal-l40s-78pnr (L40S)
 
 ## Method
 
@@ -72,6 +74,8 @@ Model-specific flags applied where needed (FP8 quantization, generation config o
 | scout-17b-h100-tp2 | RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic | 2 | FP8 | 9.948 | 212.1 | 249 |
 | llama2-70b-h100-tp4 | meta-llama/Llama-2-70b-hf | 4 | FP16 | 18.252 | 30.6 | 249 |
 | mixtral-8x22b-h100-tp8 | mistralai/Mixtral-8x22B-Instruct-v0.1 | 8 | FP16 | 7.340 | 10.7 | 249 |
+| **llama31-8b-l40s-tp1** | **meta-llama/Llama-3.1-8B-Instruct** | **1** | **FP16** | **21.248** | **21.0** | **249** |
+| **qwen3-14b-l40s-tp1** | **Qwen/Qwen3-14B** | **1** | **FP16** | **38.880** | **38.9** | **249** |
 
 ### Previously failed (vLLM v0.15.1 FP8 MoE OOM)
 
@@ -165,6 +169,8 @@ Default config: mbt=2048, max_num_seqs=128 (unless noted).
 | 51 | Qwen3-14B | 1 | reasoning | 10.916 | 4.0 | 4.0 | **BORDERLINE** |
 | 52 | Mixtral-8x22B | 8 | reasoning | 7.340 | 6.0 | 4.0 | ok |
 | 53 | Scout-17B-16E | 2 | reasoning | 9.948 | 4.4 | 4.0 | ok |
+| **60** | **Llama-3.1-8b (L40S)** | **1** | **general** | **21.248** | **12.1** | **20.0** | **UNSAFE** |
+| **61** | **Qwen3-14B (L40S)** | **1** | **general** | **38.880** | **6.6** | **20.0** | **UNSAFE** |
 
 **Note:** For mbt sweep experiments (25-26, 30-31), the safe_rps is the same because
 `max_num_seqs` (128) is the binding constraint, not `mbt`. Changing mbt from 1024 to 8192
@@ -197,10 +203,19 @@ doesn't change the safe rate when the seq limit dominates.
    (6x more than other workloads). Each reasoning request occupies a decode slot for
    `1448 * decode_ms / 1000` seconds, consuming concurrent capacity much faster.
 
+8. **L40S models are significantly rate-limited.** With 3.4-3.6x slower decode latency
+   compared to H100 (due to 3.5x lower memory bandwidth: 864 GB/s vs 3 TB/s), both L40S
+   configurations cannot safely handle the 20 rps general workload peak:
+   - Llama-3.1-8B L40S: safe rate 12.1 rps (39% below peak)
+   - Qwen3-14B L40S: safe rate 6.6 rps (67% below peak)
+   **Recommendation:** Reduce general workload peak to 12 rps and 6 rps respectively, or
+   explore TP=2 configurations on L40S for higher throughput.
+
 ---
 
-## Remaining work
+## Calibration Status
 
+### H100 (Complete)
 - [x] ~~Mixtral-8x7B tp4 calibration~~ → 4.424 ms/token (pipeline run `cal-h100-kmdzs`)
 - [x] ~~Scout calibration~~ → 9.948 ms/token (pipeline run `cal-h100-r8r2g`, RedHatAI FP8-dynamic checkpoint)
 - [x] ~~Llama-2-70b calibration~~ → 18.252 ms/token (pipeline run `cal-h100-r8r2g`; partial download fixed)
@@ -208,3 +223,9 @@ doesn't change the safe rate when the seq limit dominates.
 - [x] ~~Mixtral-8x22B calibration~~ → 7.340 ms/token (pipeline run `cal-h100-q44rd`)
 - [x] ~~Decide on rate adjustments~~ → Codellama-34b #1/#4, Llama-2-70b #5/#8 deprioritized as unsafe
 - **All H100 calibrations complete** (10/10 configs)
+
+### L40S (Complete)
+- [x] ~~Llama-3.1-8B L40S TP1~~ → 21.248 ms/token (pipeline run `cal-l40s-78pnr`)
+- [x] ~~Qwen3-14B L40S TP1~~ → 38.880 ms/token (pipeline run `cal-l40s-78pnr`)
+- **All L40S calibrations complete** (2/2 configs)
+- Both models are **rate-limited** at 20 rps general workload peak

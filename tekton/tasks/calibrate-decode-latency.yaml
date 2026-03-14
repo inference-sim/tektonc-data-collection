@@ -67,7 +67,7 @@ spec:
           value: "$(params.promptTokens)"
         - name: MAX_OUTPUT_TOKENS
           value: "$(params.maxOutputTokens)"
-      image: python:3.12.9-slim-bookworm
+      image: python:3.10
       computeResources:
         requests:
           memory: "512Mi"

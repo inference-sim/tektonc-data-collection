@@ -17,13 +17,7 @@ Llama-2-7b-hf: "meta-llama/Llama-2-7b-hf"
 Mistral-Nemo-12b: "mistralai/Mistral-Nemo-Instruct-2407"
 01-ai/Yi-34B: "01-ai/Yi-34B"
 
-DeepSeek-V3:
-  hf_id: "deepseek-ai/DeepSeek-V3"
-  # FP8: No well-established vLLM-compatible pre-quantized FP8 checkpoint exists
-  # as of 2026-03-12. Online dynamic FP8 OOMs on vLLM v0.15.1 (even at TP=8).
-  # Options: (1) upgrade vLLM, (2) wait for official FP8 checkpoint,
-  # (3) quantize ourselves with llm-compressor.
-  # fp8_hf_id: TBD
+Mixtral-8x22B: "mistralai/Mixtral-8x22B-Instruct-v0.1"
 
 Llama-4-Scout-17B-16E:
   hf_id: "meta-llama/Llama-4-Scout-17B-16E"

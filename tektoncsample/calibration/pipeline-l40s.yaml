@@ -1,0 +1,287 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cal-l40s
+spec:
+  description: 'Rate calibration: measure decode latency per token (2 configs in parallel)'
+  workspaces:
+  - name: model-cache
+    description: Location where models are stored
+  - name: hf-credentials
+    description: Secret workspace containing a HuggingFace token
+  - name: data
+    description: Workspace for calibration results
+  params:
+  - name: namespace
+    type: string
+    description: Kubernetes namespace
+  tasks:
+  - name: download-model-qwen3-14b-l40s-tp1
+    taskRef:
+      name: download-model
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+  - name: deploy-model-qwen3-14b-l40s-tp1
+    taskRef:
+      name: deploy-model-inline
+    runAfter:
+    - download-model-qwen3-14b-l40s-tp1
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+    - name: modelLabel
+      value: cal-qwen3-14b-l40s-tp1
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-L40S
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 80Gi
+                cpu: '16'
+              requests:
+                memory: 80Gi
+                cpu: '16'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=1
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-qwen3-14b-l40s-tp1
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-qwen3-14b-l40s-tp1
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+    - name: modelLabel
+      value: cal-qwen3-14b-l40s-tp1
+    - name: results_dir
+      value: calibration/qwen3-14b-l40s-tp1
+  - name: delete-model-qwen3-14b-l40s-tp1
+    runAfter:
+    - calibrate-qwen3-14b-l40s-tp1
+    taskRef:
+      name: delete-model-inline
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-qwen3-14b-l40s-tp1
+  - name: download-model-llama31-8b-l40s-tp1
+    taskRef:
+      name: download-model
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+  - name: deploy-model-llama31-8b-l40s-tp1
+    taskRef:
+      name: deploy-model-inline
+    runAfter:
+    - download-model-llama31-8b-l40s-tp1
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+    - name: modelLabel
+      value: cal-llama31-8b-l40s-tp1
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-L40S
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 80Gi
+                cpu: '16'
+              requests:
+                memory: 80Gi
+                cpu: '16'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=1
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-llama31-8b-l40s-tp1
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-llama31-8b-l40s-tp1
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+    - name: modelLabel
+      value: cal-llama31-8b-l40s-tp1
+    - name: results_dir
+      value: calibration/llama31-8b-l40s-tp1
+  - name: delete-model-llama31-8b-l40s-tp1
+    runAfter:
+    - calibrate-llama31-8b-l40s-tp1
+    taskRef:
+      name: delete-model-inline
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama31-8b-l40s-tp1
+  finally:
+  - name: finally-delete-qwen3-14b-l40s-tp1
+    taskRef:
+      name: delete-model-inline
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-qwen3-14b-l40s-tp1
+  - name: finally-delete-llama31-8b-l40s-tp1
+    taskRef:
+      name: delete-model-inline
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama31-8b-l40s-tp1

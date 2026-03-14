@@ -94,7 +94,7 @@ spec:
             The task implementation automatically overrides "modelArtifacts.name",
             "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model",
             and "fullnameOverride" to avoid conflicts and ensure consistency.
-          taskRef: { name: deploy-model }
+          taskRef: { name: {% if use_inline_tasks %}deploy-model-inline{% else %}deploy-model{% endif %} }
           runAfter: [ "{% if stack.tracing is defined %}deploy-otel-collector-{{ stackId }}{% else %}install-inference-perf{% endif %}" ]
           workspaces:
             - name: model-cache
@@ -162,7 +162,7 @@ spec:
         - name: delete-model-{{ stackId }}
           description: Delete the model engine.
           runAfter: [ "run-workload-{{ stackId }}" ]
-          taskRef: { name: delete-model }
+          taskRef: { name: {% if use_inline_tasks %}delete-model-inline{% else %}delete-model{% endif %} }
           params:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
@@ -210,7 +210,7 @@ spec:
 
       tasks:
         - name: finally-delete-model-{{ stackId }}
-          taskRef: { name: delete-model }
+          taskRef: { name: {% if use_inline_tasks %}delete-model-inline{% else %}delete-model{% endif %} }
           params:
             - { name: namespace, value: "$(params.namespace)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}" }

@@ -114,20 +114,29 @@ def preflight_check(hw, clusters):
             raise RuntimeError(f"Required binary not found: {binary}")
     log.info("  Binaries: kubectl, tkn, helm found")
 
-    # Check cluster reachable
-    run_cmd(f"kubectl cluster-info", context=context, timeout=15)
+    # Check cluster reachable (using get nodes instead of cluster-info to avoid kube-system access requirement)
+    run_cmd(f"kubectl get nodes --request-timeout=15s", context=context, timeout=20)
     log.info(f"  Cluster {context}: reachable")
 
     # Check namespace exists
     run_cmd(f"kubectl get namespace {namespace}", context=context)
     log.info(f"  Namespace {namespace}: exists")
 
-    # Check required Tekton tasks
-    required_tasks = [
-        "download-model", "deploy-model", "delete-model",
-        "create-exp-config", "install-inference-perf-blis",
-        "run-workload-inference-perf-blis", "upload-s3",
-    ]
+    # Check required Tekton tasks (cluster-specific)
+    # H100/A100 use regular tasks with StepActions, L40S uses inline tasks
+    use_inline = cluster.get("use_inline_tasks", False)
+    if use_inline:
+        required_tasks = [
+            "download-model", "deploy-model-inline", "delete-model-inline",
+            "create-exp-config", "install-inference-perf-blis",
+            "run-workload-inference-perf-blis", "upload-s3",
+        ]
+    else:
+        required_tasks = [
+            "download-model", "deploy-model", "delete-model",
+            "create-exp-config", "install-inference-perf-blis",
+            "run-workload-inference-perf-blis", "upload-s3",
+        ]
     result = run_cmd(f"kubectl get tasks -n {namespace}", context=context, ignore_errors=True)
     missing = []
     for task in required_tasks:

@@ -1,18 +1,23 @@
 experiment:
-  name: cal-a100
+  name: cal-l40s
 
-# A100-80GB calibration — 7 configs (20 GPUs total)
-# Cluster: 3 nodes x 8 A100-SXM4-80GB = 24 GPUs total
-# Run in two batches: batch1 = 6 configs (12 GPUs parallel), batch2 = Mixtral-8x22B (8 GPUs)
+# L40S calibration — 2 configs (2 GPUs total if parallel)
 # All experiments use General workload baseline: mbt=2048, cpu_offload=false, gpu_mem=0.9
+# Mixtral-8x7B (TP=2) and Scout-17B-16E (TP=2) exceed L40S memory capacity
 configs:
-  - label: mixtral-8x22b-a100-tp8
-    model_short: Mixtral-8x22B
-    hf_id: "mistralai/Mixtral-8x22B-Instruct-v0.1"
-    tp: 8
+  - label: qwen3-14b-l40s-tp1
+    model_short: Qwen3-14B
+    hf_id: "Qwen/Qwen3-14B"
+    tp: 1
     extra_overrides: []
 
-# Model deployment config — same base as H100 calibration
+  - label: llama31-8b-l40s-tp1
+    model_short: Llama-3.1-8b
+    hf_id: "meta-llama/Llama-3.1-8B-Instruct"
+    tp: 1
+    extra_overrides: []
+
+# Model deployment config
 stack:
   MAX_MODEL_LEN: 4096
   MAX_NUM_BATCHED_TOKENS: 2048
@@ -43,7 +48,7 @@ stack:
         acceleratorTypes:
             labelKey: nvidia.com/gpu.product
             labelValues:
-              - NVIDIA-A100-SXM4-80GB  # A100 SXM4 (matches cluster config)
+              - NVIDIA-L40S  # L40S GPU
         parallelism:
           data: 1
           tensor: 1
@@ -59,10 +64,10 @@ stack:
           modelCommand: vllmServe
           resources:
             limits:
-              memory: 128Gi
+              memory: 80Gi
               cpu: "16"
             requests:
-              memory: 128Gi
+              memory: 80Gi
               cpu: "16"
           extraConfig:
             startupProbe:

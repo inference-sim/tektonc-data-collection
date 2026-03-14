@@ -37,7 +37,7 @@ spec:
           value: "{{ cfg.hf_id }}"
 
     - name: deploy-model-{{ cfg.label | dns }}
-      taskRef: { name: deploy-model }
+      taskRef: { name: deploy-model-inline }
       runAfter: [ "download-model-{{ cfg.label | dns }}" ]
       workspaces:
         - name: model-cache
@@ -68,7 +68,7 @@ spec:
 
     - name: delete-model-{{ cfg.label | dns }}
       runAfter: [ "calibrate-{{ cfg.label | dns }}" ]
-      taskRef: { name: delete-model }
+      taskRef: { name: delete-model-inline }
       params:
         - { name: namespace, value: "$(params.namespace)" }
         - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
@@ -78,7 +78,7 @@ spec:
   finally:
     {% for cfg in configs %}
     - name: finally-delete-{{ cfg.label | dns }}
-      taskRef: { name: delete-model }
+      taskRef: { name: delete-model-inline }
       params:
         - { name: namespace, value: "$(params.namespace)" }
         - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
