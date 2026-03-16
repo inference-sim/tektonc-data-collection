@@ -150,8 +150,9 @@ def download_and_verify(campaign_dir, dir_name, context, namespace):
     exp = json.loads((exp_dir / "experiment.json").read_text())
 
     experiment_id = make_experiment_id(exp)
-    # PVC data dir matches the template's stackModelLabel: "$(params.experimentId)-{{ tp }}"
-    pvc_data_dir = f"{experiment_id}-{exp['tp']}"
+    # PVC data dir matches the template's stackModelLabel: "$(params.experimentId)-{{ tp }}-{{ dlp }}"
+    dp = exp.get("dp") or 1
+    pvc_data_dir = f"{experiment_id}-{exp['tp']}-{dp}"
 
     local_dest = exp_dir / "data"
 

@@ -150,20 +150,13 @@ def build_values(exp, base_values, models, clusters, workloads):
     # Stack config
     v["stack"]["MAX_NUM_BATCHED_TOKENS"] = exp["mbt"]
     v["stack"]["treatments"]["tensorParallelism"] = [exp["tp"]]
+    v["stack"]["treatments"]["dataLocalParallelism"] = [exp.get("dp") or 1]
 
     # GPU targeting
     cluster = clusters[exp["hw"]]
     v["stack"]["model"]["helmValues"]["decode"]["acceleratorTypes"]["labelValues"] = [
         cluster["gpu_label_value"]
     ]
-    v["stack"]["model"]["helmValues"]["decode"]["parallelism"]["tensor"] = exp["tp"]
-
-    # Data parallelism: use horizontal replicas (separate pods), NOT
-    # decode.parallelism.data which injects --data-parallel-size and expects
-    # all dp ranks in one pod with tp*dp GPUs.
-    dp = exp.get("dp")
-    if dp and dp > 1:
-        v["stack"]["model"]["helmValues"]["decode"]["replicas"] = dp
 
     # GPU reaper exclusion — prevent reaper from killing experiment deployments
     decode = v["stack"]["model"]["helmValues"]["decode"]
@@ -212,9 +205,7 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
             'decode.containers[name="vllm"].args=--disable-hybrid-kv-cache-manager'
         )
 
-    # Expert parallelism for MoE models with multiple replicas.
-    # We use horizontal replicas (separate pods) for dp, so each pod runs
-    # with the base TP size. EP is additive to TP within each pod.
+    # Expert parallelism for MoE models with data-local parallelism > 1
     dp = exp.get("dp")
     if dp and dp > 1 and exp["model"] in MOE_MODELS:
         overrides.append(

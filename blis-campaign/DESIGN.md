@@ -150,9 +150,7 @@ No `gpu_capacity` field — the runner queries real-time GPU availability from t
 | `stack.MAX_NUM_BATCHED_TOKENS` | `mbt` from experiment JSON | Per-experiment config |
 | `stack.treatments.tensorParallelism` | `[tp]` from experiment JSON | Loop domain |
 | `stack.model.helmValues.decode.acceleratorTypes.labelValues` | `[gpu_label_value]` from clusters.yaml | GPU targeting |
-| `stack.model.helmValues.decode.parallelism.tensor` | `tp` from experiment JSON | Tensor parallelism |
-| `stack.model.helmValues.decode.parallelism.data` | `dp` from experiment JSON (if set) | Data parallelism |
-| `stack.model.helmValues.decode.replicas` | `dp` from experiment JSON (if set) | Replica count |
+| `stack.model.helmValues.decode.parallelism.tensor` | `tp` (or `tp * dp` when dp > 1) | GPU allocation — single pod gets all GPUs |
 | `stack.extra_overrides` | Built from experiment params (see below) | Extra vLLM args |
 | `workload.profileTemplate.load` | `workloads[workload].load` | Workload profile |
 | `workload.profileTemplate.data` | `workloads[workload].data` | Workload profile |
@@ -193,7 +191,7 @@ Constructs `stack.extra_overrides` list from experiment parameters. These become
 | `precision` | `== "FP8"` | `--quantization fp8` |
 | `gpu_mem` | `!= 0.9` | `--gpu-memory-utilization=<value>` |
 | `cpu_offload` | `== true` | `--kv-offloading-size=<DEFAULT_KV_OFFLOAD_GB>` |
-| `dp` | `> 1` | (auto-injected by Helm chart from `decode.parallelism.data`) |
+| `dp` | `> 1` | `--tensor-parallel-size=<tp>` and `--data-parallel-size=<dp>` |
 | `dp` + MoE model | `dp > 1` and model is MoE | `--enable-expert-parallel` |
 | model-specific | from `models.yaml` | e.g., `--override-generation-config=...` |
 
@@ -208,7 +206,7 @@ MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
 **Important vLLM flag corrections** (verified against v0.15.1 source):
 - KV cache offloading is `--kv-offloading-size=<N>` (float, total GiB across TP ranks), NOT `--cpu-offload-gb` (that's model weight offloading, a different feature)
-- Data parallelism: `--data-parallel-size` is auto-injected by the Helm chart from `decode.parallelism.data`; no manual override needed
+- Data parallelism: single pod with `tp * dp` GPUs via `decode.parallelism.tensor`. Explicit `--tensor-parallel-size=<tp>` and `--data-parallel-size=<dp>` vLLM args override the Helm chart's default TP assignment. This mirrors the calibration pipeline approach.
 - Expert parallelism (`--enable-expert-parallel`) is only for MoE models with dp > 1; it shards experts across TP*DP GPUs
 
 ### Pipeline compilation

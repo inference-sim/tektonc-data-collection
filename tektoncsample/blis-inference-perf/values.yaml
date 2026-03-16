@@ -6,6 +6,8 @@ stack:
   treatments:
     tensorParallelism:
       - 1
+    dataLocalParallelism:
+      - 1
 
   MAX_MODEL_LEN: 4096
   MAX_NUM_BATCHED_TOKENS: 2048
@@ -38,9 +40,6 @@ stack:
             labelKey: nvidia.com/gpu.product
             labelValues:
               - NVIDIA-H100-80GB-HBM3
-        parallelism:
-          data: 1
-          tensor: 1
         containers:
         - name: "vllm"
           env:
