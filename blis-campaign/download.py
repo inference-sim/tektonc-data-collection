@@ -81,6 +81,16 @@ def delete_busybox_pod(pod_name, context, namespace):
     )
 
 
+def pvc_dir_exists(pod_name, remote_path, context, namespace):
+    """Check if a directory exists on the PVC via the busybox pod."""
+    cmd = (
+        f"kubectl exec {pod_name} --context={context} -n {namespace} -- "
+        f"test -d /data/{remote_path}"
+    )
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return result.returncode == 0
+
+
 def tar_copy(pod_name, remote_path, local_dest, context, namespace):
     """Download directory from pod via tar pipe (avoids kubectl cp tar warning bug).
 
@@ -150,15 +160,30 @@ def download_and_verify(campaign_dir, dir_name, context, namespace):
     exp = json.loads((exp_dir / "experiment.json").read_text())
 
     experiment_id = make_experiment_id(exp)
-    # PVC data dir matches the template's stackModelLabel: "$(params.experimentId)-{{ tp }}-{{ dlp }}"
     dp = exp.get("dp") or 1
-    pvc_data_dir = f"{experiment_id}-{exp['tp']}-{dp}"
+
+    # New format (tp-dp): matches template stackModelLabel "$(params.experimentId)-{{ tp }}-{{ dlp }}"
+    # Old format (tp only): matches pre-dlp template "$(params.experimentId)-{{ tp }}"
+    new_fmt = f"{experiment_id}-{exp['tp']}-{dp}"
+    old_fmt = f"{experiment_id}-{exp['tp']}"
 
     local_dest = exp_dir / "data"
 
     pod_name = None
     try:
         pod_name = create_busybox_pod(context, namespace)
+
+        # Probe PVC for the correct directory format
+        if pvc_dir_exists(pod_name, new_fmt, context, namespace):
+            pvc_data_dir = new_fmt
+        elif pvc_dir_exists(pod_name, old_fmt, context, namespace):
+            log.info(f"Using old PVC path format (no dp suffix): {old_fmt}")
+            pvc_data_dir = old_fmt
+        else:
+            raise DownloadError(
+                f"Data directory not found on PVC: tried {new_fmt} and {old_fmt}"
+            )
+
         tar_copy(pod_name, pvc_data_dir, local_dest, context, namespace)
         verify_download(local_dest, pvc_data_dir)
     finally:
