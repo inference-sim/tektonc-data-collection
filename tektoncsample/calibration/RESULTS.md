@@ -1,12 +1,13 @@
 # Rate Calibration Results
 
-**Date:** 2026-03-12 (H100), 2026-03-13 (L40S)
+**Date:** 2026-03-12 (H100), 2026-03-13 (L40S), 2026-03-14 (A100)
 **Clusters:**
   - H100: pokprod001 (14 nodes x 8 H100-80GB-HBM3)
   - L40S: platform-eval (5 nodes x 2 L40S-48GB)
+  - A100: fmaas-vllm-d (3 nodes x 8 A100-SXM4-80GB)
 **Namespace:** diya
 **vLLM version:** vllm/vllm-openai:v0.15.1
-**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs, cal-h100-q44rd (H100); cal-l40s-78pnr (L40S)
+**Pipeline runs:** cal-h100-d55vl, cal-h100-kmdzs, cal-h100-q44rd (H100); cal-l40s-78pnr (L40S); cal-a100-seq-68v6w (A100)
 
 ## Method
 
@@ -51,7 +52,9 @@ compiled by tektonc.
 | `--max-num-batched-tokens` | 2048 |
 | `--max-num-seqs` | 128 |
 | vLLM image | `vllm/vllm-openai:v0.15.1` |
-| GPU | NVIDIA-H100-80GB-HBM3 |
+| GPU (H100) | NVIDIA-H100-80GB-HBM3 |
+| GPU (A100) | NVIDIA-A100-SXM4-80GB |
+| GPU (L40S) | NVIDIA-L40S |
 | Replicas | 1 (single decode pod per config) |
 
 Model-specific flags applied where needed (FP8 quantization, generation config overrides).
@@ -76,6 +79,12 @@ Model-specific flags applied where needed (FP8 quantization, generation config o
 | mixtral-8x22b-h100-tp8 | mistralai/Mixtral-8x22B-Instruct-v0.1 | 8 | FP16 | 7.340 | 10.7 | 249 |
 | **llama31-8b-l40s-tp1** | **meta-llama/Llama-3.1-8B-Instruct** | **1** | **FP16** | **21.248** | **21.0** | **249** |
 | **qwen3-14b-l40s-tp1** | **Qwen/Qwen3-14B** | **1** | **FP16** | **38.880** | **38.9** | **249** |
+| *llama31-8b-a100-tp1* | *meta-llama/Llama-3.1-8B-Instruct* | *1* | *FP16* | *10.833* | *—* | *249* |
+| *qwen3-14b-a100-tp1* | *Qwen/Qwen3-14B* | *1* | *FP16* | *19.039* | *—* | *249* |
+| *codellama-34b-a100-tp2* | *codellama/CodeLlama-34b-Instruct-hf* | *2* | *FP16* | *23.598* | *—* | *249* |
+| *mixtral-8x7b-a100-tp2* | *mistralai/Mixtral-8x7B-v0.1* | *2* | *FP16* | *10.143* | *—* | *249* |
+| *scout-17b-a100-tp2* | *RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic* | *2* | *FP8* | *12.103* | *—* | *249* |
+| *llama2-70b-a100-tp4* | *meta-llama/Llama-2-70b-hf* | *4* | *FP16* | *28.783* | *—* | *249* |
 
 ### Previously failed (vLLM v0.15.1 FP8 MoE OOM)
 
@@ -171,6 +180,12 @@ Default config: mbt=2048, max_num_seqs=128 (unless noted).
 | 53 | Scout-17B-16E | 2 | reasoning | 9.948 | 4.4 | 4.0 | ok |
 | **60** | **Llama-3.1-8b (L40S)** | **1** | **general** | **21.248** | **12.1** | **20.0** | **UNSAFE** |
 | **61** | **Qwen3-14B (L40S)** | **1** | **general** | **38.880** | **6.6** | **20.0** | **UNSAFE** |
+| *38* | *Llama-3.1-8b (A100)* | *1* | *general* | *10.833* | *23.8* | *20.0* | *ok* |
+| *36* | *Qwen3-14B (A100)* | *1* | *general* | *19.039* | *13.6* | *20.0* | ***UNSAFE*** |
+| *40* | *Codellama-34b (A100)* | *2* | *general* | *23.598* | *10.9* | *20.0* | ***UNSAFE*** |
+| *42* | *Mixtral-8x7B (A100)* | *2* | *general* | *10.143* | *25.5* | *20.0* | *ok* |
+| *44* | *Scout-17B-16E (A100)* | *2* | *general (FP8)* | *12.103* | *21.3* | *20.0* | *ok* |
+| *41* | *Llama-2-70b (A100)* | *4* | *general* | *28.783* | *9.0* | *20.0* | ***UNSAFE*** |
 
 **Note:** For mbt sweep experiments (25-26, 30-31), the safe_rps is the same because
 `max_num_seqs` (128) is the binding constraint, not `mbt`. Changing mbt from 1024 to 8192
@@ -211,6 +226,10 @@ doesn't change the safe rate when the seq limit dominates.
    **Recommendation:** Reduce general workload peak to 12 rps and 6 rps respectively, or
    explore TP=2 configurations on L40S for higher throughput.
 
+9. **A100 models are ~1.6-1.7x slower than H100.** Consistent with memory bandwidth ratio
+   (2 TB/s A100-SXM4 vs 3.35 TB/s H100-SXM5). Three of six A100 configs exceed safe rate
+   at 20 rps general peak: Qwen3-14B (13.6), Codellama-34b (10.9), Llama-2-70b (9.0).
+
 ---
 
 ## Calibration Status
@@ -229,3 +248,30 @@ doesn't change the safe rate when the seq limit dominates.
 - [x] ~~Qwen3-14B L40S TP1~~ → 38.880 ms/token (pipeline run `cal-l40s-78pnr`)
 - **All L40S calibrations complete** (2/2 configs)
 - Both models are **rate-limited** at 20 rps general workload peak
+
+### A100 (6/7 — Mixtral-8x22B pending)
+- [x] ~~Llama-3.1-8B A100 TP1~~ → 10.833 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [x] ~~Qwen3-14B A100 TP1~~ → 19.039 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [x] ~~Codellama-34b A100 TP2~~ → 23.598 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [x] ~~Mixtral-8x7B A100 TP2~~ → 10.143 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [x] ~~Scout-17B-16E A100 TP2 FP8~~ → 12.103 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [x] ~~Llama-2-70b A100 TP4~~ → 28.783 ms/token (pipeline run `cal-a100-seq-68v6w`)
+- [ ] **Mixtral-8x22B A100 TP8** — blocked by GPU contention on shared cluster (needs 8 GPUs on one node)
+- 3 models **rate-limited** at 20 rps general: Qwen3-14B (13.6), Codellama-34b (10.9), Llama-2-70b (9.0)
+
+### A100 key findings
+
+1. **A100 decode latency is ~1.6-1.7x slower than H100** across all models, consistent with
+   the ~1.7x memory bandwidth ratio (2 TB/s A100-SXM4 vs 3.35 TB/s H100-SXM5).
+
+2. **3 of 6 A100 configs are rate-limited at 20 rps general workload:**
+   - Qwen3-14B: safe 13.6 vs peak 20.0 (32% below)
+   - Codellama-34b: safe 10.9 vs peak 20.0 (45% below)
+   - Llama-2-70b: safe 9.0 vs peak 20.0 (55% below)
+   **Recommendation:** Cap rates or run only safe workloads for these models on A100.
+
+3. **Mixtral-8x7B (10.143 ms) and Scout-17B-16E FP8 (12.103 ms) are comfortable** on A100
+   with safe rates of 25.5 and 21.3 respectively (both > 20.0 peak).
+
+4. **TTFT values not captured** — calibration taskrun results were cleaned before extraction.
+   Decode latency is the critical metric for safe rate computation; TTFT can be re-measured.
