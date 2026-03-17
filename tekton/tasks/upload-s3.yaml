@@ -23,7 +23,9 @@ spec:
    
   steps:
     - name: upload
-      image: ubuntu:24.04
+      image: registry.access.redhat.com/ubi9:latest
+      securityContext:
+        runAsUser: 0
       workingDir: $(workspaces.data.path)
       env:
         - { name: ARCHIVE, value: "$(params.archive)" }
@@ -35,9 +37,7 @@ spec:
         export AWS_ACCESS_KEY_ID=$(cat "$(workspaces.target-credentials.path)/AWS_ACCESS_KEY_ID")
         export AWS_SECRET_ACCESS_KEY=$(cat "$(workspaces.target-credentials.path)/AWS_SECRET_ACCESS_KEY")
 
-        apt-get update && \
-            apt-get install -y --no-install-recommends ca-certificates curl unzip tar gzip && \
-            rm -rf /var/lib/apt/lists/*
+        dnf install -y --nodocs unzip && dnf clean all
 
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip && \
           unzip /tmp/awscliv2.zip -d /tmp && \

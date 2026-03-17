@@ -19,7 +19,7 @@ spec:
     - { name: OVERRIDES, value: "$(params.overrides)" }
     - { name: TEKTON_RESULT_PATH, value: "$(step.results.merged-values.path)" }
 
-  image: python:3.11-slim
+  image: image-registry.openshift-image-registry.svc:5000/diya/python:3.10
   script: |
     #!/usr/bin/env sh
     set -euo pipefail

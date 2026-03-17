@@ -16,7 +16,7 @@ spec:
         - input: $(params.debug)
           operator: in
           values: ["true", "True"]
-      image: alpine:3.20
+      image: registry.access.redhat.com/ubi9-minimal:latest
       script: |
         #!/bin/sh
         set -eu

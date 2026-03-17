@@ -6,7 +6,8 @@ metadata:
     tekton.dev/displayName: "Execute helm upgrade --install with repo add/update"
 spec:
   # image: alpine/helm:3.14.0
-  image: dtzar/helm-kubectl:3.19
+  # image: dtzar/helm-kubectl:3.19
+  image: image-registry.openshift-image-registry.svc:5000/diya/alpine-helm:3.14.0
 
   # ---------- Parameters ----------
   params:
@@ -188,7 +189,7 @@ spec:
       exit 0
     fi
 
-    apk add --no-cache jq >/dev/null
+    apk add --no-cache jq git >/dev/null
 
     echo ">>> helm step: treatment"
     printf "%s" "${TREATMENT_ANALYSIS}"
@@ -300,7 +301,7 @@ metadata:
   annotations:
     tekton.dev/displayName: "Execute helm delete"
 spec:
-  image: alpine/helm:3.14.0
+  image: image-registry.openshift-image-registry.svc:5000/diya/alpine-helm:3.14.0
 
   params:
     # Namespace from which to delete installed chart

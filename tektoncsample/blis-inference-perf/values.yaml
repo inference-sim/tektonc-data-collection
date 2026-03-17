@@ -138,8 +138,9 @@ workload:
       local_storage:
         path: PATH
 
-upload_target:
-  type: s3
-  configuration:
-    bucket: cloud-object-storage-cos-standard-ere
-    endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud
+# upload_target disabled — no s3-secret on A100 cluster
+# upload_target:
+#   type: s3
+#   configuration:
+#     bucket: cloud-object-storage-cos-standard-ere
+#     endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud

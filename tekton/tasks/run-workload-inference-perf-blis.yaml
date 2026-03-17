@@ -32,7 +32,7 @@ spec:
           value: "$(params.modelLabel)"
         - name: MODEL
           value: "$(params.model)"
-      image: alpine/kubectl:1.34.1
+      image: image-registry.openshift-image-registry.svc:5000/diya/alpine-kubectl:1.34.1
       script: |
         #!/bin/sh
         set -eu
@@ -61,7 +61,7 @@ spec:
         EOF
 
     - name: log-profile
-      image: alpine:3.20
+      image: registry.access.redhat.com/ubi9-minimal:latest
       script: |
         #!/bin/sh
         set -eu
@@ -71,7 +71,7 @@ spec:
         cat "${WORKLOAD_PROFILE}"
 
     - name: run-workload
-      image: python:3.12.9-slim-bookworm
+      image: registry.access.redhat.com/ubi9/python-312:latest
       computeResources:
         requests:
           memory: "16Gi"
@@ -97,6 +97,11 @@ spec:
         export PYTHONPATH="$(workspaces.data.path)/inference-perf"
         export PATH="$(workspaces.data.path)/inference-perf/bin:${PATH}"
         export HF_TOKEN=$(cat "$(workspaces.hf-credentials.path)/HF_TOKEN")
+
+        # Use system CA bundle instead of certifi's (needed for corporate proxy CAs)
+        export REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
+        export SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
+        export CURL_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
 
         # Run inference-perf using the installed binary
         inference-perf --config_file "${WORKLOAD_PROFILE}" \

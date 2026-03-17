@@ -22,17 +22,19 @@ spec:
 
   steps:
     - name: install-packages
-      image: python:3.12.9-slim-bookworm
+      image: registry.access.redhat.com/ubi9/python-312:latest
       script: |
         #!/bin/sh
         set -eux
 
-        echo "🔄 Installing required tools"
-        apt-get update -y
-        apt-get install -y git
-        rm -rf /var/lib/apt/lists/*
-
         TARGET="$(workspaces.data.path)/inference-perf"
+        MARKER="$TARGET/.installed-$(params.git_commit)"
+
+        # Skip if this exact commit is already installed (concurrent runs share the PVC)
+        if [ -f "$MARKER" ]; then
+          echo "✔ inference-perf already installed, skipping"
+          exit 0
+        fi
 
         echo "📦 Installing inference-perf into $TARGET"
         mkdir -p "$TARGET"
@@ -40,4 +42,5 @@ spec:
         pip install --target="$TARGET" \
           "git+$(params.git_repo_url)@$(params.git_commit)"
 
+        touch "$MARKER"
         echo "✔ Done installing inference-perf"
