@@ -36,7 +36,7 @@ spec:
   restartPolicy: Never
   containers:
   - name: busybox
-    image: busybox:latest
+    image: registry.access.redhat.com/ubi9:latest
     command: ["sleep", "3600"]
     volumeMounts:
     - name: data
@@ -101,11 +101,15 @@ def tar_copy(pod_name, remote_path, local_dest, context, namespace):
     local_dest.mkdir(parents=True, exist_ok=True)
 
     cmd = (
+        f"set -o pipefail; "
         f"kubectl exec {pod_name} --context={context} -n {namespace} -- "
         f"tar cf - -C /data {remote_path} | tar xf - -C {local_dest}"
     )
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=600, executable="/bin/bash",
+        )
     except subprocess.TimeoutExpired:
         raise DownloadError("tar pipe timed out after 600s")
     if result.returncode != 0:
