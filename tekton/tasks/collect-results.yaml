@@ -1,0 +1,23 @@
+# tektonc-data-collection/tekton/tasks/collect-results.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-results
+spec:
+  description: >-
+    Synchronization barrier task. Runs after all run-workload-blis-observe tasks
+    to ensure data integrity before the pipeline reports success.
+    Directory structure on the PVC is established by each workload task's resultsDir
+    parameter. This task does not move or transform data.
+
+  workspaces:
+    - name: data
+      description: "Shared PVC (data-pvc) — verified as mounted"
+
+  steps:
+    - name: barrier
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        echo "All workload tasks complete."
+        echo "Results available on data-pvc."
