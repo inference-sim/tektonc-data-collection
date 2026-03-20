@@ -1,0 +1,114 @@
+{% set scorer_config_content = stack.scorer.baseline.configContent %}
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: sim2real-noise
+spec:
+  params:
+    - name: experimentId
+      type: string
+    - name: namespace
+      type: string
+  workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    - name: data-storage
+  tasks:
+    - name: download-model
+      taskRef:
+        name: download-model
+      workspaces:
+        - name: model-cache
+          workspace: model-cache
+        - name: hf-credentials
+          workspace: hf-credentials
+      params:
+        - name: model
+          value: "{{ stack.model.helmValues.modelName }}"
+
+    - name: deploy-gaie
+      taskRef:
+        name: deploy-gaie
+      params:
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: config
+          value: "{{ scorer_config_content }}"
+        - name: namespace
+          value: "$(params.namespace)"
+
+    - name: deploy-model
+      runAfter: ["download-model", "deploy-gaie"]
+      taskRef:
+        name: deploy-model
+      workspaces:
+        - name: model-cache
+          workspace: model-cache
+      params:
+        - name: model
+          value: "{{ stack.model.helmValues.modelName }}"
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: config
+          value: {{ stack.model.helmValues | tojson }}
+
+    - loopName: noise-runs
+      foreach:
+        domain:
+          run_index: {{ range(observe.noise_runs) | list }}
+          workload: {{ observe.workloads }}
+      vars:
+        taskId: "{{ workload.name | dns }}-run-{{ run_index }}"
+
+      tasks:
+        - name: run-workload-{{ taskId }}
+          runAfter: ["deploy-model"]
+          taskRef:
+            name: run-workload-blis-observe
+          workspaces:
+            - name: data
+              workspace: data-storage
+          params:
+            - name: endpoint
+              value: "http://gateway-svc.$(params.namespace):8000/v1"
+            - name: workloadSpec
+              value: "{{ workload.spec }}"
+            - name: blisImage
+              value: "{{ observe.image }}"
+            - name: timeout
+              value: "30m"
+            - name: resultsDir
+              value: "noise/{{ workload.name }}/run-{{ run_index }}"
+
+    - name: collect-results
+      runAfter:
+        {% for run_index in range(observe.noise_runs) %}
+        {% for workload in observe.workloads %}
+        - run-workload-{{ workload.name | dns }}-run-{{ run_index }}
+        {% endfor %}
+        {% endfor %}
+      taskRef:
+        name: collect-results
+      workspaces:
+        - name: data
+          workspace: data-storage
+
+  finally:
+    - name: delete-model
+      taskRef:
+        name: delete-model
+      params:
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+    - name: delete-gaie
+      taskRef:
+        name: delete-gaie
+      params:
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"

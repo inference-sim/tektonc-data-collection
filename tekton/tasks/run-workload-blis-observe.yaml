@@ -1,0 +1,61 @@
+# tektonc-data-collection/tekton/tasks/run-workload-blis-observe.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-workload-blis-observe
+spec:
+  description: >-
+    Run blis observe against a live inference endpoint using a workload spec.
+    Writes TraceV2 output (trace_header.yaml + trace_data.csv) to the data PVC.
+    NOTE: blis observe CLI flags (--endpoint, --workload-spec, --output-dir, --timeout)
+    are provisional pending inference-sim PR #704 merge. Verify flag names
+    against the merged observeCmd registration before deploying.
+
+  params:
+    - name: endpoint
+      type: string
+      description: "Inference endpoint URL, e.g. http://gateway-svc.$(params.namespace):8000/v1"
+    - name: workloadSpec
+      type: string
+      description: "Inline YAML content of the workload spec file"
+    - name: resultsDir
+      type: string
+      description: "Path under /workspace/data to write TraceV2 output (e.g. baseline/glia-40qps)"
+    - name: blisImage
+      type: string
+      description: "Container image with blis observe command (from values.yaml observe.image)"
+    - name: timeout
+      type: string
+      default: "30m"
+      description: "Workload run timeout (passed to blis observe --timeout)"
+
+  workspaces:
+    - name: data
+      description: "Shared PVC for storing TraceV2 results (data-pvc)"
+
+  steps:
+    - name: write-workload-spec
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        set -e
+        mkdir -p /workspace/data/$(params.resultsDir)
+        cat > /workspace/workload.yaml << '__WORKLOAD_SPEC_END__'
+        $(params.workloadSpec)
+        __WORKLOAD_SPEC_END__
+        echo "Workload spec written to /workspace/workload.yaml"
+        head -5 /workspace/workload.yaml
+
+    - name: run-observe
+      image: $(params.blisImage)
+      script: |
+        #!/bin/sh
+        set -e
+        mkdir -p /workspace/data/$(params.resultsDir)
+        blis observe \
+          --endpoint $(params.endpoint) \
+          --workload-spec /workspace/workload.yaml \
+          --output-dir /workspace/data/$(params.resultsDir) \
+          --timeout $(params.timeout)
+        echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
+        ls /workspace/data/$(params.resultsDir)
