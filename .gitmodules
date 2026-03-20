@@ -1,0 +1,3 @@
+[submodule "tektonc-data-collection"]
+	path = tektonc-data-collection
+	url = https://github.com/inference-sim/tektonc-data-collection.git
