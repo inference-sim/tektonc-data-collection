@@ -1,4 +1,3 @@
-{% set scorer_config_content = stack.scorer.baseline.configContent %}
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
@@ -9,11 +8,24 @@ spec:
       type: string
     - name: namespace
       type: string
+    - name: runIndex
+      type: string
   workspaces:
     - name: model-cache
     - name: hf-credentials
     - name: data-storage
   tasks:
+    - name: deploy-gateway
+      taskRef:
+        name: deploy-gateway
+      params:
+        - name: experimentId
+          value: "$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: config
+          value: {{ stack.gateway.helmValues | tojson }}
+
     - name: download-model
       taskRef:
         name: download-model
@@ -24,7 +36,7 @@ spec:
           workspace: hf-credentials
       params:
         - name: model
-          value: "{{ stack.model.helmValues.modelName }}"
+          value: "{{ stack.model.modelName }}"
 
     - name: deploy-gaie
       taskRef:
@@ -33,7 +45,7 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
         - name: config
-          value: "{{ scorer_config_content }}"
+          value: {{ stack.gaie.baseline.helmValues | tojson }}
         - name: namespace
           value: "$(params.namespace)"
 
@@ -46,7 +58,7 @@ spec:
           workspace: model-cache
       params:
         - name: model
-          value: "{{ stack.model.helmValues.modelName }}"
+          value: "{{ stack.model.modelName }}"
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
         - name: namespace
@@ -54,40 +66,46 @@ spec:
         - name: config
           value: {{ stack.model.helmValues | tojson }}
 
-    - loopName: noise-runs
-      foreach:
-        domain:
-          run_index: {{ range(observe.noise_runs) | list }}
-          workload: {{ observe.workloads }}
-      vars:
-        taskId: "{{ workload.name | dns }}-run-{{ run_index }}"
+    - name: deploy-httproute
+      runAfter: ["deploy-gateway", "deploy-gaie"]
+      taskRef:
+        name: deploy-httproute
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: gateway
+          value: "$(tasks.deploy-gateway.results.gateway)"
+        - name: inferencepool
+          value: "$(tasks.deploy-gaie.results.inferencepool)"
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
 
-      tasks:
-        - name: run-workload-{{ taskId }}
-          runAfter: ["deploy-model"]
-          taskRef:
-            name: run-workload-blis-observe
-          workspaces:
-            - name: data
-              workspace: data-storage
-          params:
-            - name: endpoint
-              value: "http://gateway-svc.$(params.namespace):8000/v1"
-            - name: workloadSpec
-              value: "{{ workload.spec }}"
-            - name: blisImage
-              value: "{{ observe.image }}"
-            - name: timeout
-              value: "30m"
-            - name: resultsDir
-              value: "noise/{{ workload.name }}/run-{{ run_index }}"
+    {% for workload in observe.workloads %}
+    - name: run-workload-{{ workload.name | dns }}
+      runAfter: ["deploy-model", "deploy-httproute"]
+      taskRef:
+        name: run-workload-blis-observe
+      workspaces:
+        - name: data
+          workspace: data-storage
+      params:
+        - name: endpoint
+          value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
+        - name: model
+          value: "{{ stack.model.modelName }}"
+        - name: workloadSpec
+          value: |
+            {{ workload.spec | indent(12) }}
+        - name: blisImage
+          value: "{{ observe.image }}"
+        - name: resultsDir
+          value: "noise/{{ workload.name }}/run-$(params.runIndex)"
+    {% endfor %}
 
     - name: collect-results
       runAfter:
-        {% for run_index in range(observe.noise_runs) %}
         {% for workload in observe.workloads %}
-        - run-workload-{{ workload.name | dns }}-run-{{ run_index }}
-        {% endfor %}
+        - run-workload-{{ workload.name | dns }}
         {% endfor %}
       taskRef:
         name: collect-results
@@ -96,6 +114,22 @@ spec:
           workspace: data-storage
 
   finally:
+    - name: delete-httproute
+      taskRef:
+        name: delete-httproute
+      params:
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+    - name: delete-gateway
+      taskRef:
+        name: delete-gateway
+      params:
+        - name: experimentId
+          value: "$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
     - name: delete-model
       taskRef:
         name: delete-model
