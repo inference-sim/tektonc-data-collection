@@ -1,31 +1,21 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: sim2real-noise
+  name: sim2real-{{ phase }}
 spec:
   params:
     - name: experimentId
       type: string
     - name: namespace
       type: string
-    - name: runIndex
+    - name: sleepDuration
       type: string
+      default: "5m"
   workspaces:
     - name: model-cache
     - name: hf-credentials
     - name: data-storage
   tasks:
-    - name: deploy-gateway
-      taskRef:
-        name: deploy-gateway
-      params:
-        - name: experimentId
-          value: "$(params.experimentId)"
-        - name: namespace
-          value: "$(params.namespace)"
-        - name: config
-          value: {{ stack.gateway.helmValues | tojson }}
-
     - name: download-model
       taskRef:
         name: download-model
@@ -38,6 +28,17 @@ spec:
         - name: model
           value: "{{ stack.model.modelName }}"
 
+    - name: deploy-gateway
+      taskRef:
+        name: deploy-gateway
+      params:
+        - name: experimentId
+          value: "$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: config
+          value: {{ stack.gateway.helmValues | tojson }}
+
     - name: deploy-gaie
       taskRef:
         name: deploy-gaie
@@ -45,7 +46,7 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
         - name: config
-          value: {{ stack.gaie.baseline.helmValues | tojson }}
+          value: {{ gaie_config | tojson }}
         - name: namespace
           value: "$(params.namespace)"
 
@@ -66,6 +67,14 @@ spec:
         - name: config
           value: {{ stack.model.helmValues | tojson }}
 
+    - name: pause-after-model-deploy
+      runAfter: ["deploy-model"]
+      taskRef:
+        name: sleep
+      params:
+        - name: duration
+          value: "$(params.sleepDuration)"
+
     - name: deploy-httproute
       runAfter: ["deploy-gateway", "deploy-gaie"]
       taskRef:
@@ -80,38 +89,37 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
 
-    {% for workload in observe.workloads %}
-    - name: run-workload-{{ workload.name | dns }}
-      runAfter: ["deploy-model", "deploy-httproute"]
-      taskRef:
-        name: run-workload-blis-observe
-      workspaces:
-        - name: data
-          workspace: data-storage
-      params:
-        - name: endpoint
-          value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
-        - name: model
-          value: "{{ stack.model.modelName }}"
-        - name: workloadSpec
-          value: |
-            {{ workload.spec | indent(12) }}
-        - name: blisImage
-          value: "{{ observe.image }}"
-        - name: resultsDir
-          value: "noise/{{ workload.name }}/run-$(params.runIndex)"
-    {% endfor %}
-
-    - name: collect-results
-      runAfter:
-        {% for workload in observe.workloads %}
-        - run-workload-{{ workload.name | dns }}
+    - __jinja__: |
+        {% for wl in observe.workloads %}
+        - name: run-workload-{{ wl.name | dns }}
+          runAfter: ["pause-after-model-deploy", "deploy-httproute"]
+          taskRef:
+            name: run-workload-blis-observe
+          workspaces:
+            - name: data
+              workspace: data-storage
+          params:
+            - name: endpoint
+              value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
+            - name: model
+              value: "{{ stack.model.modelName }}"
+            - name: workloadSpec
+              value: {{ wl.spec | tojson }}
+            - name: blisImage
+              value: "{{ observe.image }}"
+            - name: resultsDir
+              value: "{{ phase }}/{{ wl.name }}"
         {% endfor %}
-      taskRef:
-        name: collect-results
-      workspaces:
-        - name: data
-          workspace: data-storage
+        - name: collect-results
+          runAfter:
+          {% for wl in observe.workloads %}
+            - run-workload-{{ wl.name | dns }}
+          {% endfor %}
+          taskRef:
+            name: collect-results
+          workspaces:
+            - name: data
+              workspace: data-storage
 
   finally:
     - name: delete-httproute
@@ -120,14 +128,6 @@ spec:
       params:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
-        - name: namespace
-          value: "$(params.namespace)"
-    - name: delete-gateway
-      taskRef:
-        name: delete-gateway
-      params:
-        - name: experimentId
-          value: "$(params.experimentId)"
         - name: namespace
           value: "$(params.namespace)"
     - name: delete-model
@@ -144,5 +144,13 @@ spec:
       params:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
+        - name: namespace
+          value: "$(params.namespace)"
+    - name: delete-gateway
+      taskRef:
+        name: delete-gateway
+      params:
+        - name: experimentId
+          value: "$(params.experimentId)"
         - name: namespace
           value: "$(params.namespace)"

@@ -25,7 +25,7 @@ spec:
         name: helm-upgrade-install
       params:
         - name: releaseName
-          value: $(params.experimentId)-gateway
+          value: gw-$(params.experimentId)
         - name: chart
           value: llm-d-infra/llm-d-infra
         - name: repoName
@@ -40,6 +40,30 @@ spec:
         - name: valuesYaml
           value: "$(params.config)"
 
+    - name: wait-for-gateway-service
+      env:
+        - { name: NAMESPACE, value: $(params.namespace) }
+        - { name: TIMEOUT, value: $(params.startupTimeout) }
+      image: dtzar/helm-kubectl:3.19
+      script: |
+        #!/bin/sh
+        set -eu
+        RELEASE="gw-$(params.experimentId)"
+        GW_NAME="${RELEASE}-inference-gateway"
+        SVC_NAME="${GW_NAME}-istio"
+
+        echo "Waiting up to ${TIMEOUT}s for Service ${SVC_NAME} in ${NAMESPACE}..."
+        ELAPSED=0
+        until kubectl get service "${SVC_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; do
+          if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+            echo "Timed out waiting for Service ${SVC_NAME}"
+            exit 1
+          fi
+          sleep 5
+          ELAPSED=$((ELAPSED + 5))
+        done
+        echo "Service ${SVC_NAME} is available."
+
     - name: record-results
       env:
         - { name: NAMESPACE, value: $(params.namespace) }
@@ -49,7 +73,7 @@ spec:
         #!/bin/sh
         set -eu
 
-        # Gateway name is the helm release name
-        RELEASE="$(params.experimentId)-gateway"
-        printf "%s" "${RELEASE}-inference-gateway" > $(results.gateway.path)
-        printf "%s" "${RELEASE}-inference-gateway.${NAMESPACE}:${PORT}" > $(results.endpoint.path)
+        # For istio gateway class, service name has -istio suffix
+        RELEASE="gw-$(params.experimentId)"
+        printf "%s" "${RELEASE}-inference-gateway-istio" > $(results.gateway.path)
+        printf "%s" "${RELEASE}-inference-gateway-istio.${NAMESPACE}:${PORT}" > $(results.endpoint.path)
