@@ -31,4 +31,4 @@ spec:
         name: helm-delete
       params:
         - { name: namespace, value: "$(params.namespace)" }
-        - { name: releaseName, value: "$(params.experimentId)-gateway" }
+        - { name: releaseName, value: "gw-$(params.experimentId)" }

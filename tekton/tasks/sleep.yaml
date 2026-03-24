@@ -1,0 +1,15 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sleep
+spec:
+  params:
+    - name: duration
+      type: string
+      default: "5m"
+      description: Sleep duration (e.g. 30s, 5m, 1h)
+  steps:
+    - name: sleep
+      image: alpine:3
+      command: ["sleep"]
+      args: ["$(params.duration)"]
