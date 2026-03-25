@@ -405,14 +405,11 @@ spec:
           value: $(params.modelLabel)-model
 
         - name: chart
-          value: "/tmp/llm-d-modelservice/charts/llm-d-modelservice"
-
-        - name: git_url
-          value: "https://github.com/kalantar/llm-d-modelservice"
-        - name: git_revision
-          value: "main"
-        - name: checkout_dir
-          value: "/tmp/llm-d-modelservice"
+          value: llm-d-modelservice
+        - name: repoName
+          value: llm-d-modelservice
+        - name: repoUrl
+          value: "https://llm-d-incubation.github.io/llm-d-modelservice/"
 
         - name: namespace
           value: $(params.namespace)
