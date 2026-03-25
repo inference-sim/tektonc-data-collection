@@ -26,7 +26,7 @@ spec:
     - name: gaie_api_version
       type: string
       description: API version for GAIE resources
-      default: "inference.networking.x-k8s.io"
+      default: "inference.networking.k8s.io"
 
   steps:
     - name: create-httproute
