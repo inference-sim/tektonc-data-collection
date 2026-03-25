@@ -48,7 +48,7 @@ spec:
         - name: chart
           value: oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
         - name: version
-          value: v1.3.0
+          value: v1.4.0
 
         - name: namespace
           value: $(params.namespace)
