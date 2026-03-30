@@ -77,7 +77,8 @@ spec:
         #!/bin/sh
         set -eu
 
-        # For istio gateway class, service name has -istio suffix
+        # For istio gateway class, the Gateway resource name has no -istio suffix;
+        # the service (endpoint) name has -istio suffix.
         RELEASE="gw-$(params.experimentId)"
         printf "%s" "${RELEASE}-inference-gateway" > $(results.gateway.path)
         printf "%s" "${RELEASE}-inference-gateway-istio.${NAMESPACE}:${PORT}" > $(results.endpoint.path)
