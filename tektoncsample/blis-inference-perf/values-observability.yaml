@@ -60,7 +60,7 @@ stack:
           tensor: 1
         initContainers:
         - name: install-otel-dependencies
-          image: ghcr.io/inference-sim/vllm:0.15.1
+          image: ghcr.io/inference-sim/vllm:0.6.8
           command: ["/bin/bash", "-c"]
           args:
           - |-
@@ -105,7 +105,7 @@ stack:
             - name: TRANSFORMERS_CACHE
               value: "/mnt/exp/.cache/huggingface"
           mountModelVolume: true
-          image: "ghcr.io/inference-sim/vllm:0.15.1"
+          image: "ghcr.io/inference-sim/vllm:0.6.8"
           modelCommand: vllmServe
           resources:
             limits:
@@ -142,7 +142,7 @@ stack:
 
         # KV events subscriber sidecar
         - name: "kv-events-subscriber"
-          image: "ghcr.io/inference-sim/vllm:0.15.1"
+          image: "ghcr.io/inference-sim/vllm:0.6.8"
           modelCommand: custom
           command: ["python3"]
           args: ["examples/online_serving/kv_events_subscriber.py"]

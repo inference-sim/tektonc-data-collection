@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: delete-model-inline
+spec:
+  description: |
+    Delete model engines (platform-eval compatible version with helm script inlined)
+  params:
+    - { name: namespace, type: string }
+    - { name: modelLabel, type: string }
+    - { name: debug, type: string, default: "false" }
+
+  steps:
+    - name: delete
+      env:
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        - name: RELEASE
+          value: "$(params.modelLabel)-model"
+        - name: DEBUG
+          value: "$(params.debug)"
+      image: alpine/helm:3.14.0
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+
+        if [ "${DEBUG}" = "true" ] || [ "${DEBUG}" = "True" ]; then
+          echo "delete-model called (debug mode - skipping actual deletion)"
+          exit 0
+        fi
+
+        helm --namespace "${NAMESPACE}" delete "${RELEASE}" --ignore-not-found

@@ -410,7 +410,7 @@ def run_campaign(args):
             # Query GPU availability
             try:
                 available = get_available_gpus(
-                    context, cluster["gpu_label_key"], cluster["gpu_label_value"]
+                    context, cluster["gpu_label_key"], cluster["gpu_label_value"], namespace
                 )
             except Exception as e:
                 log.warning(f"GPU query failed: {e}, retrying next cycle")

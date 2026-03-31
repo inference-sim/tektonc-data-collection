@@ -84,3 +84,19 @@ general-lite:
       question_len: 447                  # 547 - 100 = 447
       output_len: 248
       enable_multi_turn_chat: true
+reasoning-lite:
+  load:
+    type: constant
+    stages:
+    - rate: 1.0
+      duration: 1200        # Steady low rate throughout
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 23
+      num_users_per_system_prompt: 1     # 23 clients total
+      system_prompt_len: 100             # Prefix tokens
+      question_len: 934                  # 1034 - 100 = 934
+      output_len: 1448                   # Decode-heavy!
+      enable_multi_turn_chat: true

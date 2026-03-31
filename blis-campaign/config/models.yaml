@@ -15,6 +15,7 @@ Mixtral-8x7B: "mistralai/Mixtral-8x7B-v0.1"
 Mixtral-8x22B: "mistralai/Mixtral-8x22B-v0.1"
 Llama-2-7b-hf: "meta-llama/Llama-2-7b-hf"
 Mistral-Nemo-12b: "mistralai/Mistral-Nemo-Instruct-2407"
+01-ai/Yi-34B: "01-ai/Yi-34B"
 
 DeepSeek-V3:
   hf_id: "deepseek-ai/DeepSeek-V3"

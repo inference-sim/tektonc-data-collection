@@ -287,10 +287,11 @@ def generate_campaign(args):
     workloads = load_workloads(
         Path(__file__).parent.parent / "workloads.yaml"
     )
-    base_values = load_yaml(
-        Path(__file__).parent.parent
-        / "tektoncsample/blis-inference-perf/values.yaml"
-    )
+
+    # Load both stock and observability base values
+    tektoncsample_dir = Path(__file__).parent.parent / "tektoncsample/blis-inference-perf"
+    base_values_stock = load_yaml(tektoncsample_dir / "values.yaml")
+    base_values_observability = load_yaml(tektoncsample_dir / "values-observability.yaml")
 
     # Filter to specific IDs if --only is given
     only_ids = None
@@ -327,11 +328,16 @@ def generate_campaign(args):
         # 1. Save experiment.json (copy of this experiment's entry)
         write_json(exp_dir / "experiment.json", exp)
 
-        # 2. Build and save values.yaml
+        # 2. Select base values based on observability flag
+        # Default to stock vLLM (no observability) if field not present
+        use_observability = exp.get("observability", False)
+        base_values = base_values_observability if use_observability else base_values_stock
+
+        # 3. Build and save values.yaml
         values = build_values(exp, base_values, models, clusters, workloads)
         write_yaml(exp_dir / "values.yaml", values)
 
-        # 3. Compile pipeline.yaml via tektonc
+        # 4. Compile pipeline.yaml via tektonc
         result = subprocess.run(
             [sys.executable,
              str(Path(__file__).parent.parent / "tektonc/tektonc.py"),
@@ -345,7 +351,7 @@ def generate_campaign(args):
                   file=sys.stderr)
             return 1
 
-        # 4. Extract pipeline name and generate pipelinerun.yaml
+        # 5. Extract pipeline name and generate pipelinerun.yaml
         pipeline_name = extract_pipeline_name(exp_dir / "pipeline.yaml")
         hf_id, _, _ = resolve_model(exp["model"], models, precision=exp["precision"])
         experiment_id = make_experiment_id(exp)
@@ -355,8 +361,9 @@ def generate_campaign(args):
         (exp_dir / "pipelinerun.yaml").write_text(pr_yaml)
 
         generated += 1
+        obs_marker = " [obs]" if use_observability else ""
         print(f"  [{generated}/{len(experiments)}] #{exp['id']} {exp['model']} "
-              f"{exp['hw']} {exp['workload']}")
+              f"{exp['hw']} {exp['workload']}{obs_marker}")
 
     print(f"Generated {generated} experiments in {output_dir}/")
     return 0

@@ -43,10 +43,11 @@ def kubectl_json(cmd, context=None, namespace=None, timeout=60):
     return json.loads(result.stdout)
 
 
-def get_available_gpus(context, gpu_label_key, gpu_label_value):
+def get_available_gpus(context, gpu_label_key, gpu_label_value, namespace=None):
     """Query actual free GPUs on nodes matching the GPU label.
 
     Returns count of available (allocatable - allocated) GPUs.
+    If namespace is provided, only counts allocated GPUs in that namespace.
     """
     # Get total allocatable GPUs on matching nodes
     nodes = kubectl_json(
@@ -57,10 +58,12 @@ def get_available_gpus(context, gpu_label_key, gpu_label_value):
         for n in nodes.get("items", [])
     )
 
-    # Get allocated GPUs from running pods
+    # Get allocated GPUs from running pods (scoped to namespace if provided)
     pods = kubectl_json(
-        "get pods --all-namespaces --field-selector=status.phase=Running",
-        context=context
+        "get pods --field-selector=status.phase=Running",
+        context=context,
+        namespace=namespace,
+        timeout=180
     )
     allocated = 0
     for p in pods.get("items", []):
@@ -70,7 +73,8 @@ def get_available_gpus(context, gpu_label_key, gpu_label_value):
             )
 
     available = total - allocated
-    log.info(f"Cluster GPUs: {available} free / {total} total")
+    scope = f"namespace {namespace}" if namespace else "cluster-wide"
+    log.info(f"GPUs ({scope}): {available} free / {total} total (allocated: {allocated})")
     return available
 
 
@@ -85,6 +89,7 @@ def get_campaign_gpu_usage(context, namespace, pr_names):
         "get pods --field-selector=status.phase=Running",
         context=context,
         namespace=namespace,
+        timeout=180,  # Increased timeout for large clusters
     )
     gpus = 0
     for p in pods.get("items", []):
@@ -134,7 +139,7 @@ def preflight_check(hw, clusters):
         log.info(f"  Tekton tasks: all {len(required_tasks)} required tasks found")
 
     # Check GPU availability
-    available = get_available_gpus(context, cluster["gpu_label_key"], cluster["gpu_label_value"])
+    available = get_available_gpus(context, cluster["gpu_label_key"], cluster["gpu_label_value"], namespace)
     log.info(f"  GPUs available: {available}")
 
     # Check auth
