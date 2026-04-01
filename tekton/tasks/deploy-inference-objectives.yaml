@@ -1,0 +1,76 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-inference-objectives
+spec:
+  description: |
+    Deploy InferenceObjective CRDs for admission control.
+    Creates one InferenceObjective per SLO class, each referencing the InferencePool.
+
+  params:
+    - name: namespace
+      type: string
+      description: Namespace in which to create InferenceObjective resources
+    - name: inferencepool
+      type: string
+      description: Name of the InferencePool to reference in poolRef
+    - name: objectives
+      type: string
+      description: JSON array of {name, priority} objects
+      default: "[]"
+    - name: gaie_api_version
+      type: string
+      description: API version for GAIE resources
+      default: "inference.networking.x-k8s.io/v1alpha2"
+
+  steps:
+    - name: create-objectives
+      env:
+        - name: NAMESPACE
+          value: $(params.namespace)
+        - name: INFERENCEPOOL
+          value: $(params.inferencepool)
+        - name: OBJECTIVES
+          value: $(params.objectives)
+        - name: GAIE_API_VERSION
+          value: $(params.gaie_api_version)
+      image: alpine/kubectl:1.34.1
+      script: |
+        #!/bin/sh
+        set -eu
+
+        # Install jq for JSON parsing
+        apk add --no-cache jq > /dev/null 2>&1
+
+        COUNT=$(echo "${OBJECTIVES}" | jq length)
+        if [ "${COUNT}" -eq 0 ]; then
+          echo "No inference objectives to deploy, skipping."
+          exit 0
+        fi
+
+        # Generate manifest with one InferenceObjective per entry
+        > /workspace/objectives.yaml
+        for i in $(seq 0 $((COUNT - 1))); do
+          NAME=$(echo "${OBJECTIVES}" | jq -r ".[$i].name")
+          PRIORITY=$(echo "${OBJECTIVES}" | jq -r ".[$i].priority")
+
+          if [ $i -gt 0 ]; then
+            echo "---" >> /workspace/objectives.yaml
+          fi
+
+          cat <<EOF >> /workspace/objectives.yaml
+        apiVersion: ${GAIE_API_VERSION}
+        kind: InferenceObjective
+        metadata:
+          name: ${NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          priority: ${PRIORITY}
+          poolRef:
+            name: ${INFERENCEPOOL}
+        EOF
+        done
+
+        echo "Deploying ${COUNT} InferenceObjective(s):"
+        cat /workspace/objectives.yaml
+        kubectl apply -f /workspace/objectives.yaml

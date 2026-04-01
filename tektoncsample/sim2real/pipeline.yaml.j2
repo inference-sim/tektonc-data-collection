@@ -89,10 +89,22 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
 
+    - name: deploy-inference-objectives
+      runAfter: ["deploy-gaie"]
+      taskRef:
+        name: deploy-inference-objectives
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: inferencepool
+          value: "$(tasks.deploy-gaie.results.inferencepool)"
+        - name: objectives
+          value: {{ inference_objectives | default('[]') | tojson }}
+
     - __jinja__: |
         {% for wl in observe.workloads %}
         - name: run-workload-{{ wl.name | dns }}
-          runAfter: ["pause-after-model-deploy", "deploy-httproute"]
+          runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives"]
           taskRef:
             name: run-workload-blis-observe
           workspaces:
@@ -122,6 +134,14 @@ spec:
               workspace: data-storage
 
   finally:
+    - name: delete-inference-objectives
+      taskRef:
+        name: delete-inference-objectives
+      params:
+        - name: objectives
+          value: {{ inference_objectives | default('[]') | tojson }}
+        - name: namespace
+          value: "$(params.namespace)"
     - name: delete-httproute
       taskRef:
         name: delete-httproute
