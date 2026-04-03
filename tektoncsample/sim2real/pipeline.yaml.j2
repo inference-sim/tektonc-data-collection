@@ -120,7 +120,7 @@ spec:
             - name: blisImage
               value: "{{ observe.image }}"
             - name: resultsDir
-              value: "{{ phase }}/{{ wl.name }}"
+              value: "{{ phase }}/$(params.experimentId)/{{ wl.name }}"
         {% endfor %}
         - name: collect-results
           runAfter:

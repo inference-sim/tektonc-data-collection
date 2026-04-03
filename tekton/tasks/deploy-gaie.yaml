@@ -72,7 +72,8 @@ spec:
 
         RELEASE="$(params.modelLabel)-gaie"
         NAMESPACE="$(params.namespace)"
-        SA_NAME="${RELEASE}-epp"
+        EPP_NAME="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
+        SA_NAME="${EPP_NAME}"
 
         echo "Creating supplemental RBAC for EPP v1alpha2 resources"
         cat <<EOF | kubectl apply -f -
@@ -106,6 +107,75 @@ spec:
           namespace: ${NAMESPACE}
         EOF
         echo "Supplemental RBAC created for ${SA_NAME}"
+
+    - name: fix-epp-flags
+      image: alpine/kubectl:1.34.1
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        set -eu
+
+        # Workaround: upstream inferencepool chart v1.4.0 renders flags as
+        # separate args ("--v", "5") instead of "--v=5". The Go pflag/klog
+        # parser requires the --key=value format for the -v verbosity flag.
+        # This step patches the EPP deployment to merge split flag pairs.
+
+        apk add --no-cache -q jq
+
+        RELEASE="$(params.modelLabel)-gaie"
+        NAMESPACE="$(params.namespace)"
+        DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
+
+        echo "Checking EPP deployment ${DEPLOY} for split flag args..."
+
+        # Get current args as JSON array
+        ORIGINAL=$(kubectl get deploy "${DEPLOY}" -n "${NAMESPACE}" \
+          -o json | jq -c '.spec.template.spec.containers[0].args // empty')
+
+        if [ -z "${ORIGINAL}" ]; then
+          echo "No args found on EPP container, skipping flag fix"
+          exit 0
+        fi
+
+        # Merge adjacent "--key" "value" pairs into "--key=value"
+        PATCHED=$(echo "${ORIGINAL}" | jq -c '
+          . as $arr | reduce range(length) as $i (
+            {out: [], skip: false};
+            if .skip then .skip = false
+            elif ($arr[$i] | test("^--")) and ($arr[$i] | contains("=") | not)
+                 and ($i + 1 < ($arr | length)) and ($arr[$i + 1] | test("^-") | not)
+            then .out += ["\($arr[$i])=\($arr[$i + 1])"] | .skip = true
+            else .out += [$arr[$i]]
+            end
+          ) | .out
+        ') || { echo "Warning: jq flag-merge failed, skipping patch"; exit 0; }
+
+        if [ "${ORIGINAL}" = "${PATCHED}" ]; then
+          echo "Args already in --key=value format, no patch needed"
+        else
+          echo "Patching args: ${ORIGINAL} -> ${PATCHED}"
+          kubectl patch deploy "${DEPLOY}" -n "${NAMESPACE}" --type=json \
+            -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":${PATCHED}}]"
+          echo "EPP deployment patched, waiting for rollout..."
+          kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=120s
+        fi
+
+    - name: wait-for-epp
+      image: alpine/kubectl:1.34.1
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        set -eu
+
+        RELEASE="$(params.modelLabel)-gaie"
+        NAMESPACE="$(params.namespace)"
+        DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
+
+        echo "Waiting for EPP deployment ${DEPLOY} to become available..."
+        kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=300s
+        echo "EPP deployment is ready"
 
     - name: record-results
       image: alpine:3.20
