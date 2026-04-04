@@ -1,0 +1,76 @@
+# Task: run-sub-pipeline
+# Submits one sub-PipelineRun to the cluster and polls until it completes.
+# Used by the meta-pipeline to sequence phase×workload stacks.
+#
+# The meta-PipelineRun must set:
+#   spec.taskRunTemplate.serviceAccountName: sim2real-runner
+# so this Task's pod has permission to create/get pipelineruns.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-sub-pipeline
+spec:
+  description: >-
+    Submit one sub-PipelineRun (pre-serialized as JSON) and poll until it
+    succeeds or fails. Exits 0 on Succeeded, 1 on failure or timeout.
+
+  params:
+    - name: pipelineRunJson
+      type: string
+      description: "Complete PipelineRun manifest serialized as a single-line JSON string."
+    - name: pipelineRunName
+      type: string
+      description: "Name of the PipelineRun (for polling). Must match .metadata.name in pipelineRunJson."
+    - name: namespace
+      type: string
+      description: "Namespace where the PipelineRun will be created."
+    - name: timeoutSeconds
+      type: string
+      default: "14400"
+      description: "Hard timeout in seconds before the step exits 1 (default: 4 hours)."
+
+  steps:
+    - name: submit-and-wait
+      image: bitnami/kubectl:latest
+      env:
+        - name: PIPELINERUN_JSON
+          value: $(params.pipelineRunJson)
+        - name: PIPELINE_RUN_NAME
+          value: $(params.pipelineRunName)
+        - name: NAMESPACE
+          value: $(params.namespace)
+        - name: TIMEOUT_SECONDS
+          value: $(params.timeoutSeconds)
+      script: |
+        #!/bin/sh
+        set -e
+
+        printf '%s' "$PIPELINERUN_JSON" > /tmp/pr.json
+        echo "Applying PipelineRun: $PIPELINE_RUN_NAME"
+        kubectl apply -f /tmp/pr.json
+
+        echo "Polling for completion (timeout: ${TIMEOUT_SECONDS}s)..."
+        ELAPSED=0
+        while true; do
+          REASON=$(kubectl get pipelinerun "$PIPELINE_RUN_NAME" -n "$NAMESPACE" \
+            -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null || echo "")
+
+          case "$REASON" in
+            Succeeded)
+              echo "PipelineRun $PIPELINE_RUN_NAME succeeded."
+              exit 0
+              ;;
+            Failed|PipelineRunCancelled|CouldntGetTask)
+              echo "PipelineRun $PIPELINE_RUN_NAME failed with reason: $REASON"
+              exit 1
+              ;;
+          esac
+
+          if [ "$ELAPSED" -ge "$TIMEOUT_SECONDS" ]; then
+            echo "Timed out after ${ELAPSED}s waiting for $PIPELINE_RUN_NAME"
+            exit 1
+          fi
+
+          sleep 30
+          ELAPSED=$((ELAPSED + 30))
+        done

@@ -1,0 +1,28 @@
+# ServiceAccount, Role, and RoleBinding for run-sub-pipeline Task pods.
+# Task pods use this SA to create and poll sub-PipelineRuns in the namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sim2real-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sim2real-pipeline-runner
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    # create: submit sub-PipelineRun; get: poll by name; list: operator convenience
+    verbs: ["create", "get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sim2real-pipeline-runner
+subjects:
+  - kind: ServiceAccount
+    name: sim2real-runner
+roleRef:
+  kind: Role
+  name: sim2real-pipeline-runner
+  apiGroup: rbac.authorization.k8s.io
