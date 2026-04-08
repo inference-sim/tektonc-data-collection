@@ -7,6 +7,8 @@ metadata:
 spec:
   # image: alpine/helm:3.14.0
   image: dtzar/helm-kubectl:3.19
+  securityContext:
+    runAsUser: 0
 
   # ---------- Parameters ----------
   params:

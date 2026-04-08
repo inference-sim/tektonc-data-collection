@@ -1,0 +1,56 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: delete-inference-objectives
+spec:
+  description: |
+    Delete InferenceObjective CRDs created by deploy-inference-objectives.
+  params:
+    - { name: namespace, type: string }
+    - name: objectives
+      type: string
+      description: JSON array of {name, priority} objects
+      default: "[]"
+    - { name: debug, type: string, default: "false" }
+
+  steps:
+    - name: dry-run
+      when:
+        - input: $(params.debug)
+          operator: in
+          values: ["true", "True"]
+      image: alpine:3.20
+      script: |
+        #!/bin/sh
+        set -eu
+        echo "delete-inference-objectives called (dry-run)"
+
+    - name: delete
+      when:
+        - input: $(params.debug)
+          operator: in
+          values: ["false", "False"]
+      image: alpine/kubectl:1.34.1
+      env:
+        - name: NAMESPACE
+          value: $(params.namespace)
+        - name: OBJECTIVES
+          value: $(params.objectives)
+      script: |
+        #!/bin/sh
+        set -eu
+
+        apk add --no-cache jq > /dev/null 2>&1
+
+        COUNT=$(echo "${OBJECTIVES}" | jq length)
+        if [ "${COUNT}" -eq 0 ]; then
+          echo "No inference objectives to delete, skipping."
+          exit 0
+        fi
+
+        for i in $(seq 0 $((COUNT - 1))); do
+          NAME=$(echo "${OBJECTIVES}" | jq -r ".[$i].name")
+          kubectl --namespace ${NAMESPACE} \
+            delete inferenceobjective "${NAME}" \
+            --ignore-not-found
+        done

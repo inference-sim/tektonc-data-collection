@@ -10,7 +10,13 @@ spec:
       type: string
     - name: sleepDuration
       type: string
-      default: "0s"
+      default: "30s"
+    - name: runName
+      type: string
+    - name: workloadName
+      type: string
+    - name: workloadSpec
+      type: string
   workspaces:
     - name: model-cache
     - name: hf-credentials
@@ -89,39 +95,54 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
 
-    - __jinja__: |
-        {% for wl in observe.workloads %}
-        - name: run-workload-{{ wl.name | dns }}
-          runAfter: ["pause-after-model-deploy", "deploy-httproute"]
-          taskRef:
-            name: run-workload-blis-observe
-          workspaces:
-            - name: data
-              workspace: data-storage
-          params:
-            - name: endpoint
-              value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
-            - name: model
-              value: "{{ stack.model.modelName }}"
-            - name: workloadSpec
-              value: {{ wl.spec | tojson }}
-            - name: blisImage
-              value: "{{ observe.image }}"
-            - name: resultsDir
-              value: "{{ phase }}/{{ wl.name }}"
-        {% endfor %}
-        - name: collect-results
-          runAfter:
-          {% for wl in observe.workloads %}
-            - run-workload-{{ wl.name | dns }}
-          {% endfor %}
-          taskRef:
-            name: collect-results
-          workspaces:
-            - name: data
-              workspace: data-storage
+    - name: deploy-inference-objectives
+      runAfter: ["deploy-gaie"]
+      taskRef:
+        name: deploy-inference-objectives
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: inferencepool
+          value: "$(tasks.deploy-gaie.results.inferencepool)"
+        - name: objectives
+          value: {{ inference_objectives | default('[]') | tojson }}
+
+    - name: run-workload
+      runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives"]
+      taskRef:
+        name: run-workload-blis-observe
+      workspaces:
+        - name: data
+          workspace: data-storage
+      params:
+        - name: endpoint
+          value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
+        - name: model
+          value: "{{ stack.model.modelName }}"
+        - name: workloadSpec
+          value: "$(params.workloadSpec)"
+        - name: blisImage
+          value: "{{ observe.image }}"
+        - name: resultsDir
+          value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
+
+    - name: collect-results
+      runAfter: ["run-workload"]
+      taskRef:
+        name: collect-results
+      workspaces:
+        - name: data
+          workspace: data-storage
 
   finally:
+    - name: delete-inference-objectives
+      taskRef:
+        name: delete-inference-objectives
+      params:
+        - name: objectives
+          value: {{ inference_objectives | default('[]') | tojson }}
+        - name: namespace
+          value: "$(params.namespace)"
     - name: delete-httproute
       taskRef:
         name: delete-httproute
