@@ -68,9 +68,18 @@ spec:
           priority: ${PRIORITY}
           poolRef:
             name: ${INFERENCEPOOL}
+            group: inference.networking.k8s.io
         EOF
         done
 
         echo "Deploying ${COUNT} InferenceObjective(s):"
         cat /workspace/objectives.yaml
         kubectl apply -f /workspace/objectives.yaml
+
+        # Restart the EPP so it re-runs startup discovery and registers the
+        # InferenceObjective reconciler. The EPP checks for the CRD once at
+        # startup; if the CRD didn't exist then, it never loads objectives.
+        EPP_SELECTOR="inference.networking.k8s.io/igw-mode=inferencepool"
+        echo "Restarting EPP deployment(s) in ${NAMESPACE}..."
+        kubectl rollout restart deployment -l "${EPP_SELECTOR}" -n "${NAMESPACE}"
+        kubectl rollout status deployment -l "${EPP_SELECTOR}" -n "${NAMESPACE}" --timeout=120s
