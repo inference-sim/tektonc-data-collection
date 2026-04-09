@@ -123,20 +123,46 @@ def preflight_check(hw, clusters):
     log.info(f"  Namespace {namespace}: exists")
 
     # Check required Tekton tasks
-    required_tasks = [
+    # Core tasks (required for all harnesses)
+    core_tasks = [
         "download-model", "deploy-model", "delete-model",
-        "create-exp-config", "install-inference-perf-blis",
-        "run-workload-inference-perf-blis", "upload-s3",
+        "create-exp-config", "upload-s3",
     ]
+    # inference-perf harness tasks
+    inference_perf_tasks = [
+        "install-inference-perf-blis",
+        "run-workload-inference-perf-blis",
+    ]
+    # ORC harness tasks
+    orc_tasks = [
+        "install-blis",
+        "orc-observe",
+        "orc-replay",
+        "orc-calibrate",
+    ]
+
     result = run_cmd(f"kubectl get tasks -n {namespace}", context=context, ignore_errors=True)
-    missing = []
-    for task in required_tasks:
-        if task not in result.stdout:
-            missing.append(task)
-    if missing:
-        log.warning(f"  Missing Tekton tasks: {', '.join(missing)}")
+
+    # Check core tasks (fail if missing)
+    missing_core = [t for t in core_tasks if t not in result.stdout]
+    if missing_core:
+        raise RuntimeError(f"Missing required Tekton tasks: {', '.join(missing_core)}")
+
+    # Check harness-specific tasks (warn if missing, don't fail)
+    missing_inference_perf = [t for t in inference_perf_tasks if t not in result.stdout]
+    missing_orc = [t for t in orc_tasks if t not in result.stdout]
+
+    if not missing_inference_perf and not missing_orc:
+        log.info(f"  Tekton tasks: all tasks found (inference-perf + ORC)")
+    elif not missing_inference_perf:
+        log.info(f"  Tekton tasks: inference-perf tasks found")
+        log.warning(f"  Missing ORC tasks: {', '.join(missing_orc)}")
+    elif not missing_orc:
+        log.info(f"  Tekton tasks: ORC tasks found")
+        log.warning(f"  Missing inference-perf tasks: {', '.join(missing_inference_perf)}")
     else:
-        log.info(f"  Tekton tasks: all {len(required_tasks)} required tasks found")
+        log.warning(f"  Missing inference-perf tasks: {', '.join(missing_inference_perf)}")
+        log.warning(f"  Missing ORC tasks: {', '.join(missing_orc)}")
 
     # Check GPU availability
     available = get_available_gpus(context, cluster["gpu_label_key"], cluster["gpu_label_value"], namespace)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from cleanup import cleanup_pipeline_run
 from cluster import preflight_check
-from download import download_and_verify, DownloadError
+# NOTE: download.py removed - manual download now required
 from generate import load_yaml
 from run import (
     check_pipeline_status,
@@ -15,6 +15,7 @@ from run import (
     handle_failure,
     setup_logging,
     print_campaign_summary,
+    make_pvc_dir,
     POLL_INTERVAL,
     MAX_ATTEMPTS,
 )
@@ -22,7 +23,7 @@ from state import CampaignState, iso_now
 
 log = logging.getLogger("blis-campaign")
 
-ORPHAN_STATUSES = {"running", "deploying", "downloading"}
+ORPHAN_STATUSES = {"running", "deploying"}  # downloading removed - manual download now
 
 
 # ---------------------------------------------------------------------------
@@ -86,26 +87,52 @@ def harvest_one(dir_name, entry, state, context, namespace, campaign_dir, pendin
 
 
 def _retry_download(dir_name, state, context, namespace, campaign_dir, pr_name):
-    """Retry download for an experiment stuck in downloading status."""
-    log.info(f"HARVEST {dir_name}: stuck in downloading, retrying download")
-    for attempt in range(1, 3):
-        try:
-            download_and_verify(campaign_dir, dir_name, context, namespace)
-            state.set_status(dir_name, "completed", completed_at=iso_now())
+    """Download observe data automatically for harvested experiments."""
+    import subprocess
+
+    log.info(f"HARVEST {dir_name}: downloading observe data")
+
+    # Get experiment info for download
+    exp_dir = Path(campaign_dir) / dir_name
+    try:
+        exp = json.loads((exp_dir / "experiment.json").read_text())
+        exp_id = exp["id"]
+
+        # Use same PVC directory naming as generate.py (DNS-1123 formatted)
+        pvc_dir = make_pvc_dir(exp)
+
+        # Create data directory
+        data_dir = exp_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Download using kubectl + tar pipe
+        tar_cmd = (
+            f"kubectl exec -n {namespace} deployment/busybox --context={context} -- "
+            f"tar czf - -C /data {pvc_dir} | tar xzf - -C {data_dir}"
+        )
+
+        result = subprocess.run(tar_cmd, shell=True, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            log.error(f"HARVEST {dir_name}: download failed: {result.stderr}")
+            state.set_status(dir_name, "completed", completed_at=iso_now(), download_status="failed")
+        else:
             log.info(f"HARVEST {dir_name}: download succeeded")
-            if pr_name:
-                cleanup_pipeline_run(pr_name, context, namespace)
-            return "completed"
-        except DownloadError as e:
-            if attempt < 2:
-                log.warning(f"HARVEST {dir_name}: download attempt {attempt} failed: {e} — retrying")
-                time.sleep(10)
-            else:
-                log.error(f"HARVEST {dir_name}: download failed after 2 attempts: {e}")
-                state.set_status(dir_name, "download_failed", last_failure=str(e))
-                if pr_name:
-                    cleanup_pipeline_run(pr_name, context, namespace)
-                return "download_failed"
+
+            # Fix empty header.yaml if needed (workaround for duplicate run overwrite bug)
+            header_path = data_dir / pvc_dir / "observe" / "header.yaml"
+            if header_path.exists() and header_path.stat().st_size == 0:
+                log.info(f"HARVEST {dir_name}: fixing empty header.yaml")
+                header_path.write_text("{}\n")
+
+            state.set_status(dir_name, "completed", completed_at=iso_now())
+
+    except Exception as e:
+        log.error(f"HARVEST {dir_name}: download error: {e}")
+        state.set_status(dir_name, "completed", completed_at=iso_now(), download_status="error")
+
+    if pr_name:
+        cleanup_pipeline_run(pr_name, context, namespace)
+    return "completed"
 
 
 # ---------------------------------------------------------------------------

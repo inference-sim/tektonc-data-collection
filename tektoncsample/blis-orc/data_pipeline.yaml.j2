@@ -1,0 +1,241 @@
+# BLIS with observe-replay-calibrate (ORC) pipeline
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{ experiment.name | dns }}
+spec:
+  {% if experiment.description is defined and experiment.description %}
+  description: {{ experiment.description }}
+  {% endif %}
+
+  workspaces:
+    - name: model-cache
+      description: Location where models are stored; shared by multiple model servers
+    - name: hf-credentials
+      description: Secret workspace containing a HuggingFace token
+    - name: data
+      description: Cache of results and BLIS binary
+    - name: target-credentials
+      description: >-
+        Secret workspace containing upload target credentials.
+        For example, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for s3.
+
+  params:
+    - name: experimentId
+      type: string
+      description: Identifier for experiment execution
+    - name: model
+      type: string
+      description: the model to be deployed
+    - name: namespace
+      type: string
+      description: Kubernetes namespace where workload will execute
+
+  tasks:
+    - name: download-model
+      taskRef: { name: download-model }
+      workspaces:
+        - name: model-cache
+        - name: hf-credentials
+      params:
+        - name: model
+          value: "$(params.model)"
+
+    - name: install-blis
+      taskRef: { name: install-blis }
+      runAfter: [ "download-model" ]
+      workspaces:
+        - name: data
+
+    # Loop: Run stacks (different model engine configurations) in parallel
+    - loopName: per-stack
+      foreach:
+        domain:
+          tp: {{ stack.treatments.tensorParallelism }}
+          dlp: {{ stack.treatments.dataLocalParallelism }}
+
+      vars:
+        stackId: "{{ tp }}-{{ dlp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}-{{ dlp }}"
+
+      tasks:
+        - name: create-exp-config-{{ stackId }}
+          taskRef: { name: create-exp-config }
+          runAfter: [ "install-blis" ]
+          workspaces:
+            - name: data
+          params:
+            - { name: model, value: "$(params.model)" }
+            - { name: tp, value: "{{ tp }}" }
+            - { name: dlp, value: "{{ dlp }}" }
+            - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN }}" }
+            - { name: max_num_batched_tokens, value: "{{ stack.MAX_NUM_BATCHED_TOKENS }}" }
+            - { name: max_num_seqs, value: "{{ stack.MAX_NUM_SEQS }}" }
+            - { name: app, value: "blis-orc" }
+            - { name: results_dir, value: "{{ stackModelLabel }}" }
+
+        {% if stack.tracing is defined %}
+        - name: deploy-otel-collector-{{ stackId }}
+          description: >-
+            Deploy a per-experiment OpenTelemetry collector
+          taskRef: { name: create-otel-collector }
+          runAfter: [ "install-blis" ]
+          workspaces:
+            - name: data
+          params:
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: results_dir ,value: "{{ stackModelLabel }}" }
+        {% endif %}
+
+        - name: deploy-model-{{ stackId }}
+          description: >-
+            Deploy model engines.
+            Uses the modelservice helm chart.
+            The task implementation automatically overrides "modelArtifacts.name",
+            "modelArtifacts.uri" "modelArtifacts.labels."llm-d.ai/model",
+            and "fullnameOverride" to avoid conflicts and ensure consistency.
+          taskRef: { name: deploy-model }
+          runAfter: [ "{% if stack.tracing is defined %}deploy-otel-collector-{{ stackId }}{% else %}install-blis{% endif %}" ]
+          workspaces:
+            - name: model-cache
+          params:
+            - { name: model, value: $(params.model) }
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: namespace , value: $(params.namespace) }
+            - { name: config, value: {{ stack.model.helmValues }} }
+            - name: overrides
+              value:
+                - decode.parallelism.tensor={{ tp }}
+                - decode.parallelism.data={{ dlp }}
+                - decode.parallelism.dataLocal={{ dlp }}
+                - decode.containers[name="vllm"].args=--data-parallel-size={{ dlp }}
+                - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
+                - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
+                - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
+                - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
+                {% if stack.tracing is defined %}
+                - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{stackModelLabel}}:4318/v1/traces
+                - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
+                - decode.containers[name="vllm"].env[name="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"].value=http://otel-{{stackModelLabel}}:4318
+                {% endif %}
+
+                # Journey tracing
+                {% if stack.tracing is defined and stack.tracing.journey %}
+                - decode.containers[name="vllm"].args=--enable-journey-tracing
+                {% endif %}
+
+                # Step tracing
+                {% if stack.tracing is defined and stack.tracing.step is defined and stack.tracing.step.enabled %}
+                - decode.containers[name="vllm"].args=--step-tracing-enabled
+                - decode.containers[name="vllm"].args=--step-tracing-sample-rate={{ stack.tracing.step.sample_rate }}
+                - decode.containers[name="vllm"].args=--step-tracing-rich-subsample-rate={{ stack.tracing.step.rich_subsample_rate }}
+                - decode.containers[name="vllm"].args=--step-tracing-closure-interval={{ stack.tracing.step.closure_interval }}
+                {% endif %}
+
+                # KV cache events
+                {% if stack.tracing is defined and stack.tracing.kv_events is defined and stack.tracing.kv_events.enabled %}
+                - 'decode.containers[name="vllm"].args=--kv-events-config={"enable_kv_cache_events": true, "publisher": "{{ stack.tracing.kv_events.publisher }}", "endpoint": "tcp://*:5557", "replay_endpoint": "tcp://*:5558", "topic": "kv-events"}'
+                - decode.containers[name="vllm"].args=--kv-offloading-size={{ stack.tracing.kv_events.offloading_size }}
+
+                # Update KV events subscriber output path
+                - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
+                {% endif %}
+                {% for override in stack.extra_overrides | default([]) %}
+                - '{{ override }}'
+                {% endfor %}
+
+        - name: orc-observe-{{ stackId }}
+          description: Run BLIS observe phase to collect real request traces.
+          taskRef: { name: orc-observe }
+          runAfter: [ "deploy-model-{{ stackId }}" ]
+          timeout: "350m"
+          retries: 3
+          workspaces:
+            - name: data
+            - name: hf-credentials
+          params:
+            - { name: model, value: "$(params.model)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}"}
+            - { name: results_dir, value: "{{ stackModelLabel }}" }
+            - { name: workloadSpec, value: {{ workload.orcSpec }} }
+            - { name: horizon, value: "{{ workload.horizon }}" }
+
+        - name: delete-model-{{ stackId }}
+          description: Delete the model engine immediately after observe to release GPU.
+          runAfter: [ "orc-observe-{{ stackId }}" ]
+          taskRef: { name: delete-model }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+
+        - name: download-observe-data-{{ stackId }}
+          description: Validate observe data and signal it's ready for download. Replay/calibrate run locally after download.
+          runAfter: [ "orc-observe-{{ stackId }}" ]
+          taskRef: { name: download-observe-data }
+          workspaces:
+            - name: data
+          params:
+            - { name: results_dir, value: "{{ stackModelLabel }}" }
+            - { name: namespace, value: "$(params.namespace)" }
+
+        {% if stack.tracing is defined %}
+        - name: delete-otel-collector-{{ stackId }}
+          description: Delete the OTEL collector.
+          runAfter: [ "orc-observe-{{ stackId }}" ]
+          taskRef: { name: delete-otel-collector }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+        {% endif %}
+
+        # NOTE: Replay and calibrate are now done locally using blis-campaign/replay.py and calibrate.py
+        # Pipeline stops after observe. Download data, then run locally:
+        #   python blis-campaign/replay.py --experiment-ids 68
+        #   python blis-campaign/calibrate.py --experiment-ids 68
+
+        {% if upload_target is defined and upload_target %}
+        # Upload is disabled since replay/calibrate are done locally
+        # - name: raw-upload-{{ stackId }}
+        #   description: Upload raw data to target data repository
+        #   taskRef: { name: upload-{{ upload_target.type }} }
+        #   runAfter: [ "download-observe-data-{{ stackId }}" ]
+        #   workspaces:
+        #     - name: data
+        #     - name: target-credentials
+        #   params:
+        #     - name: archive
+        #       value: "{{ stackModelLabel }}-raw.tar.gz"
+        #     - name: paths
+        #       value: |
+        #         {{ stackModelLabel }}
+        #     - { name: target, value: {{ upload_target.configuration }} }
+        {% endif %}
+
+
+
+  finally:
+    # Loop in 'finally': make sure all stacks are deleted when done
+    - loopName: cleanup
+      foreach:
+        domain:
+          tp: {{ stack.treatments.tensorParallelism }}
+          dlp: {{ stack.treatments.dataLocalParallelism }}
+
+      vars:
+        stackId: "{{ tp }}-{{ dlp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}-{{ dlp }}"
+
+      tasks:
+        - name: finally-delete-model-{{ stackId }}
+          taskRef: { name: delete-model }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+
+        {% if stack.tracing is defined %}
+        - name: finally-delete-otel-collector-{{ stackId }}
+          taskRef: { name: delete-otel-collector }
+          params:
+            - { name: namespace, value: "$(params.namespace)" }
+            - { name: modelLabel, value: "{{ stackModelLabel }}" }
+        {% endif %}

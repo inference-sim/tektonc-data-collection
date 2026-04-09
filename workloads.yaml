@@ -1,4 +1,6 @@
 general:
+  spec: inference_perf    # Workload format type for automatic translation
+
   load:
     type: constant
     stages:
@@ -17,6 +19,8 @@ general:
       output_len: 248
       enable_multi_turn_chat: true
 codegen:
+  spec: inference_perf
+
   load:
     type: constant
     stages:
@@ -35,6 +39,8 @@ codegen:
       output_len: 247
       enable_multi_turn_chat: true
 roleplay:
+  spec: inference_perf
+
   load:
     type: constant
     stages:
@@ -51,6 +57,8 @@ roleplay:
       output_len: 251
       enable_multi_turn_chat: true
 reasoning:
+  spec: inference_perf
+
   load:
     type: constant
     stages:
@@ -67,6 +75,8 @@ reasoning:
       output_len: 1448                   # Decode-heavy!
       enable_multi_turn_chat: true
 general-lite:
+  spec: inference_perf
+
   load:
     type: constant
     stages:
@@ -85,6 +95,8 @@ general-lite:
       output_len: 248
       enable_multi_turn_chat: true
 reasoning-lite:
+  spec: inference_perf
+
   load:
     type: constant
     stages:
@@ -100,3 +112,60 @@ reasoning-lite:
       question_len: 934                  # 1034 - 100 = 934
       output_len: 1448                   # Decode-heavy!
       enable_multi_turn_chat: true
+
+# ============================================================================
+# Future BLIS-Native Workload Examples
+# ============================================================================
+#
+# For ORC-only workloads using BLIS-specific features, use spec: blis_native.
+# See WORKLOADS.md for full documentation.
+#
+# Example: Multi-tier workload with SLO classes
+# ----------------------------------------------
+# multi-tier:
+#   spec: blis_native
+#   blis:
+#     aggregate_rate: 100.0
+#     clients:
+#       - id: "critical-tier"
+#         rate_fraction: 0.3
+#         slo_class: "critical"
+#         arrival:
+#           process: poisson
+#         input_distribution:
+#           type: gaussian
+#           params: {mean: 512, stddev: 128, min: 64, max: 2048}
+#         output_distribution:
+#           type: gaussian
+#           params: {mean: 256, stddev: 64, min: 32, max: 1024}
+#       - id: "standard-tier"
+#         rate_fraction: 0.5
+#         slo_class: "standard"
+#         arrival: {process: poisson}
+#         input_distribution: {...}
+#         output_distribution: {...}
+#       - id: "batch-tier"
+#         rate_fraction: 0.2
+#         slo_class: "batch"
+#         arrival: {process: constant}
+#         input_distribution: {...}
+#         output_distribution: {...}
+#
+# Example: Diurnal traffic pattern
+# ---------------------------------
+# cohort-diurnal:
+#   spec: blis_native
+#   blis:
+#     aggregate_rate: 50.0
+#     cohorts:
+#       - id: "daytime-users"
+#         population: 100
+#         pattern: diurnal
+#         peak_hour: 14
+#         peak_to_trough_ratio: 3.0
+#         input_distribution:
+#           type: gaussian
+#           params: {mean: 512, stddev: 128, min: 64, max: 2048}
+#         output_distribution:
+#           type: gaussian
+#           params: {mean: 256, stddev: 64, min: 32, max: 1024}

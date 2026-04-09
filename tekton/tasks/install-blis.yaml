@@ -1,0 +1,43 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: install-blis
+spec:
+  description: |
+    Build BLIS binary from GitHub (inference-sim streaming branch).
+    Outputs the blis executable to workspace for use in observe/replay/calibrate tasks.
+
+  workspaces:
+    - name: data
+      description: Shared workspace where blis binary will be stored
+
+  steps:
+    - name: build-blis
+      image: golang:1.25.5-bookworm
+      script: |
+        #!/bin/sh
+        set -eu
+        echo "🔄 Building BLIS binary from inference-sim repository"
+
+        echo "Installing required tools (git)..."
+        apt-get update
+        apt-get install -y git && apt-get clean && rm -rf /var/cache/apt
+
+        echo "Cloning inference-sim main branch..."
+        git clone https://github.com/inference-sim/inference-sim.git
+        cd inference-sim
+
+        echo "Building BLIS binary..."
+        go build -o /workspace/data/blis main.go
+
+        echo "Copying runtime dependencies for BLIS..."
+        cp hardware_config.json /workspace/data/hardware_config.json
+        cp defaults.yaml /workspace/data/defaults.yaml
+        cp -r model_configs /workspace/data/model_configs
+
+        echo "Verifying installation..."
+        ls -lh /workspace/data/blis /workspace/data/hardware_config.json /workspace/data/defaults.yaml
+        ls -d /workspace/data/model_configs
+        /workspace/data/blis --version || echo "Note: --version flag may not be implemented"
+
+        echo "✅ BLIS binary and runtime dependencies installed successfully"

@@ -12,7 +12,7 @@ from pathlib import Path
 from cluster import run_cmd, kubectl_json, get_available_gpus, get_campaign_gpu_usage, preflight_check
 from generate import load_yaml
 from state import CampaignState, iso_now
-from download import download_and_verify, DownloadError
+# NOTE: download.py removed - manual download via kubectl (see blis_orc_scripts/LOCAL_REPLAY_README.md)
 from cleanup import cleanup_pipeline_run, collect_diagnostics
 
 log = logging.getLogger("blis-campaign")
@@ -22,6 +22,33 @@ STALL_TIMEOUT = 10800  # 3 hours without progress = stall (large model downloads
 MAX_ATTEMPTS = 2
 
 _draining = False
+
+
+# ---------------------------------------------------------------------------
+# PVC directory name helpers (copied from generate.py)
+# ---------------------------------------------------------------------------
+
+
+def make_dns_name(s):
+    """Convert string to DNS-1123 compatible name."""
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9-]', '-', s)
+    s = re.sub(r'-+', '-', s)
+    s = s.strip('-')
+    return s[:63]
+
+
+def make_experiment_id(exp):
+    """e.g. '68-llama-3-1-8b-tp1-general-lite' -- used as base for PVC data path."""
+    return make_dns_name(f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}")
+
+
+def make_pvc_dir(exp):
+    """Construct PVC directory name: {experiment_id}-{tp}-{dlp}"""
+    experiment_id = make_experiment_id(exp)
+    tp = exp.get("tp", 1)
+    dlp = exp.get("dp", 1) if exp.get("dp") is not None else 1
+    return f"{experiment_id}-{tp}-{dlp}"
 
 
 def _sigint_handler(signum, frame):
@@ -198,23 +225,56 @@ def check_pipeline_status(pr_name, context, namespace):
 
 
 def handle_success(dir_name, run_info, state, context, namespace, campaign_dir):
-    """Download results, clean up pipeline run, mark completed."""
+    """Download results automatically and mark completed."""
     log.info(f"SUCCEEDED {dir_name}")
-    state.set_status(dir_name, "downloading")
 
-    for attempt in range(1, 3):  # up to 2 attempts
-        try:
-            download_and_verify(campaign_dir, dir_name, context, namespace)
+    # Get experiment info for download
+    exp_dir = Path(campaign_dir) / dir_name
+    exp = json.loads((exp_dir / "experiment.json").read_text())
+    exp_id = exp["id"]
+
+    # Use same PVC directory naming as generate.py (DNS-1123 formatted)
+    pvc_dir = make_pvc_dir(exp)
+
+    # Create data directory
+    data_dir = exp_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download data using kubectl + tar pipe
+    log.info(f"📥 Downloading observe data from PVC...")
+    tar_cmd = (
+        f"kubectl exec -n {namespace} deployment/busybox --context={context} -- "
+        f"tar czf - -C /data {pvc_dir} | tar xzf - -C {data_dir}"
+    )
+
+    try:
+        result = subprocess.run(tar_cmd, shell=True, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            log.error(f"Download failed for {dir_name}: {result.stderr}")
+            log.info(f"Manual download command:")
+            log.info(f"  {tar_cmd}")
+            state.set_status(dir_name, "completed", completed_at=iso_now(), download_status="failed")
+        else:
+            log.info(f"✅ Downloaded observe data to {data_dir}/{pvc_dir}")
+
+            # Fix empty header.yaml if needed (workaround for duplicate run overwrite bug)
+            header_path = data_dir / pvc_dir / "observe" / "header.yaml"
+            if header_path.exists() and header_path.stat().st_size == 0:
+                log.info(f"📝 Fixing empty header.yaml (workaround for duplicate run bug)")
+                header_path.write_text("{}\n")
+
             state.set_status(dir_name, "completed", completed_at=iso_now())
-            log.info(f"COMPLETED {dir_name}")
-            break
-        except DownloadError as e:
-            if attempt < 2:
-                log.warning(f"Download attempt {attempt} failed for {dir_name}: {e} — retrying")
-                time.sleep(10)
-            else:
-                log.error(f"DOWNLOAD FAILED {dir_name}: {e}")
-                state.set_status(dir_name, "download_failed", last_failure=str(e))
+            log.info(f"")
+            log.info(f"🔄 Next steps (run locally):")
+            log.info(f"   python blis_orc_scripts/replay.py --experiment-ids {exp_id}")
+            log.info(f"   python blis_orc_scripts/calibrate.py --experiment-ids {exp_id}")
+            log.info(f"")
+    except subprocess.TimeoutExpired:
+        log.error(f"Download timed out for {dir_name} (>5min)")
+        state.set_status(dir_name, "completed", completed_at=iso_now(), download_status="timeout")
+    except Exception as e:
+        log.error(f"Download error for {dir_name}: {e}")
+        state.set_status(dir_name, "completed", completed_at=iso_now(), download_status="error")
 
     # Cleanup PipelineRun (best-effort)
     cleanup_pipeline_run(run_info["pr_name"], context, namespace)

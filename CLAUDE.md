@@ -98,6 +98,36 @@ tektonc -t TEMPLATE -f VALUES [-r PIPELINERUN] [-o OUTPUT] [--explain] [--debug]
 
 Tasks in `tekton/tasks/` cover: model deployment (vLLM), gateway configuration (Istio/KGateway), inference testing, data collection, OTEL integration, and S3 uploads.
 
+## Campaign Experiments
+
+### Harnesses
+
+Two benchmarking harnesses are supported:
+
+| Harness | Description | Pipeline Template |
+|---------|-------------|-------------------|
+| `inference-perf` | Standard benchmarking with inference-perf harness | `tektoncsample/blis-inference-perf/` |
+| `orc` | Observe-Replay-Calibrate loop with BLIS simulator | `tektoncsample/blis-orc/` |
+
+Specify harness in `experiments.json`: `"harness": "orc"` (defaults to `"inference-perf"`)
+
+### Workloads
+
+Workloads are defined in `workloads.yaml` with two format types:
+
+- **`spec: inference_perf`** - Works with both harnesses (auto-translated for ORC)
+- **`spec: blis_native`** - ORC-only, uses BLIS-specific features (cohorts, diurnal patterns, etc.)
+
+**See [WORKLOADS.md](WORKLOADS.md) for detailed workload specification guide.**
+
+### Campaign Generator
+
+```bash
+python blis-campaign/generate.py --experiments experiments.json --output campaign/
+```
+
+Validates experiments, selects templates based on harness, translates workloads, compiles pipelines.
+
 ## Contributing
 
 - Keep new features minimal and Tekton-native

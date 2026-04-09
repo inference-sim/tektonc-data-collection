@@ -63,6 +63,7 @@ def validate_all(experiments, models, clusters, workloads):
     """Validate all experiments. Returns list of error strings (empty = valid)."""
     errors = []
     valid_hw = {k for k in clusters if k != "namespace"}
+    valid_harnesses = {"inference-perf", "orc"}
 
     for exp in experiments:
         eid = exp.get("id", "?")
@@ -72,6 +73,23 @@ def validate_all(experiments, models, clusters, workloads):
             errors.append(f"Experiment #{eid}: unknown hw '{exp['hw']}'")
         if exp["workload"] not in workloads:
             errors.append(f"Experiment #{eid}: unknown workload '{exp['workload']}'")
+
+        # Validate harness field (optional, defaults to inference-perf)
+        harness = exp.get("harness", "inference-perf")
+        if harness not in valid_harnesses:
+            errors.append(f"Experiment #{eid}: unknown harness '{harness}' (valid: {valid_harnesses})")
+
+        # Validate workload spec compatibility with harness
+        if exp["workload"] in workloads:
+            wl = workloads[exp["workload"]]
+            spec_type = wl.get("spec", "inference_perf")
+
+            if spec_type == "blis_native" and harness != "orc":
+                errors.append(
+                    f"Experiment #{eid}: workload '{exp['workload']}' has spec=blis_native "
+                    f"but harness={harness} (must be 'orc')"
+                )
+
     return errors
 
 
@@ -169,10 +187,49 @@ def build_values(exp, base_values, models, clusters, workloads):
         exp, extra_args, is_prequantized=is_prequantized
     )
 
-    # Workload profile
+    # Workload profile - translate based on harness type and spec
     wl = workloads[exp["workload"]]
-    v["workload"]["profileTemplate"]["load"] = wl["load"]
-    v["workload"]["profileTemplate"]["data"] = wl["data"]
+    harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
+    spec_type = wl.get("spec", "inference_perf")    # Default to inference_perf for backward compatibility
+
+    if harness == "orc":
+        # ORC harness: use appropriate format
+        if spec_type == "inference_perf":
+            # Pass through inference-perf format directly to BLIS observe
+            # Reference: inference-sim/testdata/trained_physics_iter29.json
+            # Calculate total requests and horizon from stages
+            horizon = sum(stage["duration"] for stage in wl["load"]["stages"])
+            total_requests = sum(int(stage["rate"] * stage["duration"]) for stage in wl["load"]["stages"])
+
+            v["workload"]["orcSpec"] = {
+                "version": "2",
+                "seed": 42,
+                "num_requests": total_requests,
+                "inference_perf": {
+                    "stages": wl["load"]["stages"],
+                    "shared_prefix": wl["data"]["shared_prefix"]
+                }
+            }
+            v["workload"]["horizon"] = horizon
+        elif spec_type == "blis_native":
+            # Use BLIS native format directly (cohorts, diurnal, multi-client, etc.)
+            v["workload"]["orcSpec"] = wl["blis"]
+        else:
+            raise ValueError(f"Unsupported workload spec type: {spec_type}")
+    else:
+        # inference-perf harness (default)
+        if spec_type == "inference_perf":
+            # Use existing format
+            v["workload"]["profileTemplate"]["load"] = wl["load"]
+            v["workload"]["profileTemplate"]["data"] = wl["data"]
+        elif spec_type == "blis_native":
+            # Error: can't run BLIS-native workload on inference-perf harness
+            raise ValueError(
+                f"Workload '{exp['workload']}' has spec=blis_native "
+                f"and cannot be used with harness=inference-perf"
+            )
+        else:
+            raise ValueError(f"Unsupported workload spec type: {spec_type}")
 
     return v
 
@@ -288,10 +345,21 @@ def generate_campaign(args):
         Path(__file__).parent.parent / "workloads.yaml"
     )
 
-    # Load both stock and observability base values
-    tektoncsample_dir = Path(__file__).parent.parent / "tektoncsample/blis-inference-perf"
-    base_values_stock = load_yaml(tektoncsample_dir / "values.yaml")
-    base_values_observability = load_yaml(tektoncsample_dir / "values-observability.yaml")
+    # Load base values for each harness type
+    tektoncsample_base = Path(__file__).parent.parent / "tektoncsample"
+
+    # inference-perf harness base values (stock and observability)
+    base_values_inference_perf_stock = load_yaml(
+        tektoncsample_base / "blis-inference-perf" / "values.yaml"
+    )
+    base_values_inference_perf_observability = load_yaml(
+        tektoncsample_base / "blis-inference-perf" / "values-observability.yaml"
+    )
+
+    # ORC harness base values (single base, no observability variant yet)
+    base_values_orc = load_yaml(
+        tektoncsample_base / "blis-orc" / "values.yaml"
+    )
 
     # Filter to specific IDs if --only is given
     only_ids = None
@@ -314,13 +382,21 @@ def generate_campaign(args):
             print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    template_path = (
-        Path(__file__).parent.parent
-        / "tektoncsample/blis-inference-perf/data_pipeline.yaml.j2"
-    )
+    # Template paths for different harnesses
+    tektoncsample_base = Path(__file__).parent.parent / "tektoncsample"
+    TEMPLATE_PATHS = {
+        "inference-perf": tektoncsample_base / "blis-inference-perf" / "data_pipeline.yaml.j2",
+        "orc": tektoncsample_base / "blis-orc" / "data_pipeline.yaml.j2",
+    }
 
     generated = 0
     for exp in experiments:
+        # Select template based on harness (default to inference-perf)
+        harness = exp.get("harness", "inference-perf")
+        if harness not in TEMPLATE_PATHS:
+            print(f"ERROR: Unknown harness type '{harness}' for experiment #{exp['id']}", file=sys.stderr)
+            return 1
+        template_path = TEMPLATE_PATHS[harness]
         dir_name = make_dir_name(exp)
         exp_dir = output_dir / dir_name
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -328,10 +404,20 @@ def generate_campaign(args):
         # 1. Save experiment.json (copy of this experiment's entry)
         write_json(exp_dir / "experiment.json", exp)
 
-        # 2. Select base values based on observability flag
-        # Default to stock vLLM (no observability) if field not present
+        # 2. Select base values based on harness and observability flag
+        harness = exp.get("harness", "inference-perf")
         use_observability = exp.get("observability", False)
-        base_values = base_values_observability if use_observability else base_values_stock
+
+        if harness == "orc":
+            # ORC harness (observability not yet supported for ORC)
+            if use_observability:
+                print(f"WARNING: Observability not yet supported for ORC harness, ignoring for exp #{exp['id']}",
+                      file=sys.stderr)
+            base_values = base_values_orc
+        else:
+            # inference-perf harness (default)
+            base_values = (base_values_inference_perf_observability if use_observability
+                          else base_values_inference_perf_stock)
 
         # 3. Build and save values.yaml
         values = build_values(exp, base_values, models, clusters, workloads)
@@ -362,8 +448,9 @@ def generate_campaign(args):
 
         generated += 1
         obs_marker = " [obs]" if use_observability else ""
+        harness_marker = f" [{harness}]" if harness != "inference-perf" else ""
         print(f"  [{generated}/{len(experiments)}] #{exp['id']} {exp['model']} "
-              f"{exp['hw']} {exp['workload']}{obs_marker}")
+              f"{exp['hw']} {exp['workload']}{obs_marker}{harness_marker}")
 
     print(f"Generated {generated} experiments in {output_dir}/")
     return 0

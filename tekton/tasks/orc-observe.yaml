@@ -1,0 +1,170 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: orc-observe
+spec:
+  description: |
+    Run BLIS observe phase against deployed vLLM model.
+    Outputs TraceV2 format (header.yaml + data.csv) for replay phase.
+
+  workspaces:
+    - name: data
+      description: Shared workspace containing blis binary and output directory
+    - name: hf-credentials
+      description: HuggingFace credentials for model access
+
+  params:
+    - name: model
+      type: string
+      description: Model name for substitution in workload spec
+    - name: modelLabel
+      type: string
+      description: Label to find model pod (llm-d.ai/model=<label>)
+    - name: results_dir
+      type: string
+      description: Results directory path (observe outputs go to <results_dir>/observe/)
+    - name: workloadSpec
+      type: string
+      description: BLIS native workload spec YAML (WorkloadSpec format)
+    - name: horizon
+      type: string
+      description: Time horizon in seconds (bounds workload generation)
+      default: ""
+
+  steps:
+    - name: discover-endpoint
+      env:
+        - name: MODEL_LABEL
+          value: "$(params.modelLabel)"
+      image: alpine/kubectl:1.34.1
+      script: |
+        #!/bin/sh
+        set -eu
+
+        echo "🔍 Discovering model pod endpoint..."
+
+        # Get model pod IP (same approach as inference-perf)
+        podIP=$(kubectl get po -l llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=decode -o jsonpath='{.items[0].status.podIP}')
+
+        if [ -z "$podIP" ]; then
+          echo "❌ Failed to find model pod with label llm-d.ai/model=${MODEL_LABEL}"
+          exit 1
+        fi
+
+        targetUrl="http://${podIP}:8000"
+        echo "✅ Model endpoint: ${targetUrl}"
+
+        # Store endpoint for next step
+        echo -n "${targetUrl}" > /tekton/home/endpoint.txt
+
+    - name: create-workload-spec
+      image: alpine:3.20
+      script: |
+        #!/bin/sh
+        set -eu
+
+        OBSERVE_DIR="$(workspaces.data.path)/$(params.results_dir)/observe"
+        WORKLOAD_SPEC="${OBSERVE_DIR}/workload.yaml"
+
+        mkdir -p "${OBSERVE_DIR}"
+
+        echo "📝 Creating BLIS workload spec..."
+
+        # Install Python and PyYAML for JSON to YAML conversion
+        apk add --no-cache python3 py3-pip
+        pip3 install --break-system-packages pyyaml
+
+        # Convert JSON workload spec to proper YAML
+        # (Tekton passes it as JSON, but BLIS expects YAML)
+        echo '$(params.workloadSpec)' > /tmp/workload.json
+        python3 -c "import json, yaml; print(yaml.dump(json.load(open('/tmp/workload.json')), default_flow_style=False))" > "${WORKLOAD_SPEC}"
+
+        echo ">>> Created workload spec:"
+        cat "${WORKLOAD_SPEC}"
+
+        # Store endpoint for next step
+        ENDPOINT=$(cat /tekton/home/endpoint.txt)
+        echo -n "${ENDPOINT}" > "${OBSERVE_DIR}/endpoint.txt"
+
+    - name: run-observe
+      image: python:3.12.9-slim-bookworm
+      computeResources:
+        requests:
+          memory: "16Gi"
+          cpu: "8"
+        limits:
+          memory: "16Gi"
+          cpu: "8"
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+      script: |
+        #!/bin/bash
+        set -eu
+
+        OBSERVE_DIR="$(workspaces.data.path)/$(params.results_dir)/observe"
+        WORKLOAD_SPEC="${OBSERVE_DIR}/workload.yaml"
+        BLIS_BINARY="$(workspaces.data.path)/blis"
+        ENDPOINT=$(cat "${OBSERVE_DIR}/endpoint.txt")
+        MODEL="$(params.model)"
+
+        echo "🚀 Running BLIS observe phase..."
+        echo "OBSERVE_DIR=${OBSERVE_DIR}"
+        echo "WORKLOAD_SPEC=${WORKLOAD_SPEC}"
+        echo "BLIS_BINARY=${BLIS_BINARY}"
+        echo "ENDPOINT=${ENDPOINT}"
+        echo "MODEL=${MODEL}"
+
+        # Verify blis binary exists
+        if [ ! -x "${BLIS_BINARY}" ]; then
+          echo "❌ BLIS binary not found at ${BLIS_BINARY}"
+          echo "Make sure install-blis task ran successfully"
+          exit 1
+        fi
+
+        # Install required Python dependencies for BLIS
+        echo "📦 Installing Python dependencies..."
+        pip install -q tokenizers transformers
+
+        # Run blis observe with CLI flags for model and endpoint
+        # Output: header.yaml and data.csv (TraceV2 format)
+        cd "${OBSERVE_DIR}"
+
+        # Note: Do NOT pass --horizon flag when workload spec contains num_requests
+        # The spec's num_requests takes precedence over CLI flags
+
+        echo "🔍 BLIS observe command:"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv"
+        echo ""
+
+        ${BLIS_BINARY} observe \
+          --server-url "${ENDPOINT}" \
+          --model "${MODEL}" \
+          --workload-spec "${WORKLOAD_SPEC}" \
+          --trace-header "header.yaml" \
+          --trace-data "data.csv" \
+          > >(tee -a stdout.log) \
+          2> >(tee -a stderr.log >&2)
+
+        export RC=$?
+
+        if [ $RC -ne 0 ]; then
+          echo "❌ BLIS observe failed with exit code $RC"
+          exit $RC
+        fi
+
+        # Verify outputs were created
+        if [ ! -f "header.yaml" ] || [ ! -f "data.csv" ]; then
+          echo "❌ Expected outputs not found (header.yaml, data.csv)"
+          ls -la
+          exit 1
+        fi
+
+        echo "✅ BLIS observe completed successfully"
+        echo "📊 Trace files:"
+        ls -lh header.yaml data.csv
+        echo "Request count: $(wc -l < data.csv)"

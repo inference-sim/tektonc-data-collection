@@ -1,0 +1,124 @@
+experiment:
+  name: blis-orc
+  description: BLIS with observe-replay-calibrate loop
+
+stack:
+  treatments:
+    tensorParallelism:
+      - 1
+    dataLocalParallelism:
+      - 1
+
+  MAX_MODEL_LEN: 4096
+  MAX_NUM_BATCHED_TOKENS: 2048
+  MAX_NUM_SEQS: 128
+  extra_overrides: []
+
+  model:
+    helmValues:
+      fullnameOverride: FULLNAME
+      serviceAccountOverride: default
+      multinode: false
+      modelArtifacts:
+        uri: pvc://model-pvc/models/MODEL
+        size: 300Gi
+        authSecretName: "hf-secret"
+        name: MODEL
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: FULLNAME
+      routing:
+        servicePort: 8000
+        proxy:
+          enabled: false
+      prefill:
+        create: false
+      decode:
+        create: true
+        replicas: 1
+        acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+              - NVIDIA-H100-80GB-HBM3
+        containers:
+        - name: "vllm"
+          env:
+            - name: VLLM_CONFIGURE_LOGGING
+              value: "1"
+            - name: VLLM_LOGGING_CONFIG_PATH
+              value: "/workspace/vllm_logging.json"
+            # Fix cache permission issue
+            - name: HF_HOME
+              value: "/mnt/exp/.cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/mnt/exp/.cache/huggingface"
+          mountModelVolume: true
+          image: "vllm/vllm-openai:v0.15.1"
+          modelCommand: vllmServe
+          resources:
+            limits:
+              memory: 128Gi
+              cpu: "32"
+            requests:
+              memory: 128Gi
+              cpu: "32"
+          extraConfig:
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 60
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              failureThreshold: 3
+              periodSeconds: 5
+          volumeMounts:
+          - name: data
+            mountPath: /mnt/exp
+
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-pvc
+
+orc:
+  # Latency model for replay phase (trained-physics, linear, etc.)
+  latency_model: trained-physics
+  # GPU type for latency model selection (H100, A100, L40S)
+  gpu_type: H100
+
+workload:
+  harness: orc
+
+  # BLIS native workload specification (inference_perf format)
+  # Note: model and endpoint are passed as CLI flags to blis observe
+  orcSpec:
+    inference_perf:
+      stages:
+        - rate: 8.0
+          duration: 600
+        - rate: 20.0
+          duration: 600
+      shared_prefix:
+        num_unique_system_prompts: 9
+        num_users_per_system_prompt: 5
+        system_prompt_len: 100
+        question_len: 447
+        output_len: 248
+        enable_multi_turn_chat: true
+
+upload_target:
+  type: s3
+  configuration:
+    bucket: cloud-object-storage-cos-standard-ere
+    endpoint: https://s3.us-east.cloud-object-storage.appdomain.cloud

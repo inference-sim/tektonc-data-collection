@@ -7,7 +7,7 @@ from pathlib import Path
 VALID_TRANSITIONS = {
     "pending": {"deploying", "skipped"},
     "deploying": {"running", "retrying", "failed", "downloading"},
-    "running": {"downloading", "retrying", "failed"},
+    "running": {"completed", "retrying", "failed"},  # Allow running -> completed (manual download)
     "downloading": {"completed", "download_failed"},
     "retrying": {"deploying"},
     "failed": {"deploying"},  # for --only re-runs

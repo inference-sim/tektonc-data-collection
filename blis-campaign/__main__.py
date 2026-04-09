@@ -38,11 +38,11 @@ def main():
     st = sub.add_parser("status", help="Show campaign status")
     st.add_argument("--campaign", required=True, help="Campaign directory")
 
-    # retry-downloads
-    rd = sub.add_parser("retry-downloads", help="Retry failed downloads")
-    rd.add_argument("--campaign", required=True, help="Campaign directory")
-    rd.add_argument("--hw", required=True, help="Hardware type (H100, A100-80GB, L40S)")
-    rd.add_argument("--only", help="Comma-separated experiment IDs")
+    # retry-downloads (removed - manual download now required)
+    # rd = sub.add_parser("retry-downloads", help="Retry failed downloads")
+    # rd.add_argument("--campaign", required=True, help="Campaign directory")
+    # rd.add_argument("--hw", required=True, help="Hardware type (H100, A100-80GB, L40S)")
+    # rd.add_argument("--only", help="Comma-separated experiment IDs")
 
     # harvest
     hv = sub.add_parser("harvest", help="Recover orphaned experiments from interrupted runs")
@@ -62,9 +62,7 @@ def main():
     elif args.command == "status":
         from state import print_status
         return print_status(args)
-    elif args.command == "retry-downloads":
-        from download import retry_downloads
-        return retry_downloads(args)
+    # retry-downloads removed - manual download workflow now
     elif args.command == "harvest":
         from harvest import harvest_campaign
         return harvest_campaign(args)

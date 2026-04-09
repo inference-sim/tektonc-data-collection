@@ -1,0 +1,71 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: download-observe-data
+spec:
+  description: |
+    Validate observe phase trace data on PVC and signal readiness for download.
+    Actual download to local filesystem happens via kubectl exec + tar pipe.
+
+  params:
+    - name: results_dir
+      type: string
+      description: Results directory name (e.g., "68-llama-3-1-8b-tp1-general-lite-1-1")
+    - name: namespace
+      type: string
+      description: Kubernetes namespace
+      default: diya
+
+  workspaces:
+    - name: data
+      description: PVC containing observe results
+
+  steps:
+    - name: validate-and-signal
+      image: busybox:latest
+      script: |
+        #!/bin/sh
+        set -eu
+
+        OBSERVE_DIR="$(workspaces.data.path)/$(params.results_dir)/observe"
+
+        echo "📦 Validating observe trace data for download..."
+        echo "Results directory: $(params.results_dir)"
+        echo "Observe path: ${OBSERVE_DIR}"
+
+        # Verify observe outputs exist
+        if [ ! -f "${OBSERVE_DIR}/header.yaml" ] || [ ! -f "${OBSERVE_DIR}/data.csv" ]; then
+          echo "❌ Observe outputs not found at ${OBSERVE_DIR}"
+          ls -la "${OBSERVE_DIR}" || true
+          exit 1
+        fi
+
+        if [ ! -f "${OBSERVE_DIR}/workload.yaml" ]; then
+          echo "⚠️  Warning: workload.yaml not found (non-fatal)"
+        fi
+
+        # Create a download-ready marker file
+        touch "$(workspaces.data.path)/$(params.results_dir)/.observe-ready"
+
+        echo "📊 Trace data summary:"
+        ls -lh "${OBSERVE_DIR}"
+
+        if [ -f "${OBSERVE_DIR}/data.csv" ]; then
+          RECORD_COUNT=$(wc -l < "${OBSERVE_DIR}/data.csv")
+          echo "Total trace records: ${RECORD_COUNT}"
+        fi
+
+        echo "✅ Observe data validated and ready for download"
+        echo ""
+        echo "Files available on PVC at /data/$(params.results_dir)/:"
+        echo "  observe/header.yaml"
+        echo "  observe/data.csv"
+        echo "  observe/workload.yaml"
+        echo "  exp-config.yaml"
+        echo "  vllm_logging.json"
+        echo "  vllm.log"
+        echo ""
+        echo "Download to campaign experiment folder:"
+        echo "  kubectl exec -n $(params.namespace) deployment/busybox -- \\"
+        echo "    tar czf - -C /data $(params.results_dir) | \\"
+        echo "    tar xzf - -C blis-campaign/campaign/<experiment-dir>/data/"
