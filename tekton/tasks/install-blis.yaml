@@ -4,7 +4,7 @@ metadata:
   name: install-blis
 spec:
   description: |
-    Build BLIS binary from GitHub (inference-sim streaming branch).
+    Build BLIS binary from GitHub (inference-sim main branch).
     Outputs the blis executable to workspace for use in observe/replay/calibrate tasks.
 
   workspaces:

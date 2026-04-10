@@ -137,10 +137,17 @@ def run_calibrate(blis_binary, exp_dir, data_dir):
         "--report", str((calibrate_dir / "calibration_report.json").resolve()),
     ]
 
+    # Add ITL data if available
+    itl_csv = observe_dir / "itl.csv"
+    if itl_csv.exists():
+        cmd.extend(["--itl-data", str(itl_csv.resolve())])
+
     print(f"\n🔍 Running calibrate for experiment {exp['id']} ({exp['model']} on {exp['hw']})...")
     print(f"   Observe data: {observe_dir}")
     print(f"   Replay result: {replay_dir / 'sim_result.json'}")
     print(f"   Calibrate output: {calibrate_dir}")
+    if itl_csv.exists():
+        print(f"   ITL data: {itl_csv} (enabled)")
     print(f"   Command: {' '.join(cmd)}")
 
     # Run calibrate (change to BLIS repo dir so it finds bundled configs)

@@ -44,6 +44,10 @@ spec:
           echo "⚠️  Warning: workload.yaml not found (non-fatal)"
         fi
 
+        if [ ! -f "${OBSERVE_DIR}/itl.csv" ]; then
+          echo "⚠️  Warning: itl.csv not found (non-fatal, ITL recording may not be enabled)"
+        fi
+
         # Create a download-ready marker file
         touch "$(workspaces.data.path)/$(params.results_dir)/.observe-ready"
 
@@ -61,6 +65,7 @@ spec:
         echo "  observe/header.yaml"
         echo "  observe/data.csv"
         echo "  observe/workload.yaml"
+        echo "  observe/itl.csv (optional)"
         echo "  exp-config.yaml"
         echo "  vllm_logging.json"
         echo "  vllm.log"

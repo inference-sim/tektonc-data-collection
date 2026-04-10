@@ -113,6 +113,27 @@ reasoning-lite:
       output_len: 1448                   # Decode-heavy!
       enable_multi_turn_chat: true
 
+general-ez:
+  spec: inference_perf
+
+  load:
+    type: constant
+    stages:
+    - rate: 2.5
+      duration: 60      # Low traffic period (0-600s)
+    - rate: 6.0
+      duration: 60      # Peak traffic period (600-1200s)
+
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_unique_system_prompts: 9
+      num_users_per_system_prompt: 5     # 45 clients total
+      system_prompt_len: 100             # Prefix tokens
+      question_len: 447                  # 547 - 100 = 447
+      output_len: 248
+      enable_multi_turn_chat: true
+
 # ============================================================================
 # Future BLIS-Native Workload Examples
 # ============================================================================

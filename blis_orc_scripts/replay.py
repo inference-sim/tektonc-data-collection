@@ -12,6 +12,41 @@ import yaml
 from pathlib import Path
 
 
+def load_models_config():
+    """Load models.yaml from blis-campaign/config."""
+    models_yaml = Path(__file__).parent.parent / "blis-campaign" / "config" / "models.yaml"
+    if not models_yaml.exists():
+        return {}
+    with open(models_yaml) as f:
+        return yaml.safe_load(f)
+
+
+def resolve_model_name(short_name, models_config):
+    """Resolve short model name to full HuggingFace ID.
+
+    Args:
+        short_name: Short name like "Llama-3.1-8b"
+        models_config: Dict from models.yaml
+
+    Returns:
+        Full HF model ID like "meta-llama/Llama-3.1-8B-Instruct"
+    """
+    if short_name not in models_config:
+        # If not in config, assume it's already a full HF ID
+        return short_name
+
+    entry = models_config[short_name]
+    if isinstance(entry, str):
+        # Simple string mapping
+        return entry
+    elif isinstance(entry, dict) and "hf_id" in entry:
+        # Dict with hf_id key
+        return entry["hf_id"]
+    else:
+        # Fallback to original name
+        return short_name
+
+
 def ensure_blis_built(blis_repo_path):
     """Clone and build BLIS if not already present."""
     if not blis_repo_path.exists():
@@ -115,14 +150,18 @@ def get_downloaded_data_dir(exp_dir):
     )
 
 
-def run_replay(blis_binary, exp_dir, data_dir, model_config_folder):
+def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_config):
     """Run BLIS replay on downloaded observe data."""
     exp_json = exp_dir / "experiment.json"
     with open(exp_json) as f:
         exp = json.load(f)
 
     # Read experiment parameters from experiment.json
-    model = exp["model"]
+    # Resolve short model name to full HuggingFace ID
+    short_model_name = exp["model"]
+    model = resolve_model_name(short_model_name, models_config)
+    if model != short_model_name:
+        print(f"   Model: {short_model_name} → {model}")
     tp = exp.get("tp", 1)
     hw = exp["hw"]
     latency_model = exp.get("latency_model", "trained-physics")
@@ -234,6 +273,9 @@ def main():
     blis_repo_path = Path(args.blis_repo).resolve()
     blis_binary = ensure_blis_built(blis_repo_path)
 
+    # Load model name mappings
+    models_config = load_models_config()
+
     # Find experiment directories
     exp_dirs = find_experiment_dirs(args.campaign, exp_ids)
     if not exp_dirs:
@@ -247,7 +289,7 @@ def main():
     for exp_dir in exp_dirs:
         try:
             data_dir = get_downloaded_data_dir(exp_dir)
-            success = run_replay(blis_binary, exp_dir, data_dir, args.model_config_folder)
+            success = run_replay(blis_binary, exp_dir, data_dir, args.model_config_folder, models_config)
             if success:
                 successes += 1
             else:

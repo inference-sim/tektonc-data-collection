@@ -5,6 +5,8 @@ The ORC pipeline has been updated to run **observe on the cluster** and **replay
 - Run simulation locally (CPU-only, no GPU needed)
 - Iterate on calibration without cluster resources
 
+By default, streaming is enabled in this pipeline for now.
+
 ## Pipeline Structure
 
 ### On Cluster (Tekton)
