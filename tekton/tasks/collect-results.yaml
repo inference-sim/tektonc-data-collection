@@ -5,14 +5,18 @@ metadata:
   name: collect-results
 spec:
   description: >-
-    Synchronization barrier task. Runs after all run-workload-blis-observe tasks
-    to ensure data integrity before the pipeline reports success.
-    Directory structure on the PVC is established by each workload task's resultsDir
-    parameter. This task does not move or transform data.
+    Synchronization barrier. Runs after all run-workload-blis-observe tasks.
+    Also collects EPP and vLLM decode pod logs into the workload results directory
+    on data-pvc before the finally block deletes those deployments.
 
   workspaces:
     - name: data
-      description: "Shared PVC (data-pvc) — verified as mounted"
+      description: "Shared PVC (data-pvc)"
+
+  params:
+    - { name: namespace,   type: string }
+    - { name: modelLabel,  type: string }
+    - { name: resultsDir,  type: string }
 
   steps:
     - name: barrier
@@ -21,3 +25,54 @@ spec:
         #!/bin/sh
         echo "All workload tasks complete."
         echo "Results available on data-pvc."
+
+    - name: collect-logs
+      image: alpine/kubectl:1.34.1
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        # Non-fatal: failures here must not fail the pipeline.
+        set +e
+
+        NAMESPACE="$(params.namespace)"
+        MODEL_LABEL="$(params.modelLabel)"
+        RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+
+        # Directory was created by run-workload; ensure it exists defensively.
+        mkdir -p "${RESULTS_DIR}"
+
+        # --- EPP pod logs ---
+        RELEASE="${MODEL_LABEL}-gaie"
+        EPP_DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
+
+        EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
+          | grep "^${EPP_DEPLOY}" || true)
+
+        if [ -z "${EPP_PODS}" ]; then
+          echo "No EPP pods found with prefix ${EPP_DEPLOY}, skipping."
+        else
+          for pod in ${EPP_PODS}; do
+            echo "Collecting EPP log: ${pod}"
+            kubectl logs "${pod}" -n "${NAMESPACE}" --all-containers=false \
+              > "${RESULTS_DIR}/${pod}.log" 2>&1
+          done
+        fi
+
+        # --- vLLM decode pod logs ---
+        DECODE_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+          -l "llm-d.ai/model=${MODEL_LABEL}" \
+          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+
+        if [ -z "${DECODE_PODS}" ]; then
+          echo "No vLLM decode pods found for llm-d.ai/model=${MODEL_LABEL}, skipping."
+        else
+          for pod in ${DECODE_PODS}; do
+            echo "Collecting vLLM log: ${pod}"
+            kubectl logs "${pod}" -n "${NAMESPACE}" \
+              > "${RESULTS_DIR}/${pod}.log" 2>&1
+          done
+        fi
+
+        echo "Log collection complete for $(params.resultsDir)."

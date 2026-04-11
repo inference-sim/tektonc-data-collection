@@ -105,7 +105,7 @@ spec:
         - name: inferencepool
           value: "$(tasks.deploy-gaie.results.inferencepool)"
         - name: objectives
-          value: {{ inference_objectives | default('[]') | tojson }}
+          value: "{{ inference_objectives | default([]) | tojson }}"
 
     - name: run-workload
       runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives"]
@@ -133,6 +133,13 @@ spec:
       workspaces:
         - name: data
           workspace: data-storage
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: modelLabel
+          value: "sim2real-$(params.experimentId)"
+        - name: resultsDir
+          value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
 
   finally:
     - name: delete-inference-objectives
@@ -140,7 +147,7 @@ spec:
         name: delete-inference-objectives
       params:
         - name: objectives
-          value: {{ inference_objectives | default('[]') | tojson }}
+          value: "{{ inference_objectives | default([]) | tojson }}"
         - name: namespace
           value: "$(params.namespace)"
     - name: delete-httproute
