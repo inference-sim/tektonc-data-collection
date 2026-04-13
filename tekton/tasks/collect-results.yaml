@@ -39,26 +39,11 @@ spec:
         MODEL_LABEL="$(params.modelLabel)"
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
 
-        # Directory was created by run-workload; ensure it exists defensively.
+        # Clean stale artifacts from any previous run before collecting fresh logs.
+        rm -f "${RESULTS_DIR}/epp_stream_done"
+        rm -rf "${RESULTS_DIR}/epp_logs"
+        rm -f "${RESULTS_DIR}"/*_vllm.log
         mkdir -p "${RESULTS_DIR}"
-
-        # --- EPP pod logs ---
-        RELEASE="${MODEL_LABEL}-gaie"
-        EPP_DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
-
-        EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
-          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
-          | grep "^${EPP_DEPLOY}" || true)
-
-        if [ -z "${EPP_PODS}" ]; then
-          echo "No EPP pods found with prefix ${EPP_DEPLOY}, skipping."
-        else
-          for pod in ${EPP_PODS}; do
-            echo "Collecting EPP log: ${pod}"
-            kubectl logs "${pod}" -n "${NAMESPACE}" --all-containers=false \
-              > "${RESULTS_DIR}/${pod}.log" 2>&1
-          done
-        fi
 
         # --- vLLM decode pod logs ---
         DECODE_PODS=$(kubectl get pods -n "${NAMESPACE}" \
@@ -69,10 +54,13 @@ spec:
           echo "No vLLM decode pods found for llm-d.ai/model=${MODEL_LABEL}, skipping."
         else
           for pod in ${DECODE_PODS}; do
-            echo "Collecting vLLM log: ${pod}"
-            kubectl logs "${pod}" -n "${NAMESPACE}" \
-              > "${RESULTS_DIR}/${pod}.log" 2>&1
+            echo "Collecting vLLM logs: ${pod}"
+            kubectl logs "${pod}" -n "${NAMESPACE}" -c vllm \
+              > "${RESULTS_DIR}/${pod}_vllm.log" 2>&1
           done
         fi
+
+        # Signal stream-epp-logs to stop following this workload's EPP pod.
+        touch "${RESULTS_DIR}/epp_stream_done"
 
         echo "Log collection complete for $(params.resultsDir)."
