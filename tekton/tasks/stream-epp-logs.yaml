@@ -6,7 +6,7 @@ metadata:
 spec:
   description: >-
     Streams EPP pod logs to data-pvc throughout a workload run, splitting
-    output into 5-minute time-bucketed NDJSON files under resultsDir/epp_logs/.
+    output into 2-minute time-bucketed NDJSON files under resultsDir/epp_logs/.
     Runs in parallel with run-workload; exits when collect-results writes
     resultsDir/epp_stream_done. Non-fatal: failures do not fail the pipeline.
 
@@ -19,7 +19,7 @@ spec:
     - { name: modelLabel,      type: string }
     - { name: resultsDir,      type: string }
     - { name: containerName,   type: string, default: "epp" }
-    - { name: windowMinutes,   type: string, default: "5" }
+    - { name: windowMinutes,   type: string, default: "2" }
 
   steps:
     - name: stream-epp-pod-logs

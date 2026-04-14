@@ -42,6 +42,10 @@ spec:
         mkdir -p "${RESULTS_DIR}"
 
         # --- vLLM decode pod logs ---
+        SERVER_LOG_DIR="${RESULTS_DIR}/server_logs"
+        rm -rf "${SERVER_LOG_DIR}"
+        mkdir -p "${SERVER_LOG_DIR}"
+
         DECODE_PODS=$(kubectl get pods -n "${NAMESPACE}" \
           -l "llm-d.ai/model=${MODEL_LABEL}" \
           --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
@@ -52,7 +56,7 @@ spec:
           for pod in ${DECODE_PODS}; do
             echo "Collecting vLLM logs: ${pod}"
             kubectl logs "${pod}" -n "${NAMESPACE}" -c vllm \
-              > "${RESULTS_DIR}/${pod}_vllm.log" 2>&1
+              > "${SERVER_LOG_DIR}/${pod}_vllm.log" 2>&1
           done
         fi
 
