@@ -9,6 +9,8 @@ spec:
   results:
     - name: inferencepool
       description: InferencePool name
+    - name: epp-container
+      description: Name of the EPP container in the EPP deployment (the one with command args)
 
   params:
     - { name: modelLabel, type: string }
@@ -127,14 +129,33 @@ spec:
         NAMESPACE="$(params.namespace)"
         DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
 
+        echo "Identifying EPP container in deployment ${DEPLOY}..."
+
+        # Find the EPP container: the main executable container has command args;
+        # sidecar containers (e.g. tokenizer-uds) have no args.
+        DEPLOY_JSON=$(kubectl get deploy "${DEPLOY}" -n "${NAMESPACE}" -o json)
+        EPP_CTR=$(echo "${DEPLOY_JSON}" | jq -r '
+          .spec.template.spec.containers[]
+          | select(.args != null and (.args | length) > 0)
+          | .name
+        ' | head -1)
+
+        if [ -z "${EPP_CTR}" ]; then
+          echo "WARNING: No container with args found; falling back to first container"
+          EPP_CTR=$(echo "${DEPLOY_JSON}" | jq -r '.spec.template.spec.containers[0].name')
+        fi
+
+        echo "EPP container: ${EPP_CTR}"
+        printf "%s" "${EPP_CTR}" > "$(results.epp-container.path)"
+
         echo "Checking EPP deployment ${DEPLOY} for split flag args..."
 
-        # Get current args as JSON array
-        ORIGINAL=$(kubectl get deploy "${DEPLOY}" -n "${NAMESPACE}" \
-          -o json | jq -c '.spec.template.spec.containers[0].args // empty')
+        # Get current args for the EPP container
+        ORIGINAL=$(echo "${DEPLOY_JSON}" | jq -c --arg ctr "${EPP_CTR}" \
+          '.spec.template.spec.containers[] | select(.name==$ctr) | .args // empty')
 
         if [ -z "${ORIGINAL}" ]; then
-          echo "No args found on EPP container, skipping flag fix"
+          echo "No args found on EPP container ${EPP_CTR}, skipping flag fix"
           exit 0
         fi
 
@@ -155,8 +176,10 @@ spec:
           echo "Args already in --key=value format, no patch needed"
         else
           echo "Patching args: ${ORIGINAL} -> ${PATCHED}"
+          CTR_INDEX=$(echo "${DEPLOY_JSON}" | jq --arg ctr "${EPP_CTR}" \
+            '[.spec.template.spec.containers | to_entries[] | select(.value.name==$ctr) | .key][0]')
           kubectl patch deploy "${DEPLOY}" -n "${NAMESPACE}" --type=json \
-            -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":${PATCHED}}]"
+            -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/${CTR_INDEX}/args\",\"value\":${PATCHED}}]"
           echo "EPP deployment patched, waiting for rollout..."
           kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=120s
         fi
