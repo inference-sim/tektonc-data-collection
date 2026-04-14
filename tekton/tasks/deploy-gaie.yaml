@@ -180,8 +180,7 @@ spec:
             '[.spec.template.spec.containers | to_entries[] | select(.value.name==$ctr) | .key][0]')
           kubectl patch deploy "${DEPLOY}" -n "${NAMESPACE}" --type=json \
             -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/${CTR_INDEX}/args\",\"value\":${PATCHED}}]"
-          echo "EPP deployment patched, waiting for rollout..."
-          kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=120s
+          echo "EPP deployment patched"
         fi
 
     - name: wait-for-epp

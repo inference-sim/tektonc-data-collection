@@ -39,10 +39,6 @@ spec:
         MODEL_LABEL="$(params.modelLabel)"
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
 
-        # Clean stale artifacts from any previous run before collecting fresh logs.
-        rm -f "${RESULTS_DIR}/epp_stream_done"
-        rm -rf "${RESULTS_DIR}/epp_logs"
-        rm -f "${RESULTS_DIR}"/*_vllm.log
         mkdir -p "${RESULTS_DIR}"
 
         # --- vLLM decode pod logs ---
