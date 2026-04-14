@@ -35,6 +35,8 @@ spec:
       script: |
         #!/bin/sh
         set -e
+        # Clean stale artifacts from any previous run of this workload.
+        rm -rf /workspace/data/$(params.resultsDir)
         mkdir -p /workspace/data/$(params.resultsDir)
         chmod 777 /workspace/data/$(params.resultsDir)
         cat > /tmp/spec_raw.txt << '__WORKLOAD_SPEC_END__'

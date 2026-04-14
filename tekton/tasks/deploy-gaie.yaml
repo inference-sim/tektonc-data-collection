@@ -181,7 +181,7 @@ spec:
           kubectl patch deploy "${DEPLOY}" -n "${NAMESPACE}" --type=json \
             -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/${CTR_INDEX}/args\",\"value\":${PATCHED}}]"
           echo "EPP deployment patched, waiting for rollout..."
-          kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=120s
+          kubectl rollout status deploy "${DEPLOY}" -n "${NAMESPACE}" --timeout=300s
         fi
 
     - name: wait-for-epp
