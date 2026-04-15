@@ -56,23 +56,6 @@ spec:
         - name: namespace
           value: "$(params.namespace)"
 
-    - name: stream-epp-logs
-      runAfter: ["deploy-inference-objectives"]
-      taskRef:
-        name: stream-epp-logs
-      workspaces:
-        - name: data
-          workspace: data-storage
-      params:
-        - name: namespace
-          value: "$(params.namespace)"
-        - name: modelLabel
-          value: "sim2real-$(params.experimentId)"
-        - name: resultsDir
-          value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
-        - name: containerName
-          value: "$(tasks.deploy-gaie.results.epp-container)"
-
     - name: deploy-model
       runAfter: ["download-model", "deploy-gaie"]
       taskRef:
@@ -157,6 +140,8 @@ spec:
           value: "sim2real-$(params.experimentId)"
         - name: resultsDir
           value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
+        - name: containerName
+          value: "$(tasks.deploy-gaie.results.epp-container)"
 
   finally:
     - name: delete-inference-objectives

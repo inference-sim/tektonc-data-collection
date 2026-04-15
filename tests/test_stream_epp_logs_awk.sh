@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tests the awk log-splitting logic used in stream-epp-logs task.
+# Tests the awk log-splitting logic used in collect-results (collect-epp-logs step).
 # Run with: sh tektonc-data-collection/tests/test_stream_epp_logs_awk.sh
 
 TMPDIR_TEST=$(mktemp -d)
@@ -46,7 +46,7 @@ WIN=5
 OUTDIR="${TMPDIR_TEST}/epp_logs"
 mkdir -p "${OUTDIR}"
 
-# --- The awk script (copied verbatim from stream-epp-logs.yaml) ---
+# --- The awk script (copied verbatim from collect-results.yaml collect-epp-logs step) ---
 awk -v outdir="${OUTDIR}" -v pod="${POD}" -v win="${WIN}" '
   {
     split($1, dt, "T")
