@@ -172,6 +172,8 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     max_num_seqs = 256  # BLIS default
     max_num_batched_tokens = 2048  # BLIS default
     max_model_len = 0  # BLIS default (unlimited, auto-derived from model config)
+    block_size = 16  # BLIS default
+    kv_offloading_gb = 0  # CPU offloading disabled by default
 
     if exp_config_path.exists():
         with open(exp_config_path) as f:
@@ -181,29 +183,85 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         max_num_seqs = exp_config.get("max_num_seqs", max_num_seqs)
         max_num_batched_tokens = exp_config.get("max_num_batched_tokens", max_num_batched_tokens)
         max_model_len = exp_config.get("max_model_len", max_model_len)
+        block_size = exp_config.get("block_size", block_size)
+        kv_offloading_gb = exp_config.get("kv_offloading_size", 0)
+
+    # Check for large prefixes and warn if KV thrashing is likely
+    # NOTE: We trust exp-config.yaml values (which come from the real server)
+    # rather than overriding them with heuristics. The real server successfully
+    # ran with these settings, so the simulator should match them for accurate calibration.
+    import csv
+    max_prefix_length = 0
+    with open(data_dir / "data.csv") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            prefix_len = int(row.get("prefix_length", 0))
+            if prefix_len > max_prefix_length:
+                max_prefix_length = prefix_len
+
+    if max_prefix_length > 8192:  # Large prefixes (>8K tokens)
+        # Estimate KV blocks needed per request using configured block_size
+        blocks_per_prefix = max_prefix_length // block_size
+        # Estimate total KV blocks (80GB GPU * gpu_mem / block_size)
+        # Rough estimate: 3909 blocks for H100 80GB at 0.9 utilization
+        estimated_total_blocks = 3909 if hw == "H100" else 2500  # Conservative for other GPUs
+        # Safe concurrency = total_blocks / blocks_per_prefix, with safety margin
+        safe_max_num_seqs = max(4, int(estimated_total_blocks / blocks_per_prefix * 0.8))
+
+        if max_num_seqs > safe_max_num_seqs:
+            # WARN but don't override - exp-config.yaml captures the real server config
+            print(f"   ⚠️  Large prefixes detected (max={max_prefix_length} tokens)")
+            print(f"   ⚠️  WARNING: max_num_seqs={max_num_seqs} may exceed KV capacity (estimated safe: {safe_max_num_seqs})")
+            print(f"   ⚠️  However, using exp-config.yaml value to match real server configuration")
+            print(f"   ℹ️  NOTE: Real vLLM may use chunked prefill + CPU offload, allowing higher concurrency")
 
     # Create replay output directory
     replay_dir = data_dir.parent / "replay"
     replay_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build command (use absolute paths since BLIS runs from repo dir)
+    # Get BLIS repo directory for config files
+    blis_repo_dir = blis_binary.parent
+    defaults_path = blis_repo_dir / "defaults.yaml"
+    hardware_config_path = blis_repo_dir / "hardware_config.json"
+
+    # Build command (use absolute paths)
     cmd = [
         str(blis_binary), "replay",
         "--trace-header", str((data_dir / "header.yaml").resolve()),
         "--trace-data", str((data_dir / "data.csv").resolve()),
+        "--defaults-filepath", str(defaults_path.resolve()),
+        "--hardware-config", str(hardware_config_path.resolve()),
         "--latency-model", latency_model,
         "--model", model,
         "--tp", str(tp),
         "--hardware", hw,
         "--max-num-running-reqs", str(max_num_seqs),
         "--max-num-scheduled-tokens", str(max_num_batched_tokens),
+        "--block-size-in-tokens", str(block_size),
         "--gpu-memory-utilization", str(gpu_mem),
         "--results-path", str((replay_dir / "sim_result.json").resolve()),
+        "--log", "info",
     ]
 
     # Add max-model-len if specified (non-zero)
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
+
+    # Add CPU offloading if configured in exp-config.yaml
+    # BLIS will auto-calculate the KV block size based on model architecture,
+    # so we calculate CPU blocks using a heuristic: assume 4 MiB per block
+    # (typical for large models with fp16 KV cache and 16-token blocks).
+    # For exact calculation: per_block_bytes = 2 × layers × kv_heads × head_dim × 2 × 16
+    if kv_offloading_gb > 0:
+        # Heuristic: 4 MiB per block → 256 blocks per GiB
+        # This is exact for models like Qwen3-32B, Llama-3.x, and close for most others
+        cpu_blocks = int(kv_offloading_gb * 256)
+        cmd.extend([
+            "--kv-cpu-blocks", str(cpu_blocks),
+            "--kv-offload-threshold", "0.9",
+            "--kv-transfer-bandwidth", "0.2"
+        ])
+        print(f"   CPU offload: {kv_offloading_gb} GB → {cpu_blocks} blocks (4 MiB/block)")
 
     # Add model config folder if provided
     if model_config_folder:
@@ -212,7 +270,7 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     print(f"\n🔄 Running replay for experiment {exp['id']} ({exp['model']} on {exp['hw']})...")
     print(f"   Observe data: {data_dir}")
     print(f"   Replay output: {replay_dir}")
-    print(f"   vLLM config: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}, gpu_mem={gpu_mem}")
+    print(f"   vLLM config: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}, block_size={block_size}, gpu_mem={gpu_mem}")
     if max_model_len > 0:
         print(f"                max_model_len={max_model_len}")
     print(f"   Command: {' '.join(cmd)}")

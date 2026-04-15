@@ -16,10 +16,11 @@ stack:
       closure_interval: 10          # Close spans every 10 scheduler steps
 
     # KV cache events: block-level cache operations via ZMQ
+    # Note: KV events are for observability only, NOT for capacity offloading
+    # CPU offloading is controlled independently via cpu_offload flag in experiments.json
     kv_events:
       enabled: true
       publisher: "zmq"
-      offloading_size: 8.0          # CPU memory (GiB) for KV cache offloading
 
   treatments:
     tensorParallelism:
@@ -28,6 +29,7 @@ stack:
   MAX_MODEL_LEN: 4096
   MAX_NUM_BATCHED_TOKENS: 2048
   MAX_NUM_SEQS: 128
+  BLOCK_SIZE: 16
 
   model:
     helmValues:

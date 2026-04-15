@@ -24,7 +24,14 @@ spec:
         apt-get install -y git && apt-get clean && rm -rf /var/cache/apt
 
         echo "Cloning inference-sim main branch..."
-        git clone https://github.com/inference-sim/inference-sim.git
+        # Add timeout and depth limit for faster clone
+        if ! timeout 5m git clone --depth 1 https://github.com/inference-sim/inference-sim.git; then
+          echo "❌ ERROR: Git clone timed out after 5 minutes"
+          echo "This usually indicates network connectivity issues."
+          echo "Checking basic connectivity..."
+          timeout 10s curl -I https://github.com 2>&1 || echo "Cannot reach GitHub"
+          exit 1
+        fi
         cd inference-sim
 
         echo "Building BLIS binary..."

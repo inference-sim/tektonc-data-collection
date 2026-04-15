@@ -8,6 +8,7 @@
 Llama-3.1-8b: "meta-llama/Llama-3.1-8B-Instruct"
 Llama-3.1-70B: "meta-llama/Llama-3.1-70B-Instruct"
 Qwen3-14B: "Qwen/Qwen3-14B"
+Qwen/Qwen3-32B: "Qwen/Qwen3-32B"
 Qwen2.5-7B-Instruct: "Qwen/Qwen2.5-7B-Instruct"
 Codellama-34b: "codellama/CodeLlama-34b-Instruct-hf"
 Llama-2-70b: "meta-llama/Llama-2-70b-hf"

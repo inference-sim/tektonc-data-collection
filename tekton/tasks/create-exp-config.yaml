@@ -14,6 +14,14 @@ spec:
       type: string
     - name: max_num_seqs
       type: string
+    - name: block_size
+      type: string
+      description: KV cache block size in tokens
+      default: "16"
+    - name: kv_offloading_size
+      type: string
+      description: KV cache offloading size in GB (0 = disabled)
+      default: "0"
     - name: app
       type: string
     - name: results_dir
@@ -37,6 +45,8 @@ spec:
         max_model_len: $(params.max_model_len)
         max_num_batched_tokens: $(params.max_num_batched_tokens)
         max_num_seqs: $(params.max_num_seqs)
+        block_size: $(params.block_size)
+        kv_offloading_size: $(params.kv_offloading_size)
         app: $(params.app)
         EOF
 

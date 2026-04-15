@@ -68,9 +68,10 @@ spec:
             - { name: model, value: "$(params.model)" }
             - { name: tp, value: "{{ tp }}" }
             - { name: dlp, value: "{{ dlp }}" }
-            - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN }}" }
+            - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN if stack.MAX_MODEL_LEN is defined and stack.MAX_MODEL_LEN > 0 else 0 }}" }
             - { name: max_num_batched_tokens, value: "{{ stack.MAX_NUM_BATCHED_TOKENS }}" }
             - { name: max_num_seqs, value: "{{ stack.MAX_NUM_SEQS }}" }
+            - { name: kv_offloading_size, value: "{{ stack.kv_offloading_size | default(0) }}" }
             - { name: app, value: "inference-perf" }
             - { name: results_dir, value: "{{ stackModelLabel }}" }
 
@@ -109,9 +110,12 @@ spec:
                 - decode.parallelism.data={{ dlp }}
                 - decode.parallelism.dataLocal={{ dlp }}
                 - decode.containers[name="vllm"].args=--data-parallel-size={{ dlp }}
+                {% if stack.MAX_MODEL_LEN is defined and stack.MAX_MODEL_LEN > 0 %}
                 - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
+                {% endif %}
                 - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
                 - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
+                - decode.containers[name="vllm"].args=--block-size={{ stack.BLOCK_SIZE }}
                 - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
                 {% if stack.tracing is defined %}
                 - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{stackModelLabel}}:4318/v1/traces
@@ -132,12 +136,12 @@ spec:
                 - decode.containers[name="vllm"].args=--step-tracing-closure-interval={{ stack.tracing.step.closure_interval }}
                 {% endif %}
 
-                # KV cache events
+                # KV cache events (observability only - NOT for capacity offloading!)
                 {% if stack.tracing is defined and stack.tracing.kv_events is defined and stack.tracing.kv_events.enabled %}
                 - 'decode.containers[name="vllm"].args=--kv-events-config={"enable_kv_cache_events": true, "publisher": "{{ stack.tracing.kv_events.publisher }}", "endpoint": "tcp://*:5557", "replay_endpoint": "tcp://*:5558", "topic": "kv-events"}'
-                - decode.containers[name="vllm"].args=--kv-offloading-size={{ stack.tracing.kv_events.offloading_size }}
 
                 # Update KV events subscriber output path
+                # Note: GPU allocation is already set to 0 in values-observability.yaml base values
                 - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
                 {% endif %}
                 {% for override in stack.extra_overrides | default([]) %}

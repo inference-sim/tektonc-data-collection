@@ -167,8 +167,21 @@ def build_values(exp, base_values, models, clusters, workloads):
 
     # Stack config
     v["stack"]["MAX_NUM_BATCHED_TOKENS"] = exp["mbt"]
+    # Allow experiments.json to override MAX_MODEL_LEN (default from base values if not specified)
+    if "max_model_len" in exp:
+        v["stack"]["MAX_MODEL_LEN"] = exp["max_model_len"]
+    # Allow experiments.json to override MAX_NUM_SEQS (default from base values if not specified)
+    if "max_num_seqs" in exp:
+        v["stack"]["MAX_NUM_SEQS"] = exp["max_num_seqs"]
+    # Allow experiments.json to override BLOCK_SIZE (default from base values if not specified)
+    if "block_size" in exp:
+        v["stack"]["BLOCK_SIZE"] = exp["block_size"]
     v["stack"]["treatments"]["tensorParallelism"] = [exp["tp"]]
     v["stack"]["treatments"]["dataLocalParallelism"] = [exp.get("dp") or 1]
+
+    # Store cpu_offload flag and offloading size for template access
+    v["stack"]["cpu_offload"] = exp.get("cpu_offload", False)
+    v["stack"]["kv_offloading_size"] = DEFAULT_KV_OFFLOAD_GB if exp.get("cpu_offload") else 0
 
     # GPU targeting
     cluster = clusters[exp["hw"]]
@@ -182,7 +195,8 @@ def build_values(exp, base_values, models, clusters, workloads):
         decode["annotations"] = {}
     decode["annotations"]["gpu-reaper.io/exclude"] = "true"
 
-    # Build extra_overrides (skip --quantization fp8 for pre-quantized checkpoints)
+    # Build extra_overrides (handles ALL capacity-related vLLM args including CPU offloading)
+    # Observability template only handles observability features, NOT capacity management
     v["stack"]["extra_overrides"] = build_extra_overrides(
         exp, extra_args, is_prequantized=is_prequantized
     )
@@ -214,6 +228,13 @@ def build_values(exp, base_values, models, clusters, workloads):
         elif spec_type == "blis_native":
             # Use BLIS native format directly (cohorts, diurnal, multi-client, etc.)
             v["workload"]["orcSpec"] = wl["blis"]
+            # Calculate horizon from num_requests and aggregate_rate
+            # Horizon is a time bound (seconds) for pipeline scheduling
+            # Use 2× mean to account for bursty arrival processes (gamma, diurnal, etc.)
+            num_requests = wl["blis"].get("num_requests", 0)
+            aggregate_rate = wl["blis"].get("aggregate_rate", 1.0)
+            horizon = int(2 * num_requests / aggregate_rate) if aggregate_rate > 0 else 0
+            v["workload"]["horizon"] = horizon
         else:
             raise ValueError(f"Unsupported workload spec type: {spec_type}")
     else:
@@ -235,7 +256,11 @@ def build_values(exp, base_values, models, clusters, workloads):
 
 
 def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
-    """Build the list of Helm override strings for extra vLLM args."""
+    """Build the list of Helm override strings for extra vLLM args.
+
+    This handles ALL capacity-related vLLM configuration including CPU offloading.
+    Observability templates handle ONLY observability features (tracing, KV events).
+    """
     overrides = []
 
     # FP8 quantization — skip if using a pre-quantized checkpoint
@@ -251,9 +276,10 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
             f'decode.containers[name="vllm"].args=--gpu-memory-utilization={exp["gpu_mem"]}'
         )
 
-    # KV cache offloading (total GiB across TP ranks)
+    # KV cache offloading (total GiB across TP ranks) - CAPACITY MANAGEMENT
     # Stock vLLM v0.15.1 enables HMA by default which conflicts with
     # OffloadingConnector, so we also disable HMA when offloading is on.
+    # NOTE: This is independent of observability - observability can run with or without offloading
     if exp.get("cpu_offload"):
         overrides.append(
             f'decode.containers[name="vllm"].args=--kv-offloading-size={DEFAULT_KV_OFFLOAD_GB}'
@@ -356,9 +382,12 @@ def generate_campaign(args):
         tektoncsample_base / "blis-inference-perf" / "values-observability.yaml"
     )
 
-    # ORC harness base values (single base, no observability variant yet)
-    base_values_orc = load_yaml(
+    # ORC harness base values (stock and observability)
+    base_values_orc_stock = load_yaml(
         tektoncsample_base / "blis-orc" / "values.yaml"
+    )
+    base_values_orc_observability = load_yaml(
+        tektoncsample_base / "blis-orc" / "values-observability.yaml"
     )
 
     # Filter to specific IDs if --only is given
@@ -409,11 +438,9 @@ def generate_campaign(args):
         use_observability = exp.get("observability", False)
 
         if harness == "orc":
-            # ORC harness (observability not yet supported for ORC)
-            if use_observability:
-                print(f"WARNING: Observability not yet supported for ORC harness, ignoring for exp #{exp['id']}",
-                      file=sys.stderr)
-            base_values = base_values_orc
+            # ORC harness (supports observability)
+            base_values = (base_values_orc_observability if use_observability
+                          else base_values_orc_stock)
         else:
             # inference-perf harness (default)
             base_values = (base_values_inference_perf_observability if use_observability
@@ -454,3 +481,13 @@ def generate_campaign(args):
 
     print(f"Generated {generated} experiments in {output_dir}/")
     return 0
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate BLIS campaign experiments")
+    parser.add_argument("--experiments", required=True, help="Path to experiments.json")
+    parser.add_argument("--output", required=True, help="Output directory for campaign")
+    parser.add_argument("--only", help="Comma-separated list of experiment IDs to generate")
+    args = parser.parse_args()
+    sys.exit(generate_campaign(args))
