@@ -35,10 +35,12 @@ spec:
       script: |
         #!/bin/sh
         set -e
-        # Clean stale artifacts from any previous run of this workload.
-        rm -rf /workspace/data/$(params.resultsDir)
-        mkdir -p /workspace/data/$(params.resultsDir)
-        chmod 777 /workspace/data/$(params.resultsDir)
+        # Clean stale workload results but preserve epp_logs/, which stream-epp-logs
+        # writes concurrently starting from deploy-inference-objectives.
+        RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+        mkdir -p "${RESULTS_DIR}"
+        chmod 777 "${RESULTS_DIR}"
+        find "${RESULTS_DIR}" -mindepth 1 -maxdepth 1 -not -name 'epp_logs' -exec rm -rf {} +
         cat > /tmp/spec_raw.txt << '__WORKLOAD_SPEC_END__'
         $(params.workloadSpec)
         __WORKLOAD_SPEC_END__
