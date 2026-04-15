@@ -48,27 +48,31 @@ spec:
         RELEASE="${MODEL_LABEL}-gaie"
         EPP_DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
 
-        echo "Waiting for EPP pod with prefix: ${EPP_DEPLOY}"
+        # Wait for the EPP deployment to be fully available before discovering pods.
+        # deploy-inference-objectives may have triggered a rollout restart; this ensures
+        # any in-progress rollout completes and old Terminating pods are no longer selected.
+        # Returns immediately if the deployment is already stable (no-objectives path).
+        kubectl rollout status deploy "${EPP_DEPLOY}" -n "${NAMESPACE}" --timeout=300s 2>/dev/null || true
+
+        echo "Waiting for running EPP pod with prefix: ${EPP_DEPLOY}"
         EPP_PODS=""
         i=0
         while [ $i -lt 20 ]; do
-          EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
-            --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
-            | grep "^${EPP_DEPLOY}" || true)
+          EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | grep "^${EPP_DEPLOY}" | awk '$3 == "Running" {print $1}' || true)
           [ -n "${EPP_PODS}" ] && break
           i=$((i+1))
           sleep 3
         done
 
         if [ -z "${EPP_PODS}" ]; then
-          echo "WARNING: No EPP pods found with prefix ${EPP_DEPLOY} after 60s, skipping."
+          echo "WARNING: No running EPP pods found with prefix ${EPP_DEPLOY} after 60s, skipping."
           exit 0
         fi
 
         # Phase 2 — Streaming
-        # Clean stale artifacts from any previous run before starting fresh.
-        rm -f "${SENTINEL}"
-        rm -rf "${LOG_DIR}"
+        rm -f "${SENTINEL}" 2>/dev/null
+        rm -rf "${LOG_DIR}" 2>/dev/null
         mkdir -p "${LOG_DIR}"
         PIDS=""
         for pod in ${EPP_PODS}; do
@@ -82,6 +86,13 @@ spec:
                 min  = int(tm[2])
                 bucket = int(min / win) * win
                 fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
+                # Recreate output dir on each new bucket. run-workload clears
+                # the parent resultsDir with rm -rf at startup, which deletes
+                # epp_logs/. Re-creating per-bucket is cheap and handles the race.
+                if (fname != _prev) {
+                  system("mkdir -p " outdir)
+                  _prev = fname
+                }
                 out = ""
                 for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
                 print out >> fname
