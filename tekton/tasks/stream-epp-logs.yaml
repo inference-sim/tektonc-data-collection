@@ -75,9 +75,13 @@ spec:
         rm -rf "${LOG_DIR}" 2>/dev/null
         mkdir -p "${LOG_DIR}"
         PIDS=""
+        KUBECTL_PIDS=""
+        PID_DIR=$(mktemp -d)
         for pod in ${EPP_PODS}; do
           echo "Streaming EPP logs: ${pod} → ${LOG_DIR}/"
-          kubectl logs --follow --timestamps=true "${pod}" -n "${NAMESPACE}" -c "$(params.containerName)" \
+          # Run kubectl in a subshell that writes its own PID to a file,
+          # so we can kill it directly on shutdown instead of relying on SIGPIPE.
+          (echo $$ > "${PID_DIR}/${pod}.pid"; exec kubectl logs --follow --timestamps=true "${pod}" -n "${NAMESPACE}" -c "$(params.containerName)") \
             | awk -v outdir="${LOG_DIR}" -v pod="${pod}" -v win="${WINDOW}" '
               {
                 split($1, dt, "T")
@@ -86,9 +90,6 @@ spec:
                 min  = int(tm[2])
                 bucket = int(min / win) * win
                 fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
-                # Recreate output dir on each new bucket. run-workload clears
-                # the parent resultsDir with rm -rf at startup, which deletes
-                # epp_logs/. Re-creating per-bucket is cheap and handles the race.
                 if (fname != _prev) {
                   system("mkdir -p " outdir)
                   _prev = fname
@@ -99,9 +100,12 @@ spec:
                 fflush(fname)
               }
             ' &
-          # $! is the awk PID (rightmost in pipe). Killing awk breaks the pipe;
-          # kubectl receives SIGPIPE and exits cleanly.
           PIDS="${PIDS} $!"
+        done
+        # Collect kubectl PIDs written by the subshells.
+        sleep 1
+        for f in "${PID_DIR}"/*.pid; do
+          [ -f "$f" ] && KUBECTL_PIDS="${KUBECTL_PIDS} $(cat "$f")"
         done
 
         # Phase 3 — Sentinel poll
@@ -136,6 +140,8 @@ spec:
           sleep 5
         done
 
-        kill ${PIDS} 2>/dev/null || true
+        # Kill both kubectl and awk processes to ensure clean shutdown.
+        kill ${KUBECTL_PIDS} ${PIDS} 2>/dev/null || true
         wait ${PIDS} 2>/dev/null || true
+        rm -rf "${PID_DIR}"
         echo "EPP log streaming complete for $(params.resultsDir)"
