@@ -35,12 +35,14 @@ spec:
       script: |
         #!/bin/sh
         set -e
-        # Clean stale workload results but preserve epp_logs/, which stream-epp-logs
-        # writes concurrently starting from deploy-inference-objectives.
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+        # Clean any stale results from a previous iteration of this workload slot.
+        rm -rf "${RESULTS_DIR}"
         mkdir -p "${RESULTS_DIR}"
         chmod 777 "${RESULTS_DIR}"
-        find "${RESULTS_DIR}" -mindepth 1 -maxdepth 1 -not -name 'epp_logs' -exec rm -rf {} +
+        # Write timestamp marker before workload runs; collect-results uses this
+        # to bound EPP log collection to this workload's window only.
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "${RESULTS_DIR}/epp_log_since"
         cat > /tmp/spec_raw.txt << '__WORKLOAD_SPEC_END__'
         $(params.workloadSpec)
         __WORKLOAD_SPEC_END__
