@@ -1,0 +1,85 @@
+# Rate calibration pipeline
+# Deploys ALL configs in parallel (sufficient GPUs available),
+# sends one streaming request each, measures decode_ms_per_token.
+# Output: per-config calibration.json files in the data workspace.
+#
+# Total GPU requirement: 23 (runs on clusters with 24+ GPUs)
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{ experiment.name | dns }}
+spec:
+  description: "Rate calibration: measure decode latency per token ({{ configs | length }} configs in parallel)"
+
+  workspaces:
+    - name: model-cache
+      description: Location where models are stored
+    - name: hf-credentials
+      description: Secret workspace containing a HuggingFace token
+    - name: data
+      description: Workspace for calibration results
+
+  params:
+    - name: namespace
+      type: string
+      description: Kubernetes namespace
+
+  tasks:
+    {% for cfg in configs %}
+    # ── {{ cfg.label }} ({{ cfg.model_short }}, TP{{ cfg.tp }}, {{ cfg.tp }} GPU{{ 's' if cfg.tp > 1 }}) ──
+    - name: download-model-{{ cfg.label | dns }}
+      taskRef: { name: download-model }
+      workspaces:
+        - name: model-cache
+        - name: hf-credentials
+      params:
+        - name: model
+          value: "{{ cfg.hf_id }}"
+
+    - name: deploy-model-{{ cfg.label | dns }}
+      taskRef: { name: deploy-model }
+      runAfter: [ "download-model-{{ cfg.label | dns }}" ]
+      workspaces:
+        - name: model-cache
+      params:
+        - { name: model, value: "{{ cfg.hf_id }}" }
+        - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: config, value: {{ stack.model.helmValues }} }
+        - name: overrides
+          value:
+            - "decode.parallelism.tensor={{ cfg.tp }}"
+            - 'decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}'
+            - 'decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}'
+            - 'decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}'
+            {% for arg in cfg.extra_overrides %}
+            - '{{ arg }}'
+            {% endfor %}
+
+    - name: calibrate-{{ cfg.label | dns }}
+      taskRef: { name: calibrate-decode-latency }
+      runAfter: [ "deploy-model-{{ cfg.label | dns }}" ]
+      workspaces:
+        - name: data
+      params:
+        - { name: model, value: "{{ cfg.hf_id }}" }
+        - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
+        - { name: results_dir, value: "calibration/{{ cfg.label | dns }}" }
+
+    - name: delete-model-{{ cfg.label | dns }}
+      runAfter: [ "calibrate-{{ cfg.label | dns }}" ]
+      taskRef: { name: delete-model }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
+
+    {% endfor %}
+
+  finally:
+    {% for cfg in configs %}
+    - name: finally-delete-{{ cfg.label | dns }}
+      taskRef: { name: delete-model }
+      params:
+        - { name: namespace, value: "$(params.namespace)" }
+        - { name: modelLabel, value: "cal-{{ cfg.label | dns }}" }
+    {% endfor %}

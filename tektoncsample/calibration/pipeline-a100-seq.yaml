@@ -1,0 +1,834 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cal-a100
+spec:
+  description: 'Rate calibration: measure decode latency per token (6 configs in sequence)'
+  workspaces:
+  - name: model-cache
+    description: Location where models are stored
+  - name: hf-credentials
+    description: Secret workspace containing a HuggingFace token
+  - name: data
+    description: Workspace for calibration results
+  params:
+  - name: namespace
+    type: string
+    description: Kubernetes namespace
+  tasks:
+  - name: download-model-qwen3-14b-a100-tp1
+    taskRef:
+      name: download-model
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+  - name: deploy-model-qwen3-14b-a100-tp1
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-qwen3-14b-a100-tp1
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+    - name: modelLabel
+      value: cal-qwen3-14b-a100-tp1
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=1
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-qwen3-14b-a100-tp1
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-qwen3-14b-a100-tp1
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: Qwen/Qwen3-14B
+    - name: modelLabel
+      value: cal-qwen3-14b-a100-tp1
+    - name: results_dir
+      value: calibration/qwen3-14b-a100-tp1
+  - name: delete-model-qwen3-14b-a100-tp1
+    runAfter:
+    - calibrate-qwen3-14b-a100-tp1
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-qwen3-14b-a100-tp1
+  - name: download-model-llama31-8b-a100-tp1
+    taskRef:
+      name: download-model
+    runAfter:
+    - delete-model-qwen3-14b-a100-tp1
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+  - name: deploy-model-llama31-8b-a100-tp1
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-llama31-8b-a100-tp1
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+    - name: modelLabel
+      value: cal-llama31-8b-a100-tp1
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=1
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-llama31-8b-a100-tp1
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-llama31-8b-a100-tp1
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: meta-llama/Llama-3.1-8B-Instruct
+    - name: modelLabel
+      value: cal-llama31-8b-a100-tp1
+    - name: results_dir
+      value: calibration/llama31-8b-a100-tp1
+  - name: delete-model-llama31-8b-a100-tp1
+    runAfter:
+    - calibrate-llama31-8b-a100-tp1
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama31-8b-a100-tp1
+  - name: download-model-codellama-34b-a100-tp2
+    taskRef:
+      name: download-model
+    runAfter:
+    - delete-model-llama31-8b-a100-tp1
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: codellama/CodeLlama-34b-Instruct-hf
+  - name: deploy-model-codellama-34b-a100-tp2
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-codellama-34b-a100-tp2
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: codellama/CodeLlama-34b-Instruct-hf
+    - name: modelLabel
+      value: cal-codellama-34b-a100-tp2
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=2
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-codellama-34b-a100-tp2
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-codellama-34b-a100-tp2
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: codellama/CodeLlama-34b-Instruct-hf
+    - name: modelLabel
+      value: cal-codellama-34b-a100-tp2
+    - name: results_dir
+      value: calibration/codellama-34b-a100-tp2
+  - name: delete-model-codellama-34b-a100-tp2
+    runAfter:
+    - calibrate-codellama-34b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-codellama-34b-a100-tp2
+  - name: download-model-llama2-70b-a100-tp4
+    taskRef:
+      name: download-model
+    runAfter:
+    - delete-model-codellama-34b-a100-tp2
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: meta-llama/Llama-2-70b-hf
+  - name: deploy-model-llama2-70b-a100-tp4
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-llama2-70b-a100-tp4
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: meta-llama/Llama-2-70b-hf
+    - name: modelLabel
+      value: cal-llama2-70b-a100-tp4
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=4
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-llama2-70b-a100-tp4
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-llama2-70b-a100-tp4
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: meta-llama/Llama-2-70b-hf
+    - name: modelLabel
+      value: cal-llama2-70b-a100-tp4
+    - name: results_dir
+      value: calibration/llama2-70b-a100-tp4
+  - name: delete-model-llama2-70b-a100-tp4
+    runAfter:
+    - calibrate-llama2-70b-a100-tp4
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama2-70b-a100-tp4
+  - name: download-model-mixtral-8x7b-a100-tp2
+    taskRef:
+      name: download-model
+    runAfter:
+    - delete-model-llama2-70b-a100-tp4
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: mistralai/Mixtral-8x7B-v0.1
+  - name: deploy-model-mixtral-8x7b-a100-tp2
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-mixtral-8x7b-a100-tp2
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: mistralai/Mixtral-8x7B-v0.1
+    - name: modelLabel
+      value: cal-mixtral-8x7b-a100-tp2
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=2
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+  - name: calibrate-mixtral-8x7b-a100-tp2
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-mixtral-8x7b-a100-tp2
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: mistralai/Mixtral-8x7B-v0.1
+    - name: modelLabel
+      value: cal-mixtral-8x7b-a100-tp2
+    - name: results_dir
+      value: calibration/mixtral-8x7b-a100-tp2
+  - name: delete-model-mixtral-8x7b-a100-tp2
+    runAfter:
+    - calibrate-mixtral-8x7b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-mixtral-8x7b-a100-tp2
+  - name: download-model-scout-17b-a100-tp2
+    taskRef:
+      name: download-model
+    runAfter:
+    - delete-model-mixtral-8x7b-a100-tp2
+    workspaces:
+    - name: model-cache
+    - name: hf-credentials
+    params:
+    - name: model
+      value: RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic
+  - name: deploy-model-scout-17b-a100-tp2
+    taskRef:
+      name: deploy-model
+    runAfter:
+    - download-model-scout-17b-a100-tp2
+    workspaces:
+    - name: model-cache
+    params:
+    - name: model
+      value: RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic
+    - name: modelLabel
+      value: cal-scout-17b-a100-tp2
+    - name: namespace
+      value: $(params.namespace)
+    - name: config
+      value:
+        fullnameOverride: FULLNAME
+        serviceAccountOverride: default
+        multinode: false
+        modelArtifacts:
+          uri: pvc://model-pvc/models/MODEL
+          size: 300Gi
+          authSecretName: hf-secret
+          name: MODEL
+          labels:
+            llm-d.ai/inferenceServing: 'true'
+            llm-d.ai/model: FULLNAME
+        routing:
+          servicePort: 8000
+          proxy:
+            enabled: false
+        prefill:
+          create: false
+        decode:
+          create: true
+          replicas: 1
+          acceleratorTypes:
+            labelKey: nvidia.com/gpu.product
+            labelValues:
+            - NVIDIA-A100-SXM4-80GB
+          parallelism:
+            data: 1
+            tensor: 1
+          containers:
+          - name: vllm
+            env:
+            - name: HF_HOME
+              value: /mnt/exp/.cache/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /mnt/exp/.cache/huggingface
+            mountModelVolume: true
+            image: vllm/vllm-openai:v0.15.1
+            modelCommand: vllmServe
+            resources:
+              limits:
+                memory: 128Gi
+                cpu: '32'
+              requests:
+                memory: 128Gi
+                cpu: '32'
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                tcpSocket:
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                failureThreshold: 3
+                periodSeconds: 5
+            volumeMounts:
+            - name: data
+              mountPath: /mnt/exp
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+    - name: overrides
+      value:
+      - decode.parallelism.tensor=2
+      - decode.containers[name="vllm"].args=--max-model-len=4096
+      - decode.containers[name="vllm"].args=--max-num-batched-tokens=2048
+      - decode.containers[name="vllm"].args=--max-num-seqs=128
+      - 'decode.containers[name="vllm"].args=--override-generation-config={"attn_temperature_tuning": true}'
+  - name: calibrate-scout-17b-a100-tp2
+    taskRef:
+      name: calibrate-decode-latency
+    runAfter:
+    - deploy-model-scout-17b-a100-tp2
+    workspaces:
+    - name: data
+    params:
+    - name: model
+      value: RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic
+    - name: modelLabel
+      value: cal-scout-17b-a100-tp2
+    - name: results_dir
+      value: calibration/scout-17b-a100-tp2
+  - name: delete-model-scout-17b-a100-tp2
+    runAfter:
+    - calibrate-scout-17b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-scout-17b-a100-tp2
+  finally:
+  - name: finally-delete-qwen3-14b-a100-tp1
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-qwen3-14b-a100-tp1
+  - name: finally-delete-llama31-8b-a100-tp1
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama31-8b-a100-tp1
+  - name: finally-delete-codellama-34b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-codellama-34b-a100-tp2
+  - name: finally-delete-llama2-70b-a100-tp4
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-llama2-70b-a100-tp4
+  - name: finally-delete-mixtral-8x7b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-mixtral-8x7b-a100-tp2
+  - name: finally-delete-scout-17b-a100-tp2
+    taskRef:
+      name: delete-model
+    params:
+    - name: namespace
+      value: $(params.namespace)
+    - name: modelLabel
+      value: cal-scout-17b-a100-tp2

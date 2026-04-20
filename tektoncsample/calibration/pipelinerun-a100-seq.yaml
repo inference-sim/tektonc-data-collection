@@ -1,0 +1,30 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: cal-a100-seq-
+spec:
+  timeouts:
+    pipeline: 8h  # Longer timeout for sequential execution
+    tasks: 3h30m
+  pipelineRef:
+    name: cal-a100
+  params:
+    - name: namespace
+      value: diya
+  workspaces:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-pvc
+    - name: hf-credentials
+      secret:
+        secretName: hf-secret
+    - name: data
+      persistentVolumeClaim:
+        claimName: data-pvc
+  taskRunTemplate:
+    serviceAccountName: helm-installer
+    podTemplate:
+      securityContext:
+        seLinuxOptions:
+          type: spc_t  # Disable SELinux restrictions
+        fsGroup: 0

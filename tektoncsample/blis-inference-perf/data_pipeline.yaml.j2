@@ -52,10 +52,11 @@ spec:
       foreach:
         domain:
           tp: {{ stack.treatments.tensorParallelism }}
+          dlp: {{ stack.treatments.dataLocalParallelism }}
 
       vars:
-        stackId: "{{ tp }}"
-        stackModelLabel:  "$(params.experimentId)-{{ tp }}"
+        stackId: "{{ tp }}-{{ dlp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}-{{ dlp }}"
 
       tasks:
         - name: create-exp-config-{{ stackId }}
@@ -66,6 +67,7 @@ spec:
           params:
             - { name: model, value: "$(params.model)" }
             - { name: tp, value: "{{ tp }}" }
+            - { name: dlp, value: "{{ dlp }}" }
             - { name: max_model_len, value: "{{ stack.MAX_MODEL_LEN }}" }
             - { name: max_num_batched_tokens, value: "{{ stack.MAX_NUM_BATCHED_TOKENS }}" }
             - { name: max_num_seqs, value: "{{ stack.MAX_NUM_SEQS }}" }
@@ -104,6 +106,9 @@ spec:
             - name: overrides
               value:
                 - decode.parallelism.tensor={{ tp }}
+                - decode.parallelism.data={{ dlp }}
+                - decode.parallelism.dataLocal={{ dlp }}
+                - decode.containers[name="vllm"].args=--data-parallel-size={{ dlp }}
                 - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
                 - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
                 - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
@@ -135,6 +140,9 @@ spec:
                 # Update KV events subscriber output path
                 - decode.containers[name="kv-events-subscriber"].env[name="VLLM_KV_EVENTS_OUTPUT_FILE"].value=/mnt/exp/{{ stackModelLabel }}/kv_events.jsonl
                 {% endif %}
+                {% for override in stack.extra_overrides | default([]) %}
+                - '{{ override }}'
+                {% endfor %}
 
         - name: run-workload-{{ stackId }}
           description: Run workload against model server using inference-perf.
@@ -194,10 +202,11 @@ spec:
       foreach:
         domain:
           tp: {{ stack.treatments.tensorParallelism }}
+          dlp: {{ stack.treatments.dataLocalParallelism }}
 
       vars:
-        stackId: "{{ tp }}"
-        stackModelLabel:  "$(params.experimentId)-{{ tp }}"
+        stackId: "{{ tp }}-{{ dlp }}"
+        stackModelLabel:  "$(params.experimentId)-{{ tp }}-{{ dlp }}"
 
       tasks:
         - name: finally-delete-model-{{ stackId }}

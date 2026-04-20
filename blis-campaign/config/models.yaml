@@ -1,0 +1,34 @@
+# Short name -> HuggingFace ID (matching #598 discussion table)
+#
+# Models with FP8 experiments use pre-quantized checkpoints (fp8_hf_id) to
+# avoid vLLM v0.15.1 OOM during online dynamic FP8 quantization of MoE models.
+# When precision=FP8, the generator resolves fp8_hf_id instead of hf_id and
+# drops the --quantization=fp8 flag (weights are already FP8 on disk).
+
+Llama-3.1-8b: "meta-llama/Llama-3.1-8B-Instruct"
+Llama-3.1-70B: "meta-llama/Llama-3.1-70B-Instruct"
+Qwen3-14B: "Qwen/Qwen3-14B"
+Qwen2.5-7B-Instruct: "Qwen/Qwen2.5-7B-Instruct"
+Codellama-34b: "codellama/CodeLlama-34b-Instruct-hf"
+Llama-2-70b: "meta-llama/Llama-2-70b-hf"
+Mixtral-8x7B: "mistralai/Mixtral-8x7B-v0.1"
+Mixtral-8x22B: "mistralai/Mixtral-8x22B-v0.1"
+Llama-2-7b-hf: "meta-llama/Llama-2-7b-hf"
+Mistral-Nemo-12b: "mistralai/Mistral-Nemo-Instruct-2407"
+
+DeepSeek-V3:
+  hf_id: "deepseek-ai/DeepSeek-V3"
+  # FP8: No well-established vLLM-compatible pre-quantized FP8 checkpoint exists
+  # as of 2026-03-12. Online dynamic FP8 OOMs on vLLM v0.15.1 (even at TP=8).
+  # Options: (1) upgrade vLLM, (2) wait for official FP8 checkpoint,
+  # (3) quantize ourselves with llm-compressor.
+  # fp8_hf_id: TBD
+
+Llama-4-Scout-17B-16E:
+  hf_id: "meta-llama/Llama-4-Scout-17B-16E"
+  # Pre-quantized FP8 dynamic checkpoint from RedHat (llm-compressor, vLLM compatible)
+  # 9.8k downloads, 28 likes. Uses dynamic per-tensor FP8 (same behavior as
+  # --quantization fp8 but without the BF16->FP8 conversion memory spike).
+  fp8_hf_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic"
+  extra_vllm_args:
+    - '--override-generation-config={"attn_temperature_tuning": true}'

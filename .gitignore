@@ -32,3 +32,9 @@ results/
 blis-exp-*
 obs-exp-*
 
+# BLIS campaign generated artifacts
+blis-campaign/campaign/
+
+# Local documentation drafts
+docs/
+

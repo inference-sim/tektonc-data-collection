@@ -1,0 +1,202 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: calibrate-decode-latency
+spec:
+  description: |
+    Send a single streaming request to a deployed vLLM model and measure
+    decode latency per token. Used for rate calibration before running
+    the full experiment matrix.
+
+    Outputs decode_ms_per_token to a workspace JSON file and as a task result.
+
+  workspaces:
+    - name: data
+
+  params:
+    - name: model
+      type: string
+      description: HuggingFace model ID (e.g. meta-llama/Llama-3.1-8B-Instruct)
+    - name: modelLabel
+      type: string
+      description: Label to find model pod (matches llm-d.ai/model label)
+    - name: results_dir
+      type: string
+      description: Directory under data workspace to write calibration result
+    - name: promptTokens
+      type: string
+      default: "500"
+      description: Approximate number of input tokens for calibration request
+    - name: maxOutputTokens
+      type: string
+      default: "250"
+      description: Maximum output tokens to generate
+
+  results:
+    - name: decode-ms-per-token
+      description: Measured decode latency in milliseconds per token
+
+  steps:
+    - name: get-pod-ip
+      env:
+        - name: MODEL_LABEL
+          value: "$(params.modelLabel)"
+      image: alpine/kubectl:1.34.1
+      script: |
+        #!/bin/sh
+        set -eu
+
+        echo "Looking up pod IP for model=${MODEL_LABEL}, role=decode"
+        podIP=$(kubectl get po \
+          -l "llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=decode" \
+          -o jsonpath='{.items[0].status.podIP}')
+
+        if [ -z "${podIP}" ]; then
+          echo "ERROR: pod IP is empty" >&2
+          exit 1
+        fi
+
+        echo "http://${podIP}:8000" > /workspace/endpoint.txt
+        echo "Endpoint: http://${podIP}:8000"
+
+    - name: calibrate
+      env:
+        - name: MODEL
+          value: "$(params.model)"
+        - name: PROMPT_TOKENS
+          value: "$(params.promptTokens)"
+        - name: MAX_OUTPUT_TOKENS
+          value: "$(params.maxOutputTokens)"
+      image: python:3.12.9-slim-bookworm
+      computeResources:
+        requests:
+          memory: "512Mi"
+          cpu: "1"
+        limits:
+          memory: "512Mi"
+          cpu: "1"
+      script: |
+        #!/usr/bin/env python3
+        """
+        Rate calibration: send one streaming completion request,
+        measure decode_ms_per_token from inter-token SSE timing.
+        """
+        import json
+        import os
+        import sys
+        import time
+        import urllib.request
+        import urllib.error
+
+        MODEL = os.environ["MODEL"]
+        PROMPT_TOKENS = int(os.environ["PROMPT_TOKENS"])
+        MAX_OUTPUT_TOKENS = int(os.environ["MAX_OUTPUT_TOKENS"])
+
+        RESULTS_DIR = os.path.join(
+            "$(workspaces.data.path)",
+            "$(params.results_dir)",
+        )
+        RESULT_PATH = "$(results.decode-ms-per-token.path)"
+
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+
+        # Read endpoint from previous step
+        base_url = open("/workspace/endpoint.txt").read().strip()
+        print(f"Target: {base_url}")
+
+        # Build a calibration prompt (~PROMPT_TOKENS tokens)
+        # Each "The quick brown fox jumps over the lazy dog. " is ~10 tokens.
+        repeat_count = max(1, PROMPT_TOKENS // 10)
+        prompt_text = ("The quick brown fox jumps over the lazy dog. " * repeat_count).strip()
+
+        payload = json.dumps({
+            "model": MODEL,
+            "prompt": prompt_text,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "temperature": 0.0,
+            "stream": True,
+        }).encode()
+
+        url = f"{base_url}/v1/completions"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        print(f"Sending calibration request to {url}")
+        print(f"  prompt ~{PROMPT_TOKENS} tokens, max_output={MAX_OUTPUT_TOKENS}")
+
+        token_times = []
+        total_output_tokens = 0
+
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                buffer = ""
+                for chunk in iter(lambda: resp.read(1).decode("utf-8", errors="replace"), ""):
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        for line in event_str.split("\n"):
+                            line = line.strip()
+                            if not line.startswith("data: "):
+                                continue
+                            data = line[len("data: "):]
+                            if data == "[DONE]":
+                                break
+                            try:
+                                obj = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            choices = obj.get("choices", [])
+                            if not choices:
+                                continue
+                            text = choices[0].get("text", "")
+                            if text:
+                                token_times.append(time.monotonic())
+                                total_output_tokens += 1
+        except urllib.error.URLError as e:
+            print(f"Request failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Received {total_output_tokens} output tokens")
+
+        if total_output_tokens < 3:
+            print("ERROR: too few tokens to measure decode latency", file=sys.stderr)
+            sys.exit(1)
+
+        # Skip first token (includes TTFT/prefill).
+        # Decode latency = time from token[1] to token[-1], over (n-2) gaps.
+        decode_times = token_times[1:]
+        n_gaps = len(decode_times) - 1
+
+        if n_gaps < 1:
+            print("ERROR: not enough decode tokens for measurement", file=sys.stderr)
+            sys.exit(1)
+
+        total_decode_s = decode_times[-1] - decode_times[0]
+        decode_ms_per_token = (total_decode_s / n_gaps) * 1000.0
+        ttft_ms = (token_times[1] - token_times[0]) * 1000.0
+
+        print(f"TTFT:                {ttft_ms:.1f} ms")
+        print(f"Decode tokens timed: {n_gaps + 1} (excluding first)")
+        print(f"Total decode time:   {total_decode_s * 1000:.1f} ms")
+        print(f"decode_ms_per_token: {decode_ms_per_token:.3f} ms")
+
+        result = {
+            "model": MODEL,
+            "decode_ms_per_token": round(decode_ms_per_token, 3),
+            "ttft_ms": round(ttft_ms, 1),
+            "output_tokens_measured": n_gaps + 1,
+            "total_output_tokens": total_output_tokens,
+        }
+
+        result_file = os.path.join(RESULTS_DIR, "calibration.json")
+        with open(result_file, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"Wrote {result_file}")
+
+        with open(RESULT_PATH, "w") as f:
+            f.write(f"{decode_ms_per_token:.3f}")
+        print(f"Result: decode_ms_per_token = {decode_ms_per_token:.3f} ms")
