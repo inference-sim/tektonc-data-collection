@@ -163,6 +163,7 @@ def run_experiment(blis_binary, exp, workloads, models_config, exp_dir, model_co
 
     # Get server configuration
     tp = exp["tp"]
+    dp = exp.get("dp", 1) if exp.get("dp") else 1
     hw = exp["hw"]
     gpu_mem = exp.get("gpu_mem", 0.9)
     max_num_seqs = exp.get("max_num_seqs", 256)
@@ -261,6 +262,11 @@ def run_experiment(blis_binary, exp, workloads, models_config, exp_dir, model_co
         "--log", "info",
     ]
 
+    # Add routing scorer for dense models with dp > 1
+    if dp > 1 and is_dense_model(short_model_name, models_config):
+        cmd.extend(["--num-instances", str(dp)])
+        cmd.extend(["--routing-scorers", "vllm-dp:1"])
+
     # Add max-model-len if specified (non-zero)
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
@@ -287,6 +293,8 @@ def run_experiment(blis_binary, exp, workloads, models_config, exp_dir, model_co
     print(f"   Server config: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}, block_size={block_size}, gpu_mem={gpu_mem}")
     if max_model_len > 0:
         print(f"                  max_model_len={max_model_len}")
+    if dp > 1 and is_dense_model(short_model_name, models_config):
+        print(f"   Routing: vllm-dp (data-parallel, {dp} instances)")
     print(f"   Command: {' '.join(cmd)}")
 
     # Run simulation
