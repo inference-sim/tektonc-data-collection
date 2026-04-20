@@ -47,6 +47,29 @@ def resolve_model_name(short_name, models_config):
         return short_name
 
 
+def is_dense_model(short_name, models_config):
+    """Check if model is a dense architecture (not MoE).
+
+    Args:
+        short_name: Short model name like "Llama-3.1-8b"
+        models_config: Dict from models.yaml
+
+    Returns:
+        bool: True if dense, False if MoE or architecture unknown
+    """
+    if short_name not in models_config:
+        # Unknown model, default to False (don't add routing scorer)
+        return False
+
+    entry = models_config[short_name]
+    if isinstance(entry, dict):
+        # Check architecture field, default to "dense" for backward compatibility
+        return entry.get("architecture", "dense") == "dense"
+
+    # Simple string entry (legacy format), assume dense
+    return True
+
+
 def ensure_blis_built(blis_repo_path):
     """Clone and build BLIS if not already present."""
     if not blis_repo_path.exists():
