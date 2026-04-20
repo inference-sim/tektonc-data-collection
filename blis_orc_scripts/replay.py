@@ -186,6 +186,7 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     if model != short_model_name:
         print(f"   Model: {short_model_name} → {model}")
     tp = exp.get("tp", 1)
+    dp = exp.get("dp") or 1
     hw = exp["hw"]
     latency_model = exp.get("latency_model", "trained-physics")
     gpu_mem = exp.get("gpu_mem", 0.9)
@@ -266,6 +267,11 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         "--log", "info",
     ]
 
+    # Add routing scorer for dense models with dp > 1
+    if dp > 1 and is_dense_model(short_model_name, models_config):
+        cmd.extend(["--num-instances", str(dp)])
+        cmd.extend(["--routing-scorers", "vllm-dp:1"])
+
     # Add max-model-len if specified (non-zero)
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
@@ -293,6 +299,9 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     print(f"\n🔄 Running replay for experiment {exp['id']} ({exp['model']} on {exp['hw']})...")
     print(f"   Observe data: {data_dir}")
     print(f"   Replay output: {replay_dir}")
+    print(f"   Latency model: {latency_model}")
+    if dp > 1 and is_dense_model(short_model_name, models_config):
+        print(f"   Routing: vllm-dp (data-parallel, {dp} instances)")
     print(f"   vLLM config: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}, block_size={block_size}, gpu_mem={gpu_mem}")
     if max_model_len > 0:
         print(f"                max_model_len={max_model_len}")
