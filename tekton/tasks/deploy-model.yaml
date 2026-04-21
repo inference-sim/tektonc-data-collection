@@ -473,20 +473,33 @@ spec:
 
         echo "⏳ Waiting for pods serving model ${MODEL} to be 'Ready' (label = ${MODEL_LABEL})"
 
+        # Poll until the desired number of label-matching pods are Ready.
+        # Unlike `kubectl wait`, this re-queries on each iteration so replacement
+        # pods (after a struggling pod is killed) are picked up naturally.
+        wait_ready_count() {
+          local label_selector="$1"
+          local desired="$2"
+          local deadline=$(( $(date +%s) + START_TIMEOUT ))
+          while true; do
+            ready=$(kubectl get pods -n "${NAMESPACE}" -l "${label_selector}" \
+              -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              2>/dev/null | grep -c "^True$" || true)
+            echo "  ready=${ready}/${desired} (label=${label_selector})"
+            [ "${ready}" -ge "${desired}" ] && return 0
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "Timed out waiting for ${desired} ready pods (label=${label_selector})"
+              return 1
+            fi
+            sleep 10
+          done
+        }
+
         if [ ${DECODE_REPLICAS} -gt 0 ]; then
-          kubectl --namespace ${NAMESPACE} \
-            wait pod \
-              -l llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=decode \
-              --for=condition=Ready=True \
-              --timeout=${START_TIMEOUT}s
+          wait_ready_count "llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=decode" "${DECODE_REPLICAS}"
           echo "✅ (decode) pods serving model ${MODEL} ready (label = ${MODEL_LABEL})"
         fi
 
         if [ ${PREFILL_REPLICAS} -gt 0 ]; then
-         kubectl --namespace ${NAMESPACE} \
-          wait pod \
-            -l llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=prefill \
-            --for=condition=Ready=True \
-            --timeout=${START_TIMEOUT}s
+          wait_ready_count "llm-d.ai/model=${MODEL_LABEL},llm-d.ai/role=prefill" "${PREFILL_REPLICAS}"
           echo "✅ prefill pods serving model ${MODEL} ready (label = ${MODEL_LABEL})"
         fi

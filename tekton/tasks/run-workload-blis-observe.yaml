@@ -58,6 +58,7 @@ spec:
         set -e
         mkdir -p /workspace/data/$(params.resultsDir)
         blis observe \
+          --max-concurrency 10000 \
           --server-url $(params.endpoint) \
           --model $(params.model) \
           --workload-spec /workspace/workload.yaml \
