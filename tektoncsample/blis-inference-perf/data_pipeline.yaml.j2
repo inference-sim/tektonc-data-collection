@@ -115,7 +115,8 @@ spec:
                 {% endif %}
                 - decode.containers[name="vllm"].args=--max-num-batched-tokens={{ stack.MAX_NUM_BATCHED_TOKENS }}
                 - decode.containers[name="vllm"].args=--max-num-seqs={{ stack.MAX_NUM_SEQS }}
-                - decode.containers[name="vllm"].args=--block-size={{ stack.BLOCK_SIZE }}
+                # TEMP: Commented out - causes vLLM v0.15.1 crash with dp=1
+                # - decode.containers[name="vllm"].args=--block-size={{ stack.BLOCK_SIZE }}
                 - decode.containers[name="vllm"].env[name="VLLM_LOGGING_CONFIG_PATH"].value="/mnt/exp/{{ stackModelLabel }}/vllm_logging.json"
                 {% if stack.tracing is defined %}
                 - decode.containers[name="vllm"].args=--otlp-traces-endpoint=http://otel-{{stackModelLabel}}:4318/v1/traces
