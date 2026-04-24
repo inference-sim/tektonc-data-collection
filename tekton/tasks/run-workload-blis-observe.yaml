@@ -58,11 +58,13 @@ spec:
         set -e
         mkdir -p /workspace/data/$(params.resultsDir)
         blis observe \
-          --max-concurrency 10000 \
           --server-url $(params.endpoint) \
           --model $(params.model) \
           --workload-spec /workspace/workload.yaml \
           --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
-          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv
+          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv \
+          --warmup-requests 200 \
+          --timeout 900 \
+          --max-concurrency 10000
         echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
         ls /workspace/data/$(params.resultsDir)
