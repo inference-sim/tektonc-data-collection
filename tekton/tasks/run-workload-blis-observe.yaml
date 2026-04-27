@@ -56,7 +56,7 @@ spec:
         mkdir -p /workspace/data/$(params.resultsDir)
         "${BLIS}" observe \
           --max-concurrency 10000 \
-          --timeout 600 \
+          --timeout 900 \
           --warmup-requests 200 \
           --server-url $(params.endpoint) \
           --model $(params.model) \
