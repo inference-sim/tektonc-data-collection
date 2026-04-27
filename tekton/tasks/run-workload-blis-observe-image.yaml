@@ -1,8 +1,8 @@
-# tektonc-data-collection/tekton/tasks/run-workload-blis-observe.yaml
+# tektonc-data-collection/tekton/tasks/run-workload-blis-observe-image.yaml
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: run-workload-blis-observe
+  name: run-workload-blis-observe-image
 spec:
   description: >-
     Run blis observe against a live inference endpoint using a workload spec.
