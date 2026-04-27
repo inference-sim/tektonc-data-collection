@@ -1,0 +1,67 @@
+# tektonc-data-collection/tekton/tasks/run-workload-blis-observe-binary.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-workload-blis-observe-binary
+spec:
+  description: >-
+    Run blis observe against a live inference endpoint using the PVC-installed
+    blis binary (built by install-blis). Writes TraceV2 output
+    (trace_header.yaml + trace_data.csv) to the data PVC.
+
+  params:
+    - name: endpoint
+      type: string
+      description: "Inference endpoint URL"
+    - name: model
+      type: string
+      description: "Model name for API requests"
+    - name: workloadSpec
+      type: string
+      description: "Inline YAML content of the workload spec file"
+    - name: resultsDir
+      type: string
+      description: "Path under /workspace/data to write TraceV2 output"
+
+  workspaces:
+    - name: data
+      description: "Shared PVC for storing TraceV2 results (data-pvc)"
+    - name: source
+      description: "Shared PVC containing the blis binary (source-pvc)"
+
+  steps:
+    - name: write-workload-spec
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        set -e
+        RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+        rm -rf "${RESULTS_DIR}"
+        mkdir -p "${RESULTS_DIR}"
+        chmod 777 "${RESULTS_DIR}"
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "${RESULTS_DIR}/epp_log_since"
+        cat > /tmp/spec_raw.txt << '__WORKLOAD_SPEC_END__'
+        $(params.workloadSpec)
+        __WORKLOAD_SPEC_END__
+        sed 's/\\n/\n/g' /tmp/spec_raw.txt > /workspace/workload.yaml
+        echo "Workload spec written to /workspace/workload.yaml"
+        head -5 /workspace/workload.yaml
+
+    - name: run-observe
+      image: debian:bookworm-slim
+      script: |
+        #!/bin/sh
+        set -e
+        BLIS="$(workspaces.source.path)/blis/blis"
+        mkdir -p /workspace/data/$(params.resultsDir)
+        "${BLIS}" observe \
+          --max-concurrency 10000 \
+          --timeout 900 \
+          --warmup-requests 200 \
+          --server-url $(params.endpoint) \
+          --model $(params.model) \
+          --workload-spec /workspace/workload.yaml \
+          --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
+          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv
+        echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
+        ls /workspace/data/$(params.resultsDir)

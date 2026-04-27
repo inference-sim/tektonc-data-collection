@@ -1,0 +1,56 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: install-blis
+spec:
+  description: |
+    Build the BLIS binary from inference-sim source at a pinned commit into
+    the shared source workspace. Idempotent: skips rebuild if the binary
+    already exists at the same commit SHA.
+
+  workspaces:
+    - name: source
+
+  params:
+    - name: git_repo_url
+      type: string
+      default: "https://github.com/inference-sim/inference-sim.git"
+      description: Git repository URL for inference-sim
+    - name: git_commit
+      type: string
+      description: Full commit SHA to build
+
+  steps:
+    - name: build-blis
+      image: golang:1.22
+      script: |
+        #!/bin/bash
+        set -eux
+
+        INSTALL_DIR="$(workspaces.source.path)/blis"
+        COMMIT_FILE="${INSTALL_DIR}/.commit"
+        BINARY="${INSTALL_DIR}/blis"
+        EXPECTED="$(params.git_commit)"
+
+        # Skip rebuild if binary exists at the correct commit
+        if [ -f "${COMMIT_FILE}" ] && \
+           [ "$(cat ${COMMIT_FILE})" = "${EXPECTED}" ] && \
+           [ -x "${BINARY}" ]; then
+          echo "blis already built at ${EXPECTED}, skipping"
+          exit 0
+        fi
+
+        echo "Building blis at ${EXPECTED}"
+        mkdir -p "${INSTALL_DIR}"
+
+        CLONE_DIR=$(mktemp -d)
+        git clone "$(params.git_repo_url)" "${CLONE_DIR}"
+        git -C "${CLONE_DIR}" checkout "${EXPECTED}"
+
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          go build -C "${CLONE_DIR}" -o "${BINARY}" .
+
+        chmod +x "${BINARY}"
+        echo "${EXPECTED}" > "${COMMIT_FILE}"
+        rm -rf "${CLONE_DIR}"
+        echo "Done: ${BINARY}"
