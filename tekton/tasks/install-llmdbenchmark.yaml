@@ -1,0 +1,64 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: install-llmdbenchmark
+spec:
+  description: |
+    Install llm-d-benchmark into a Python venv on the shared source workspace.
+    Uses a sentinel file to skip reinstall when the same git commit is already installed.
+
+  params:
+    - name: git_commit
+      type: string
+      description: Git commit SHA to install; written to sentinel file after install
+
+  workspaces:
+    - name: source
+
+  steps:
+    - name: install-packages
+      image: python:3.12-slim
+      script: |
+        #!/bin/bash
+        set -eux
+
+        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        SENTINEL=${VENV_PATH}/installed-commit
+        GIT_COMMIT="$(params.git_commit)"
+
+        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${GIT_COMMIT}" ]; then
+          echo "✔ llm-d-benchmark@${GIT_COMMIT} already installed, skipping"
+          exit 0
+        fi
+
+        echo "🔄 Installing required tools"
+        apt-get update -y
+        apt-get install -y git
+        rm -rf /var/lib/apt/lists/*
+
+        mkdir -p "$(workspaces.source.path)/llmdbenchmark"
+
+        if [ ! -d "${VENV_PATH}" ]; then
+          python -m venv "${VENV_PATH}"
+        fi
+        source "${VENV_PATH}/bin/activate"
+
+        echo "📦 Installing llm-d-benchmark from submodule clone"
+        pip install -e "$(workspaces.source.path)/llm-d-benchmark/"
+        echo "✔ Done installing llm-d-benchmark"
+
+        echo "📦 Installing planner (llm-d-planner)"
+        PLANNER_GIT=$(grep 'PLANNER_GIT=' "$(workspaces.source.path)/llm-d-benchmark/install.sh" | head -1 | sed 's/.*="\(.*\)"/\1/')
+        if [ -z "${PLANNER_GIT}" ]; then
+          echo "❌ Could not extract PLANNER_GIT from install.sh — check grep pattern matches file format"
+          exit 1
+        fi
+        pip install "${PLANNER_GIT}"
+        echo "✔ Done installing planner"
+        pip list
+
+        echo "🔍 Verifying installation"
+        llmdbenchmark --version
+
+        echo "${GIT_COMMIT}" > "${SENTINEL}"
+        echo "✔ Sentinel written: ${SENTINEL}"

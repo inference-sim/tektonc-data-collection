@@ -1,0 +1,120 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: llmdbenchmark-teardown
+spec:
+  description: |
+    Tear down a llm-d stack using llmdbenchmark teardown. Activates the venv
+    installed by install-llmdbenchmark and runs teardown against the namespace.
+
+    The spec_content param is a Jinja2 spec template (.yaml.j2) with absolute
+    paths for values_file, template_dir, and scenario_file already embedded by
+    prepare.py. No --base-dir flag is needed.
+
+    This task is intended to run in the finally block of a pipeline so that
+    resources are cleaned up even when standup failed partway through.
+
+  params:
+    - name: spec_content
+      type: string
+      description: >-
+        Content of the llm-d-benchmark spec Jinja2 template (.yaml.j2).
+        Must embed absolute paths for values_file, template_dir, and
+        scenario_file. If scenario_content is provided, scenario_file must
+        point at /tmp/llmdbench-config/scenario.yaml.
+    - name: scenario_content
+      type: string
+      default: ""
+      description: >-
+        Content of the scenario YAML override file. When non-empty, written to
+        /tmp/llmdbench-config/scenario.yaml, which must match the scenario_file
+        path embedded in spec_content.
+    - name: namespace
+      type: string
+      description: Kubernetes namespace
+    - name: non_admin
+      type: string
+      default: "true"
+      description: Pass --non-admin to skip cluster-admin operations
+    - name: deep
+      type: string
+      default: "false"
+      description: Pass --deep to delete all resources in the namespace
+    - name: extra_args
+      type: string
+      default: ""
+      description: Additional flags passed verbatim to teardown
+
+  volumes:
+    - name: config-scratch
+      emptyDir: {}
+
+  workspaces:
+    - name: source
+
+  steps:
+
+    - name: write-config
+      image: python:3.12-slim
+      volumeMounts:
+        - name: config-scratch
+          mountPath: /tmp/llmdbench-config
+      script: |
+        #!/bin/bash
+        set -eux
+
+        python3 -c "import sys; open('/tmp/llmdbench-config/spec.yaml.j2','w').write(sys.argv[1])" \
+          '$(params.spec_content)'
+
+        SCENARIO='$(params.scenario_content)'
+        if [ -n "${SCENARIO}" ]; then
+          python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
+            '$(params.scenario_content)'
+        fi
+
+    - name: install-and-teardown
+      image: python:3.12-slim
+      volumeMounts:
+        - name: config-scratch
+          mountPath: /tmp/llmdbench-config
+      script: |
+        #!/bin/bash
+        set -eux
+
+        # python:3.12-slim runs as root; sudo is absent but required by install.sh
+        apt-get update -y -qq
+        apt-get install -y sudo
+        rm -rf /var/lib/apt/lists/*
+        export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
+
+        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
+
+        echo "🐍 Activating venv at ${VENV_PATH}"
+        # Exit 0: if venv absent, install-llmdbenchmark never ran → standup never ran → no resources to clean up
+        if [ ! -f "${VENV_PATH}/bin/activate" ]; then
+          echo "⚠️ venv not found at ${VENV_PATH} — nothing to tear down"
+          exit 0
+        fi
+        source "${VENV_PATH}/bin/activate"
+
+        echo "🔍 Verifying llmdbenchmark installation"
+        llmdbenchmark --version
+
+        echo "🧹 Running llmdbenchmark teardown"
+        GLOBAL_ARGS="--spec ${SPEC_FILE}"
+        if [ "$(params.non_admin)" = "true" ]; then
+          GLOBAL_ARGS="${GLOBAL_ARGS} --non-admin"
+        fi
+
+        TEARDOWN_ARGS="-p $(params.namespace)"
+        if [ "$(params.deep)" = "true" ]; then
+          TEARDOWN_ARGS="${TEARDOWN_ARGS} --deep"
+        fi
+        if [ -n "$(params.extra_args)" ]; then
+          TEARDOWN_ARGS="${TEARDOWN_ARGS} $(params.extra_args)"
+        fi
+
+        # shellcheck disable=SC2086
+        llmdbenchmark ${GLOBAL_ARGS} teardown ${TEARDOWN_ARGS}
