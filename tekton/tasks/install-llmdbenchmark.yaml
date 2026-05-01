@@ -11,6 +11,10 @@ spec:
     - name: git_commit
       type: string
       description: Git commit SHA to install; written to sentinel file after install
+    - name: git_repo_url
+      type: string
+      default: "https://github.com/llm-d/llm-d-benchmark.git"
+      description: Git repository URL for llm-d-benchmark
 
   workspaces:
     - name: source
@@ -18,16 +22,28 @@ spec:
   steps:
     - name: install-packages
       image: python:3.12-slim
+      securityContext:
+        runAsUser: 0
+      env:
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-token
+              key: token
       script: |
         #!/bin/bash
         set -eux
 
+        export GITHUB_TOKEN="${GITHUB_TOKEN}"
+
         VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
         SENTINEL=${VENV_PATH}/installed-commit
         GIT_COMMIT="$(params.git_commit)"
+        REPO_URL="$(params.git_repo_url)"
+        SENTINEL_KEY="${REPO_URL}@${GIT_COMMIT}"
 
-        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${GIT_COMMIT}" ]; then
-          echo "✔ llm-d-benchmark@${GIT_COMMIT} already installed, skipping"
+        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${SENTINEL_KEY}" ]; then
+          echo "✔ llm-d-benchmark already installed (${SENTINEL_KEY}), skipping"
           exit 0
         fi
 
@@ -36,15 +52,23 @@ spec:
         apt-get install -y git
         rm -rf /var/lib/apt/lists/*
 
-        mkdir -p "$(workspaces.source.path)/llmdbenchmark"
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        CURRENT_REMOTE=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
+        if [ ! -d "${REPO_DIR}/.git" ] || [ "${CURRENT_REMOTE}" != "${REPO_URL}" ]; then
+          echo "📥 Cloning llm-d-benchmark@${GIT_COMMIT} from ${REPO_URL}"
+          rm -rf "${REPO_DIR}"
+          git clone "${REPO_URL}" "${REPO_DIR}"
+        fi
+        git -C "${REPO_DIR}" fetch origin
+        git -C "${REPO_DIR}" checkout "${GIT_COMMIT}"
 
         if [ ! -d "${VENV_PATH}" ]; then
           python -m venv "${VENV_PATH}"
         fi
         source "${VENV_PATH}/bin/activate"
 
-        echo "📦 Installing llm-d-benchmark from submodule clone"
-        pip install -e "$(workspaces.source.path)/llm-d-benchmark/"
+        echo "📦 Installing llm-d-benchmark"
+        pip install -e "${REPO_DIR}/"
         echo "✔ Done installing llm-d-benchmark"
 
         echo "📦 Installing planner (llm-d-planner)"
@@ -60,5 +84,5 @@ spec:
         echo "🔍 Verifying installation"
         llmdbenchmark --version
 
-        echo "${GIT_COMMIT}" > "${SENTINEL}"
+        echo "${SENTINEL_KEY}" > "${SENTINEL}"
         echo "✔ Sentinel written: ${SENTINEL}"
