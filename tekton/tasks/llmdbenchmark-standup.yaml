@@ -1,0 +1,148 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: llmdbenchmark-standup
+spec:
+  description: |
+    Stand up a complete llm-d stack using llmdbenchmark standup. Activates the
+    venv installed by install-llmdbenchmark, runs standup, then discovers the
+    gateway endpoint via llmdbenchmark run --list-endpoints and emits it as a
+    task result.
+
+    Expects two prerequisite tasks to have run:
+      - install-llmdbenchmark: creates the Python venv
+      - (implicit) workspace setup: llm-d-benchmark source is on the workspace
+
+    The spec_content param is a Jinja2 spec template (.yaml.j2) with absolute
+    paths for values_file, template_dir, and scenario_file already embedded by
+    prepare.py. No --base-dir flag is needed.
+
+  params:
+    - name: spec_content
+      type: string
+      description: >-
+        Content of the llm-d-benchmark spec Jinja2 template (.yaml.j2).
+        Must embed absolute paths for values_file, template_dir, and
+        scenario_file. If scenario_content is provided, scenario_file must
+        point at /tmp/llmdbench-config/scenario.yaml.
+    - name: scenario_content
+      type: string
+      default: ""
+      description: >-
+        Content of the scenario YAML override file. When non-empty, written to
+        /tmp/llmdbench-config/scenario.yaml, which must match the scenario_file
+        path embedded in spec_content.
+    - name: namespace
+      type: string
+      description: Kubernetes namespace
+    - name: non_admin
+      type: string
+      default: "true"
+      description: Pass --non-admin to skip cluster-admin operations
+    - name: skip_smoketest
+      type: string
+      default: "false"
+      description: Skip post-standup smoketest
+    - name: extra_args
+      type: string
+      default: ""
+      description: Additional flags passed verbatim to standup
+
+  volumes:
+    - name: config-scratch
+      emptyDir: {}
+
+  workspaces:
+    - name: source
+
+  results:
+    - name: endpoint
+      description: Gateway endpoint URL extracted via llmdbenchmark run --list-endpoints
+
+  steps:
+
+    - name: write-config
+      image: python:3.12-slim
+      volumeMounts:
+        - name: config-scratch
+          mountPath: /tmp/llmdbench-config
+      env:
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-token
+              key: token
+      script: |
+        #!/bin/bash
+        set -eux
+
+        export GITHUB_TOKEN="${GITHUB_TOKEN}"
+        
+        python3 -c "import sys; open('/tmp/llmdbench-config/spec.yaml.j2','w').write(sys.argv[1])" \
+          '$(params.spec_content)'
+
+        SCENARIO='$(params.scenario_content)'
+        if [ -n "${SCENARIO}" ]; then
+          python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
+            '$(params.scenario_content)'
+        fi
+
+    - name: install-and-standup
+      image: python:3.12-slim
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: config-scratch
+          mountPath: /tmp/llmdbench-config
+      script: |
+        #!/bin/bash
+        set -eux
+
+        # python:3.12-slim runs as root; sudo is absent but required by install.sh
+        apt-get update -y -qq
+        apt-get install -y sudo
+        export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
+
+        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
+
+        echo "🐍 Activating venv at ${VENV_PATH}"
+        if [ ! -f "${VENV_PATH}/bin/activate" ]; then
+          echo "❌ venv not found at ${VENV_PATH} — run install-llmdbenchmark first"
+          exit 1
+        fi
+        source "${VENV_PATH}/bin/activate"
+
+        echo "🔍 Verifying llmdbenchmark installation"
+        llmdbenchmark --version
+
+        echo "🚀 Running llmdbenchmark standup"
+        GLOBAL_ARGS="--spec ${SPEC_FILE}"
+        if [ "$(params.non_admin)" = "true" ]; then
+          GLOBAL_ARGS="${GLOBAL_ARGS} --non-admin"
+        fi
+
+        STANDUP_ARGS="-p $(params.namespace)"
+        if [ "$(params.skip_smoketest)" = "true" ]; then
+          STANDUP_ARGS="${STANDUP_ARGS} --skip-smoketest"
+        fi
+        if [ -n "$(params.extra_args)" ]; then
+          STANDUP_ARGS="${STANDUP_ARGS} $(params.extra_args)"
+        fi
+
+        # shellcheck disable=SC2086
+        llmdbenchmark ${GLOBAL_ARGS} standup ${STANDUP_ARGS}
+
+        echo "🔎 Discovering gateway endpoint"
+        ENDPOINT=$(llmdbenchmark --spec "${SPEC_FILE}" run \
+          --list-endpoints -p "$(params.namespace)" 2>&1 \
+          | sed -n 's/.*--endpoint-url \(http[^ \\]*\).*/\1/p' | head -1)
+
+        if [ -z "${ENDPOINT}" ]; then
+          echo "❌ Failed to discover endpoint via llmdbenchmark run --list-endpoints"
+          exit 1
+        fi
+
+        echo "✅ Endpoint discovered: ${ENDPOINT}"
+        printf "%s" "${ENDPOINT}" > "$(results.endpoint.path)"

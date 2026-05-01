@@ -1,0 +1,88 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: install-llmdbenchmark
+spec:
+  description: |
+    Install llm-d-benchmark into a Python venv on the shared source workspace.
+    Uses a sentinel file to skip reinstall when the same git commit is already installed.
+
+  params:
+    - name: git_commit
+      type: string
+      description: Git commit SHA to install; written to sentinel file after install
+    - name: git_repo_url
+      type: string
+      default: "https://github.com/llm-d/llm-d-benchmark.git"
+      description: Git repository URL for llm-d-benchmark
+
+  workspaces:
+    - name: source
+
+  steps:
+    - name: install-packages
+      image: python:3.12-slim
+      securityContext:
+        runAsUser: 0
+      env:
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-token
+              key: token
+      script: |
+        #!/bin/bash
+        set -eux
+
+        export GITHUB_TOKEN="${GITHUB_TOKEN}"
+
+        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        SENTINEL=${VENV_PATH}/installed-commit
+        GIT_COMMIT="$(params.git_commit)"
+        REPO_URL="$(params.git_repo_url)"
+        SENTINEL_KEY="${REPO_URL}@${GIT_COMMIT}"
+
+        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${SENTINEL_KEY}" ]; then
+          echo "✔ llm-d-benchmark already installed (${SENTINEL_KEY}), skipping"
+          exit 0
+        fi
+
+        echo "🔄 Installing required tools"
+        apt-get update -y
+        apt-get install -y git
+        rm -rf /var/lib/apt/lists/*
+
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        CURRENT_REMOTE=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
+        if [ ! -d "${REPO_DIR}/.git" ] || [ "${CURRENT_REMOTE}" != "${REPO_URL}" ]; then
+          echo "📥 Cloning llm-d-benchmark@${GIT_COMMIT} from ${REPO_URL}"
+          rm -rf "${REPO_DIR}"
+          git clone "${REPO_URL}" "${REPO_DIR}"
+        fi
+        git -C "${REPO_DIR}" fetch origin
+        git -C "${REPO_DIR}" checkout "${GIT_COMMIT}"
+
+        if [ ! -d "${VENV_PATH}" ]; then
+          python -m venv "${VENV_PATH}"
+        fi
+        source "${VENV_PATH}/bin/activate"
+
+        echo "📦 Installing llm-d-benchmark"
+        pip install -e "${REPO_DIR}/"
+        echo "✔ Done installing llm-d-benchmark"
+
+        echo "📦 Installing planner (llm-d-planner)"
+        PLANNER_GIT=$(grep 'PLANNER_GIT=' "$(workspaces.source.path)/llm-d-benchmark/install.sh" | head -1 | sed 's/.*="\(.*\)"/\1/')
+        if [ -z "${PLANNER_GIT}" ]; then
+          echo "❌ Could not extract PLANNER_GIT from install.sh — check grep pattern matches file format"
+          exit 1
+        fi
+        pip install "${PLANNER_GIT}"
+        echo "✔ Done installing planner"
+        pip list
+
+        echo "🔍 Verifying installation"
+        llmdbenchmark --version
+
+        echo "${SENTINEL_KEY}" > "${SENTINEL}"
+        echo "✔ Sentinel written: ${SENTINEL}"

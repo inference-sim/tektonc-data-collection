@@ -53,7 +53,16 @@ Each Step is implemented by a Container in the Pod.
         --dry-run=client -o yaml | kubectl apply -f -
     ```
 
-3. Create a secret containing your s3 credentials `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+3.  Create a secret containing a GitHub personal access token (PAT):
+
+    ```shell
+    kubectl create secret generic github-token \
+        -n ${NAMESPACE} \
+        --from-literal=token=${GITHUB_PAT} \
+        --dry-run=client -o yaml | kubectl apply -f -
+    ```
+
+4. Create a secret containing your s3 credentials `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 
     ```shell
     kubectl create secret generic s3-secret \
@@ -63,7 +72,7 @@ Each Step is implemented by a Container in the Pod.
         --dry-run=client -o yaml | kubectl apply -f -
     ```
 
-4. Give the tasks needed permissions
+5. Give the tasks needed permissions
     ```shell
     envsubst '$NAMESPACE' < tekton/roles.yaml | kubectl apply -f -
     ```
@@ -72,7 +81,7 @@ Each Step is implemented by a Container in the Pod.
     oc adm policy add-scc-to-user anyuid -z default -n $NAMESPACE
     ```
 
-5. Create RWX PVC `model-pvc` (300Gi) and `data-pvc` (20Gi) and `source-pvc` (20Gi) for storing models and execution results, respectively. These PVC is shared between all tasks.  For example:
+6. Create RWX PVC `model-pvc` (300Gi) and `data-pvc` (20Gi) and `source-pvc` (20Gi) for storing models and execution results, respectively. These PVC is shared between all tasks.  For example:
     ```shell
     export PVC_NAME=model-pvc
     export PVC_SIZE=300Gi
@@ -102,7 +111,7 @@ Each Step is implemented by a Container in the Pod.
         volumeMode: Filesystem
     EOF
     ```
-5. Install `tkn` cli:
+7. Install `tkn` cli:
 
     ```shell
     brew install tektoncd-cli
@@ -122,7 +131,7 @@ Each Step is implemented by a Container in the Pod.
     done
     ```
 
-2. Build and deploy the pipeline:
+2. Build and deploy the `Pipeline`:
 
     ```shell
     python tektonc/tektonc.py \
@@ -134,10 +143,7 @@ Each Step is implemented by a Container in the Pod.
     kubectl apply -f tektoncsample/prefix-caching/pipeline.yaml
     ```
 
-3. Deploy the PipelineRun.
-
-    Run the pipeline by deploying the PipelineRun:
-
+3. Run the `Pipeline`; i.e., deploy the `PipelineRun`:
 
     ```shell
     kubectl apply -f tektoncsample/prefix-caching/pipelinerun.yaml
