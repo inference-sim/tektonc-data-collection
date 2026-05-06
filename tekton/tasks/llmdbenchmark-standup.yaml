@@ -47,6 +47,12 @@ spec:
       type: string
       default: ""
       description: Additional flags passed verbatim to standup
+    - name: plans_dir
+      type: string
+      default: ""
+      description: >-
+        Relative path on the data workspace for persisting rendered plans.
+        When set, plans are copied to data/<plans_dir>/ after standup.
 
   volumes:
     - name: config-scratch
@@ -54,6 +60,8 @@ spec:
 
   workspaces:
     - name: source
+    - name: data
+      optional: true
 
   results:
     - name: endpoint
@@ -77,14 +85,23 @@ spec:
         set -eux
 
         export GITHUB_TOKEN="${GITHUB_TOKEN}"
-        
+
         python3 -c "import sys; open('/tmp/llmdbench-config/spec.yaml.j2','w').write(sys.argv[1])" \
           '$(params.spec_content)'
 
         SCENARIO='$(params.scenario_content)'
         if [ -n "${SCENARIO}" ]; then
-          python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
-            '$(params.scenario_content)'
+          PLANS_DIR="$(params.plans_dir)"
+          if [ -n "${PLANS_DIR}" ] && [ -d "$(workspaces.data.path)" ]; then
+            WORK_DIR="$(workspaces.data.path)/${PLANS_DIR}"
+            mkdir -p "${WORK_DIR}"
+            pip install pyyaml -q
+            python3 -c "import sys,yaml; s=yaml.safe_load(sys.argv[1]); sc=s.get('scenario',[]); sc and sc[0].update({'workDir':sys.argv[2]}); open('/tmp/llmdbench-config/scenario.yaml','w').write(yaml.dump(s,default_flow_style=False))" \
+              "${SCENARIO}" "${WORK_DIR}"
+          else
+            python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
+              "${SCENARIO}"
+          fi
         fi
 
     - name: install-and-standup
@@ -116,6 +133,9 @@ spec:
 
         echo "🔍 Verifying llmdbenchmark installation"
         llmdbenchmark --version
+
+        echo "📄 specContent references:"
+        python3 -c "import yaml;from pathlib import Path;spec=yaml.safe_load(open('${SPEC_FILE}').read());[print(f'  {k}: {spec.get(k,{}).get(\"path\",\"\")} [{\"OK\" if Path(spec.get(k,{}).get(\"path\",\"\")).exists() else \"MISSING\"}]') for k in ('values_file','template_dir','scenario_file')];sp=spec.get('scenario_file',{}).get('path','');Path(sp).exists() and (print('  --- scenario content ---'),print(open(sp).read()[:2000]),print('  --- end scenario ---'))"
 
         echo "🚀 Running llmdbenchmark standup"
         GLOBAL_ARGS="--spec ${SPEC_FILE}"
