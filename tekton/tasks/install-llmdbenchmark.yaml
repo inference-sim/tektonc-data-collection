@@ -54,10 +54,16 @@ spec:
 
         REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
         CURRENT_REMOTE=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
-        if [ ! -d "${REPO_DIR}/.git" ] || [ "${CURRENT_REMOTE}" != "${REPO_URL}" ]; then
+        if [ ! -d "${REPO_DIR}/.git" ]; then
           echo "📥 Cloning llm-d-benchmark@${GIT_COMMIT} from ${REPO_URL}"
           rm -rf "${REPO_DIR}"
           git clone "${REPO_URL}" "${REPO_DIR}"
+        elif [ "${CURRENT_REMOTE}" != "${REPO_URL}" ]; then
+          # Update remote in-place rather than rm + re-clone. RWX PVCs (NFS/GPFS)
+          # often have stale file handles from prior pods, causing rm -rf to fail
+          # with "Stale file handle" on cached .pyc files in the venv.
+          echo "🔄 Updating remote: ${CURRENT_REMOTE} → ${REPO_URL}"
+          git -C "${REPO_DIR}" remote set-url origin "${REPO_URL}"
         fi
         git -C "${REPO_DIR}" fetch origin
         git -C "${REPO_DIR}" checkout "${GIT_COMMIT}"
