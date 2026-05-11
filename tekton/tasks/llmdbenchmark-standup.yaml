@@ -41,8 +41,12 @@ spec:
       description: Pass --non-admin to skip cluster-admin operations
     - name: skip_smoketest
       type: string
-      default: "false"
-      description: Skip post-standup smoketest
+      default: "true"
+      description: Skip the inline post-standup smoketest (smoketest runs as a separate step after a delay)
+    - name: smoketest_delay
+      type: string
+      default: "60"
+      description: Seconds to wait after standup before running the separate smoketest step
     - name: extra_args
       type: string
       default: ""
@@ -166,3 +170,63 @@ spec:
 
         echo "✅ Endpoint discovered: ${ENDPOINT}"
         printf "%s" "${ENDPOINT}" > "$(results.endpoint.path)"
+
+        # Persist CLI tools to the workspace so later steps/tasks can reuse them
+        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
+        mkdir -p "${TOOL_BIN}"
+        for tool in kubectl helmfile helm kustomize yq jq crane skopeo; do
+          if [ -f "/usr/local/bin/${tool}" ]; then
+            cp "/usr/local/bin/${tool}" "${TOOL_BIN}/"
+          fi
+        done
+        echo "🔧 Persisted CLI tools to ${TOOL_BIN}"
+
+    - name: smoketest-delay
+      image: python:3.12-slim
+      script: |
+        #!/bin/bash
+        if [ "$(params.skip_smoketest)" != "true" ]; then
+          echo "⏩ Inline smoketest enabled — skipping separate smoketest steps"
+          exit 0
+        fi
+        DELAY="$(params.smoketest_delay)"
+        if [ "${DELAY}" -gt 0 ] 2>/dev/null; then
+          echo "⏳ Waiting ${DELAY}s for gateway/routing to converge before smoketest..."
+          sleep "${DELAY}"
+          echo "✅ Delay complete"
+        else
+          echo "⏩ No smoketest delay configured"
+        fi
+
+    - name: smoketest
+      image: python:3.12-slim
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: config-scratch
+          mountPath: /tmp/llmdbench-config
+      script: |
+        #!/bin/bash
+        set -eux
+
+        if [ "$(params.skip_smoketest)" != "true" ]; then
+          echo "⏩ Inline smoketest enabled — skipping separate smoketest step"
+          exit 0
+        fi
+
+        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
+        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
+
+        export PATH="${TOOL_BIN}:${PATH}"
+        source "${VENV_PATH}/bin/activate"
+
+        GLOBAL_ARGS="--spec ${SPEC_FILE}"
+        if [ "$(params.non_admin)" = "true" ]; then
+          GLOBAL_ARGS="${GLOBAL_ARGS} --non-admin"
+        fi
+
+        echo "🔍 Running smoketest"
+        # shellcheck disable=SC2086
+        llmdbenchmark ${GLOBAL_ARGS} smoketest -p "$(params.namespace)"
+        echo "✅ Smoketest passed"

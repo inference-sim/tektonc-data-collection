@@ -91,11 +91,17 @@ spec:
 
         export GITHUB_TOKEN="${GITHUB_TOKEN}"
 
-        # python:3.12-slim runs as root; sudo is absent but required by install.sh
-        apt-get update -y -qq
-        apt-get install -y sudo
-        export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
-        (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
+        # Reuse CLI tools persisted by standup if available; otherwise full install
+        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
+        if [ -x "${TOOL_BIN}/kubectl" ] && [ -x "${TOOL_BIN}/helmfile" ]; then
+          echo "🔧 Reusing cached CLI tools from ${TOOL_BIN}"
+          export PATH="${TOOL_BIN}:${PATH}"
+        else
+          apt-get update -y -qq
+          apt-get install -y sudo
+          export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
+          (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
+        fi
 
         VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
         SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
