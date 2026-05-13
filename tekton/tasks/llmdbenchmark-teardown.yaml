@@ -85,6 +85,11 @@ spec:
             secretKeyRef:
               name: github-token
               key: token
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: HF_TOKEN
       script: |
         #!/bin/bash
         set -eux
