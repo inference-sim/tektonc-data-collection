@@ -138,7 +138,9 @@ spec:
         # The spec's num_requests takes precedence over CLI flags
 
         echo "🔍 BLIS observe command:"
-        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --record-itl --itl-output itl.csv"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv"
+        echo ""
+        echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
         echo ""
 
         ${BLIS_BINARY} observe \
@@ -147,6 +149,7 @@ spec:
           --workload-spec "${WORKLOAD_SPEC}" \
           --trace-header "header.yaml" \
           --trace-data "data.csv" \
+          --warmup-requests 50 \
           --record-itl \
           --itl-output "itl.csv" \
           > >(tee -a stdout.log) \
