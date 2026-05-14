@@ -97,7 +97,7 @@ def validate_all(experiments, models, clusters, patterns_data):
     """
     errors = []
     valid_hw = {k for k in clusters if k != "namespace"}
-    valid_harnesses = {"inference-perf", "orc"}
+    valid_harnesses = {"inference-perf", "orc", "blis-orc"}
 
     # Extract arrival patterns and workloads from patterns_data
     arrival_patterns = patterns_data.get("arrival_patterns", {})
