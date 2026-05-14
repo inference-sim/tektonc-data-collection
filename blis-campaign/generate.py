@@ -11,6 +11,10 @@ import sys
 import yaml
 from pathlib import Path
 
+# Import combine_workload for dynamic workload generation
+sys.path.insert(0, str(Path(__file__).parent))
+from combine_workload import combine_workload
+
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -50,45 +54,96 @@ def load_clusters(path):
     return load_yaml(path)
 
 
-def load_workloads(path):
-    """Load workloads.yaml config."""
-    return load_yaml(path)
+def generate_workload_for_experiment(exp, patterns_file):
+    """
+    Generate workload dynamically for an experiment.
+
+    Args:
+        exp: Experiment dict with 'workload' and 'arrival_pattern' fields
+        patterns_file: Path to arrival-and-workload-patterns.yaml
+
+    Returns:
+        dict: BLIS native workload structure
+
+    Raises:
+        ValueError: If workload generation fails
+    """
+    try:
+        workload_data = combine_workload(
+            patterns_file=patterns_file,
+            workload_name=exp["workload"],
+            arrival_pattern=exp["arrival_pattern"],
+            output_file=None,  # Don't write to file
+            seed=42
+        )
+        return workload_data
+    except ValueError as e:
+        raise ValueError(f"Experiment #{exp['id']}: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Experiment #{exp['id']}: Failed to generate workload: {e}")
 
 
 # ---------------------------------------------------------------------------
 # Validation (collect all errors, don't fail on first)
 # ---------------------------------------------------------------------------
 
-def validate_all(experiments, models, clusters, workloads):
-    """Validate all experiments. Returns list of error strings (empty = valid)."""
+def validate_all(experiments, models, clusters, patterns_data):
+    """
+    Validate all experiments. Returns list of error strings (empty = valid).
+
+    Args:
+        patterns_data: Dict from arrival-and-workload-patterns.yaml with
+                      'arrival_patterns' and 'workloads' keys
+    """
     errors = []
     valid_hw = {k for k in clusters if k != "namespace"}
     valid_harnesses = {"inference-perf", "orc"}
 
+    # Extract arrival patterns and workloads from patterns_data
+    arrival_patterns = patterns_data.get("arrival_patterns", {})
+    workloads = patterns_data.get("workloads", {})
+
     for exp in experiments:
         eid = exp.get("id", "?")
+
+        # Existing validations
         if exp["model"] not in models:
             errors.append(f"Experiment #{eid}: unknown model '{exp['model']}'")
         if exp["hw"] not in valid_hw:
             errors.append(f"Experiment #{eid}: unknown hw '{exp['hw']}'")
+
+        # Validate workload exists
         if exp["workload"] not in workloads:
             errors.append(f"Experiment #{eid}: unknown workload '{exp['workload']}'")
 
-        # Validate harness field (optional, defaults to inference-perf)
+        # Validate arrival_pattern exists
+        if "arrival_pattern" not in exp:
+            errors.append(f"Experiment #{eid}: missing 'arrival_pattern' field")
+        elif exp["arrival_pattern"] not in arrival_patterns:
+            errors.append(f"Experiment #{eid}: unknown arrival_pattern '{exp['arrival_pattern']}'")
+
+        # Validate harness
         harness = exp.get("harness", "inference-perf")
         if harness not in valid_harnesses:
             errors.append(f"Experiment #{eid}: unknown harness '{harness}' (valid: {valid_harnesses})")
 
-        # Validate workload spec compatibility with harness
-        if exp["workload"] in workloads:
+        # Validate combination is valid (workload has data for arrival_pattern)
+        if exp["workload"] in workloads and "arrival_pattern" in exp:
             wl = workloads[exp["workload"]]
-            spec_type = wl.get("spec", "inference_perf")
-
-            if spec_type == "blis_native" and harness != "orc":
+            if exp["arrival_pattern"] not in wl:
+                available = ", ".join(wl.keys())
                 errors.append(
-                    f"Experiment #{eid}: workload '{exp['workload']}' has spec=blis_native "
-                    f"but harness={harness} (must be 'orc')"
+                    f"Experiment #{eid}: workload '{exp['workload']}' does not have "
+                    f"data for arrival_pattern '{exp['arrival_pattern']}'. "
+                    f"Available: {available}"
                 )
+
+        # Dynamic workloads require ORC harness
+        if harness not in ["orc", "blis-orc"]:
+            errors.append(
+                f"Experiment #{eid}: dynamically generated workloads require "
+                f"harness='orc' or 'blis-orc', got harness='{harness}'"
+            )
 
     return errors
 
@@ -148,8 +203,17 @@ DEFAULT_KV_OFFLOAD_GB = 8.0
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
 
-def build_values(exp, base_values, models, clusters, workloads):
-    """Build per-experiment values.yaml from base template + experiment config."""
+def build_values(exp, base_values, models, clusters, patterns_file):
+    """
+    Build per-experiment values.yaml from base template + experiment config.
+
+    Args:
+        exp: Experiment dict
+        base_values: Base values template
+        models: Models config dict
+        clusters: Clusters config dict
+        patterns_file: Path to arrival-and-workload-patterns.yaml
+    """
     v = copy.deepcopy(base_values)
 
     # Resolve model (use pre-quantized FP8 checkpoint when available)
@@ -201,56 +265,25 @@ def build_values(exp, base_values, models, clusters, workloads):
         exp, extra_args, is_prequantized=is_prequantized
     )
 
-    # Workload profile - translate based on harness type and spec
-    wl = workloads[exp["workload"]]
+    # Workload profile - generate dynamically
+    wl = generate_workload_for_experiment(exp, patterns_file)
     harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
-    spec_type = wl.get("spec", "inference_perf")    # Default to inference_perf for backward compatibility
 
-    if harness == "orc":
-        # ORC harness: use appropriate format
-        if spec_type == "inference_perf":
-            # Pass through inference-perf format directly to BLIS observe
-            # Reference: inference-sim/testdata/trained_physics_iter29.json
-            # Calculate total requests and horizon from stages
-            horizon = sum(stage["duration"] for stage in wl["load"]["stages"])
-            total_requests = sum(int(stage["rate"] * stage["duration"]) for stage in wl["load"]["stages"])
+    # Dynamic workloads are always BLIS native format
+    if harness in ["orc", "blis-orc"]:
+        v["workload"]["orcSpec"] = wl
 
-            v["workload"]["orcSpec"] = {
-                "version": "2",
-                "seed": 42,
-                "num_requests": total_requests,
-                "inference_perf": {
-                    "stages": wl["load"]["stages"],
-                    "shared_prefix": wl["data"]["shared_prefix"]
-                }
-            }
-            v["workload"]["horizon"] = horizon
-        elif spec_type == "blis_native":
-            # Use BLIS native format directly (cohorts, diurnal, multi-client, etc.)
-            v["workload"]["orcSpec"] = wl["blis"]
-            # Calculate horizon from num_requests and aggregate_rate
-            # Horizon is a time bound (seconds) for pipeline scheduling
-            # Use 2× mean to account for bursty arrival processes (gamma, diurnal, etc.)
-            num_requests = wl["blis"].get("num_requests", 0)
-            aggregate_rate = wl["blis"].get("aggregate_rate", 1.0)
-            horizon = int(2 * num_requests / aggregate_rate) if aggregate_rate > 0 else 0
-            v["workload"]["horizon"] = horizon
-        else:
-            raise ValueError(f"Unsupported workload spec type: {spec_type}")
+        # Calculate horizon from num_requests and aggregate_rate
+        num_requests = wl.get("num_requests", 0)
+        aggregate_rate = wl.get("aggregate_rate", 1.0)
+        horizon = int(2 * num_requests / aggregate_rate) if aggregate_rate > 0 else 0
+        v["workload"]["horizon"] = horizon
     else:
-        # inference-perf harness (default)
-        if spec_type == "inference_perf":
-            # Use existing format
-            v["workload"]["profileTemplate"]["load"] = wl["load"]
-            v["workload"]["profileTemplate"]["data"] = wl["data"]
-        elif spec_type == "blis_native":
-            # Error: can't run BLIS-native workload on inference-perf harness
-            raise ValueError(
-                f"Workload '{exp['workload']}' has spec=blis_native "
-                f"and cannot be used with harness=inference-perf"
-            )
-        else:
-            raise ValueError(f"Unsupported workload spec type: {spec_type}")
+        raise ValueError(
+            f"Dynamically generated workloads use BLIS native format "
+            f"and require harness='orc' or 'blis-orc'. "
+            f"Experiment #{exp['id']} has harness='{harness}'"
+        )
 
     return v
 
@@ -262,6 +295,11 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
     Observability templates handle ONLY observability features (tracing, KV events).
     """
     overrides = []
+
+    # vLLM image version (if explicitly specified in experiments.json)
+    if "vllm_version" in exp:
+        vllm_version = exp["vllm_version"]
+        overrides.append(f'decode.containers[name="vllm"].image=vllm/vllm-openai:v{vllm_version}')
 
     # FP8 quantization — skip if using a pre-quantized checkpoint
     # (weights are already FP8 on disk, vLLM auto-detects from config.json)
@@ -294,6 +332,28 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
         overrides.append(
             'decode.containers[name="vllm"].args=--enable-expert-parallel'
         )
+
+    # Block size (explicitly set if specified in experiments.json)
+    if "block_size" in exp:
+        overrides.append(f'decode.containers[name="vllm"].args=--block-size={exp["block_size"]}')
+
+    # Prefix caching - only pass flag if explicitly set in experiments.json
+    if "enable_prefix_caching" in exp:
+        if exp["enable_prefix_caching"]:
+            overrides.append('decode.containers[name="vllm"].args=--enable-prefix-caching')
+        else:
+            overrides.append('decode.containers[name="vllm"].args=--no-enable-prefix-caching')
+    # If not set, let vLLM use its default (True in v0.17.1)
+
+    # Chunked prefill - only pass flag if explicitly set to True
+    if exp.get("enable_chunked_prefill"):
+        overrides.append('decode.containers[name="vllm"].args=--enable-chunked-prefill')
+    # If False or not set, omit flag (vLLM defaults to False)
+
+    # Priority scheduling policy - only pass flag if explicitly set to True
+    if exp.get("priority"):
+        overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
+    # If False or not set, omit flag (vLLM defaults to fcfs - first come first serve)
 
     # Model-specific extra args
     for arg in model_extra_args:
@@ -367,9 +427,10 @@ def generate_campaign(args):
     experiments = load_experiments(args.experiments)
     models = load_models(config_dir / "models.yaml")
     clusters = load_clusters(config_dir / "clusters.yaml")
-    workloads = load_workloads(
-        Path(__file__).parent.parent / "workloads.yaml"
-    )
+
+    # Load arrival and workload patterns
+    patterns_file = Path(__file__).parent / "arrival-and-workload-patterns.yaml"
+    patterns_data = load_yaml(patterns_file)
 
     # Load base values for each harness type
     tektoncsample_base = Path(__file__).parent.parent / "tektoncsample"
@@ -405,7 +466,7 @@ def generate_campaign(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Validate all experiments first (fail-fast)
-    errors = validate_all(experiments, models, clusters, workloads)
+    errors = validate_all(experiments, models, clusters, patterns_data)
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -447,7 +508,7 @@ def generate_campaign(args):
                           else base_values_inference_perf_stock)
 
         # 3. Build and save values.yaml
-        values = build_values(exp, base_values, models, clusters, workloads)
+        values = build_values(exp, base_values, models, clusters, patterns_file)
         write_yaml(exp_dir / "values.yaml", values)
 
         # 4. Compile pipeline.yaml via tektonc
