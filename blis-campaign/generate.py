@@ -273,11 +273,9 @@ def build_values(exp, base_values, models, clusters, patterns_file):
     if harness in ["orc", "blis-orc"]:
         v["workload"]["orcSpec"] = wl
 
-        # Calculate horizon from num_requests and aggregate_rate
-        num_requests = wl.get("num_requests", 0)
-        aggregate_rate = wl.get("aggregate_rate", 1.0)
-        horizon = int(2 * num_requests / aggregate_rate) if aggregate_rate > 0 else 0
-        v["workload"]["horizon"] = horizon
+        # Set horizon to 21 minutes (1260 seconds) for ORC experiments
+        # This bounds the observe phase duration
+        v["workload"]["horizon"] = 1260
     else:
         raise ValueError(
             f"Dynamically generated workloads use BLIS native format "
