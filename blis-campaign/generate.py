@@ -348,10 +348,10 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
         overrides.append('decode.containers[name="vllm"].args=--enable-chunked-prefill')
     # If False or not set, omit flag (vLLM defaults to False)
 
-    # Priority scheduling policy - only pass flag if explicitly set to True
-    if exp.get("priority"):
+    # Priority scheduling policy - check scheduling field in experiments.json
+    if exp.get("scheduling") == "priority":
         overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
-    # If False or not set, omit flag (vLLM defaults to fcfs - first come first serve)
+    # If "fcfs" or not set, omit flag (vLLM defaults to fcfs - first come first serve)
 
     # Model-specific extra args
     for arg in model_extra_args:
