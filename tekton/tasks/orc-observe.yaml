@@ -135,9 +135,12 @@ spec:
         cd "${OBSERVE_DIR}"
 
         # Build horizon flag if provided
+        # BLIS observe expects horizon in microseconds, but pipeline param is in seconds
         HORIZON_FLAG=""
         if [ -n "$(params.horizon)" ] && [ "$(params.horizon)" != "0" ]; then
-          HORIZON_FLAG="--horizon $(params.horizon)"
+          HORIZON_SECONDS=$(params.horizon)
+          HORIZON_MICROSECONDS=$((HORIZON_SECONDS * 1000000))
+          HORIZON_FLAG="--horizon ${HORIZON_MICROSECONDS}"
         fi
 
         echo "🔍 BLIS observe command:"
