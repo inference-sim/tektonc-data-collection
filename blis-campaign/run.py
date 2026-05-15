@@ -118,14 +118,14 @@ def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None, safe_only
         # Filter by specific IDs
         if only_ids and exp["id"] not in only_ids:
             continue
-        # Filter by safe status (default: only run safe experiments)
+        # Filter by safe status (optional: use --safe-only to filter)
         if safe_only and exp.get("safe", "uncalibrated") != "safe":
             skipped_unsafe += 1
             continue
 
         result.append(d)
     if skipped_unsafe:
-        log.info(f"Skipped {skipped_unsafe} non-safe experiments (use --all to include)")
+        log.info(f"Skipped {skipped_unsafe} non-safe experiments (--safe-only is enabled)")
     return result
 
 
