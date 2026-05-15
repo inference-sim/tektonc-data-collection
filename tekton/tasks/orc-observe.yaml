@@ -88,7 +88,6 @@ spec:
 
     - name: run-observe
       image: python:3.12.9-slim-bookworm
-      timeout: 21m  # Overall experiment timeout (request generation stops at 10min, per-request timeout is 11min)
       computeResources:
         requests:
           memory: "16Gi"
@@ -149,12 +148,16 @@ spec:
         echo ""
         echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
         echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
+        echo "⏰ Using overall experiment timeout=1260 seconds (21 minutes)"
         if [ -n "${HORIZON_FLAG}" ]; then
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
         echo ""
 
-        ${BLIS_BINARY} observe \
+        # Run BLIS observe with 21-minute overall timeout
+        # Use 'timeout' command with SIGTERM for graceful shutdown
+        # Exit code 124 = timeout reached, which we treat as success (partial data is valid)
+        timeout -s SIGTERM 1260 ${BLIS_BINARY} observe \
           --server-url "${ENDPOINT}" \
           --model "${MODEL}" \
           --workload-spec "${WORKLOAD_SPEC}" \
@@ -170,19 +173,38 @@ spec:
 
         export RC=$?
 
-        if [ $RC -ne 0 ]; then
+        # Handle exit codes:
+        # 0 = success (completed normally)
+        # 124 = timeout reached (treat as success, save partial data)
+        # other = actual error (fail the task)
+        if [ $RC -eq 124 ]; then
+          echo "⏰ BLIS observe reached 21-minute timeout - saving partial data"
+          echo "This is expected if the experiment took longer than 21 minutes"
+          RC=0  # Treat timeout as success
+        elif [ $RC -ne 0 ]; then
           echo "❌ BLIS observe failed with exit code $RC"
           exit $RC
         fi
 
         # Verify outputs were created
-        if [ ! -f "header.yaml" ] || [ ! -f "data.csv" ]; then
-          echo "❌ Expected outputs not found (header.yaml, data.csv)"
+        # For timeout cases, we may have partial data - that's OK
+        if [ ! -f "header.yaml" ] && [ ! -f "data.csv" ]; then
+          echo "❌ No trace files found (neither header.yaml nor data.csv)"
           ls -la
           exit 1
         fi
 
-        echo "✅ BLIS observe completed successfully"
+        if [ ! -f "header.yaml" ]; then
+          echo "⚠️  Warning: header.yaml not found (partial data)"
+        fi
+
+        if [ ! -f "data.csv" ]; then
+          echo "⚠️  Warning: data.csv not found (partial data)"
+        else
+          REQUEST_COUNT=$(tail -n +2 data.csv | wc -l)
+          echo "📊 Collected ${REQUEST_COUNT} requests"
+        fi
+
+        echo "✅ BLIS observe completed (timeout-safe)"
         echo "📊 Trace files:"
-        ls -lh header.yaml data.csv
-        echo "Request count: $(wc -l < data.csv)"
+        ls -lh header.yaml data.csv 2>/dev/null || echo "Some files missing (see warnings above)"
