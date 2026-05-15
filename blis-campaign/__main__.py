@@ -31,8 +31,6 @@ def main():
                      help="Max GPUs to use concurrently (default: 16)")
     run.add_argument("--max-concurrent", type=int, default=4,
                      help="Max PipelineRuns running simultaneously (default: 4)")
-    run.add_argument("--safe-only", dest="safe_only", action="store_true", default=False,
-                     help="Only run experiments marked as safe (default: run all experiments)")
 
     # status
     st = sub.add_parser("status", help="Show campaign status")

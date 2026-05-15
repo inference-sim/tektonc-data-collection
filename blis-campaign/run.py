@@ -97,11 +97,10 @@ def _numeric_sort_key(d):
     return int(m.group(1)) if m else float('inf')
 
 
-def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None, safe_only=True):
+def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None):
     """Return experiment directories matching the filters, sorted by numeric ID."""
     exp_dirs = sorted(Path(campaign_dir).iterdir(), key=_numeric_sort_key)
     result = []
-    skipped_unsafe = 0
     for d in exp_dirs:
         if not d.is_dir() or not (d / "experiment.json").exists():
             continue
@@ -118,14 +117,8 @@ def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None, safe_only
         # Filter by specific IDs
         if only_ids and exp["id"] not in only_ids:
             continue
-        # Filter by safe status (optional: use --safe-only to filter)
-        if safe_only and exp.get("safe", "uncalibrated") != "safe":
-            skipped_unsafe += 1
-            continue
 
         result.append(d)
-    if skipped_unsafe:
-        log.info(f"Skipped {skipped_unsafe} non-safe experiments (--safe-only is enabled)")
     return result
 
 
@@ -411,8 +404,6 @@ def run_campaign(args):
     if max_gpus:
         log.info(f"  Max GPUs: {max_gpus}")
     log.info(f"  Max concurrent PipelineRuns: {max_concurrent}")
-    if not getattr(args, "safe_only", True):
-        log.info("  Safe filter: DISABLED (--all)")
 
     # Pre-flight checks
     try:
@@ -424,8 +415,7 @@ def run_campaign(args):
     # Load experiments matching filters
     id_range = parse_range(args.id_range) if args.id_range else None
     only_ids = parse_only(args.only) if args.only else None
-    safe_only = getattr(args, "safe_only", True)
-    exp_dirs = filter_experiments(campaign_dir, args.hw, id_range, only_ids, safe_only=safe_only)
+    exp_dirs = filter_experiments(campaign_dir, args.hw, id_range, only_ids)
 
     if not exp_dirs:
         log.error("No experiments match the specified filters")
