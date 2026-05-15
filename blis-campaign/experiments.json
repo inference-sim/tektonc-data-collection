@@ -645,7 +645,7 @@
     "harness": "orc",
     "precision": "BF16",
     "mbt": 2048,
-    "max_model_len": 256000
+    "max_model_len": 131072
   },
   {
     "id": 37,
