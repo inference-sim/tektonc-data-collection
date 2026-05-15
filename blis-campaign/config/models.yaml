@@ -75,16 +75,6 @@ DeepSeek-V3:
   # (3) quantize ourselves with llm-compressor.
   # fp8_hf_id: TBD
 
-Llama-4-Scout-17B-16E:
-  hf_id: "meta-llama/Llama-4-Scout-17B-16E"
-  architecture: "moe"
-  # Pre-quantized FP8 dynamic checkpoint from RedHat (llm-compressor, vLLM compatible)
-  # 9.8k downloads, 28 likes. Uses dynamic per-tensor FP8 (same behavior as
-  # --quantization fp8 but without the BF16->FP8 conversion memory spike).
-  fp8_hf_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic"
-  extra_vllm_args:
-    - '--override-generation-config={"attn_temperature_tuning": true}'
-
 DeepSeek-V2-Lite-Chat:
   hf_id: "deepseek-ai/DeepSeek-V2-Lite-Chat"
   architecture: "moe"

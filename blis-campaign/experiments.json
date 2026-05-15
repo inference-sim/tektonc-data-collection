@@ -577,7 +577,7 @@
   },
   {
     "id": 33,
-    "model": "Qwen3-14B",
+    "model": "Llama-3.1-70B",
     "workload": "agentic-appworld",
     "hw": "A100-80GB",
     "tp": 1,
@@ -591,7 +591,7 @@
     "harness": "orc",
     "precision": "BF16",
     "mbt": 2048,
-    "max_model_len": 8192
+    "max_model_len": 131072
   },
   {
     "id": 34,
@@ -631,7 +631,7 @@
   },
   {
     "id": 36,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
     "workload": "agentic-appworld",
     "hw": "A100-80GB",
     "tp": 2,
@@ -645,7 +645,7 @@
     "harness": "orc",
     "precision": "BF16",
     "mbt": 2048,
-    "max_model_len": 8192
+    "max_model_len": 256000
   },
   {
     "id": 37,
