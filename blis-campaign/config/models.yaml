@@ -10,6 +10,10 @@ Llama-3.1-8b:
   hf_id: "meta-llama/Llama-3.1-8B-Instruct"
   architecture: "dense"
 
+Llama-3.1-8B-Instruct:
+  hf_id: "meta-llama/Llama-3.1-8B-Instruct"
+  architecture: "dense"
+
 Llama-3.1-70B:
   hf_id: "meta-llama/Llama-3.1-70B-Instruct"
   architecture: "dense"
@@ -30,6 +34,10 @@ Codellama-34b:
   hf_id: "codellama/CodeLlama-34b-Instruct-hf"
   architecture: "dense"
 
+CodeLlama-34B-Instruct:
+  hf_id: "codellama/CodeLlama-34b-Instruct-hf"
+  architecture: "dense"
+
 Llama-2-70b:
   hf_id: "meta-llama/Llama-2-70b-hf"
   architecture: "dense"
@@ -47,6 +55,10 @@ Mistral-Nemo-12b:
   architecture: "dense"
 
 Mixtral-8x7B:
+  hf_id: "mistralai/Mixtral-8x7B-v0.1"
+  architecture: "moe"
+
+Mixtral-8x7B-v0.1:
   hf_id: "mistralai/Mixtral-8x7B-v0.1"
   architecture: "moe"
 
@@ -72,3 +84,15 @@ Llama-4-Scout-17B-16E:
   fp8_hf_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic"
   extra_vllm_args:
     - '--override-generation-config={"attn_temperature_tuning": true}'
+
+DeepSeek-V2-Lite-Chat:
+  hf_id: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+  architecture: "moe"
+
+Qwen/Qwen3-30B-A3B-Instruct-2507:
+  hf_id: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  architecture: "moe"
+
+gpt-oss-120b:
+  hf_id: "openai-community/gpt2-oss-120b"
+  architecture: "moe"
