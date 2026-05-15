@@ -273,9 +273,10 @@ def build_values(exp, base_values, models, clusters, patterns_file):
     if harness in ["orc", "blis-orc"]:
         v["workload"]["orcSpec"] = wl
 
-        # Set horizon to 21 minutes (1260 seconds) for ORC experiments
-        # This bounds the observe phase duration
-        v["workload"]["horizon"] = 1260
+        # Set horizon to 10 minutes (600 seconds) for ORC experiments
+        # This stops request generation when spike windows complete
+        # (spike duration is 600s; horizon should match to avoid extending generation)
+        v["workload"]["horizon"] = 600
     else:
         raise ValueError(
             f"Dynamically generated workloads use BLIS native format "

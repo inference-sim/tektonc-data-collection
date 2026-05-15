@@ -88,6 +88,7 @@ spec:
 
     - name: run-observe
       image: python:3.12.9-slim-bookworm
+      timeout: 21m  # Overall experiment timeout (request generation stops at 10min, per-request timeout is 11min)
       computeResources:
         requests:
           memory: "16Gi"
