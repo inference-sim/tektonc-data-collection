@@ -685,21 +685,21 @@
   },
   {
     "id": 39,
-    "model": "DeepSeek-V2-Lite-Chat",
+    "model": "Qwen2.5-7B-Instruct",
     "workload": "agentic-appworld",
     "hw": "A100-80GB",
-    "tp": 2,
+    "tp": 1,
     "chunk_size": 2048,
     "gpu_mem": 0.9,
     "kv_offload": false,
-    "dp": 1,
+    "dp": null,
     "scheduling": "fcfs",
     "arrival_pattern": "afternoon",
-    "notes": "Additional MoE model on A100",
+    "notes": "Small dense model on A100",
     "harness": "orc",
     "precision": "BF16",
     "mbt": 2048,
-    "max_model_len": 8192
+    "max_model_len": 131072
   },
   {
     "id": 40,
