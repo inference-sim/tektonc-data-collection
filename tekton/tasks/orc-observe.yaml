@@ -141,10 +141,10 @@ spec:
         fi
 
         echo "🔍 BLIS observe command:"
-        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --request-timeout 660 ${HORIZON_FLAG}"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG}"
         echo ""
         echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
-        echo "⏱️  Using request-timeout=660 seconds (11 minutes per request)"
+        echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
         if [ -n "${HORIZON_FLAG}" ]; then
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
@@ -159,7 +159,7 @@ spec:
           --warmup-requests 50 \
           --record-itl \
           --itl-output "itl.csv" \
-          --request-timeout 660 \
+          --timeout 660 \
           ${HORIZON_FLAG} \
           > >(tee -a stdout.log) \
           2> >(tee -a stderr.log >&2)
