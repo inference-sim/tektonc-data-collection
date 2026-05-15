@@ -14,7 +14,8 @@
     "notes": "Baseline",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 2,
@@ -31,7 +32,8 @@
     "notes": "",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 3,
@@ -48,7 +50,8 @@
     "notes": "34B requires min TP=2",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 4,
@@ -65,7 +68,8 @@
     "notes": "70B requires min TP=4",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 5,
@@ -82,7 +86,8 @@
     "notes": "TP4 for LLMServingSim comparison",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 6,
@@ -99,7 +104,8 @@
     "notes": "MoE requires min TP=2",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 7,
@@ -116,7 +122,8 @@
     "notes": "",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 8,
@@ -133,7 +140,8 @@
     "notes": "120B uses TP4 for latency optimization",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 9,
@@ -150,7 +158,8 @@
     "notes": "",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 10,
@@ -167,7 +176,8 @@
     "notes": "GPU sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 11,
@@ -184,7 +194,8 @@
     "notes": "GPU sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 12,
@@ -201,7 +212,8 @@
     "notes": "Workload sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 13,
@@ -218,7 +230,8 @@
     "notes": "Workload sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 14,
@@ -235,7 +248,8 @@
     "notes": "Workload sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 15,
@@ -252,7 +266,8 @@
     "notes": "TP sweep baseline (34B requires min TP=2)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 16,
@@ -269,7 +284,8 @@
     "notes": "TP sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 17,
@@ -286,7 +302,8 @@
     "notes": "TP sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 18,
@@ -303,7 +320,8 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 19,
@@ -320,7 +338,8 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 20,
@@ -337,7 +356,8 @@
     "notes": "KV offload sweep (dense, 34B will trigger transfer)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 21,
@@ -354,7 +374,8 @@
     "notes": "KV offload sweep (MoE, 120B will trigger transfer)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 22,
@@ -371,7 +392,8 @@
     "notes": "TP sweep (TP2 balanced, per vLLM recipe)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 23,
@@ -388,7 +410,8 @@
     "notes": "TP sweep (TP4 for latency)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 24,
@@ -405,7 +428,8 @@
     "notes": "TP sweep (TP8 best latency)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 25,
@@ -422,7 +446,8 @@
     "notes": "MoE TP sweep baseline",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 26,
@@ -439,7 +464,8 @@
     "notes": "MoE TP sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 27,
@@ -456,7 +482,8 @@
     "notes": "MoE DP sweep (TP2+DP2, total=4)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 28,
@@ -473,7 +500,8 @@
     "notes": "MoE DP sweep (TP2+DP4, total=8)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 29,
@@ -490,7 +518,8 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 30,
@@ -507,7 +536,8 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 31,
@@ -524,7 +554,8 @@
     "notes": "GPU memory sweep (TP2 with high mem util)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 32,
@@ -541,7 +572,8 @@
     "notes": "Additional MoE model coverage",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 33,
@@ -558,7 +590,8 @@
     "notes": "Dense model on A100",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 34,
@@ -575,7 +608,8 @@
     "notes": "Small dense model on L40S (TP=1 only)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 35,
@@ -592,7 +626,8 @@
     "notes": "Small dense model on L40S (TP=1 only)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 36,
@@ -609,7 +644,8 @@
     "notes": "MoE model on A100 (min TP=2)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 37,
@@ -626,7 +662,8 @@
     "notes": "KV offload with dense 34B model (TP=2, A100 for GPU comparison)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 38,
@@ -643,7 +680,8 @@
     "notes": "KV offload with large MoE (TP4, A100 for GPU comparison)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 39,
@@ -660,7 +698,8 @@
     "notes": "Additional MoE model on A100",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 40,
@@ -677,7 +716,8 @@
     "notes": "MoE with DP (TP2+DP2, total=4)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   },
   {
     "id": 41,
@@ -694,6 +734,7 @@
     "notes": "Large MoE on A100 (TP4 for latency)",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048
+    "mbt": 2048,
+    "max_model_len": 8192
   }
 ]
