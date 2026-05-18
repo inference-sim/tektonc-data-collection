@@ -31,6 +31,44 @@ def parse_args(argv=None):
     return args
 
 
+def find_workload_file(exp_dir):
+    """Find the workload YAML file in experiment directory.
+
+    Args:
+        exp_dir: Path to experiment directory
+
+    Returns:
+        Path to workload YAML file
+
+    Raises:
+        FileNotFoundError: If no workload YAML found
+        ValueError: If multiple workload YAMLs found
+    """
+    # Exclude generated files
+    exclude_files = {"values.yaml", "pipeline.yaml", "pipelinerun.yaml"}
+
+    # Find all YAML files except excluded ones
+    yaml_files = [
+        f for f in exp_dir.glob("*.yaml")
+        if f.name not in exclude_files
+    ]
+
+    if len(yaml_files) == 0:
+        raise FileNotFoundError(
+            f"No workload YAML file found in {exp_dir} "
+            "(expected saturation_*.yaml or similar)"
+        )
+
+    if len(yaml_files) > 1:
+        file_list = ", ".join(f.name for f in yaml_files)
+        raise ValueError(
+            f"Multiple workload files found in {exp_dir}: {file_list}. "
+            "Expected exactly one YAML file."
+        )
+
+    return yaml_files[0]
+
+
 if __name__ == "__main__":
     args = parse_args()
     print(f"Processing experiments: {args.experiments}")
