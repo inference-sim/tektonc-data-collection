@@ -162,8 +162,12 @@ def make_dns_name(s):
 
 
 def make_dir_name(exp):
-    """e.g. '13-qwen3-14b-h100-general'"""
-    return make_dns_name(f"{exp['id']}-{exp['model']}-{exp['hw']}-{exp['workload']}")
+    """e.g. '13-qwen3-14b-h100-general-afternoon'"""
+    base = f"{exp['id']}-{exp['model']}-{exp['hw']}-{exp['workload']}"
+    arrival = exp.get('arrival_pattern', '')
+    if arrival:
+        return make_dns_name(f"{base}-{arrival}")
+    return make_dns_name(base)
 
 
 def make_experiment_id(exp):
