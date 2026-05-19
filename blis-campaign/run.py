@@ -82,8 +82,21 @@ def parse_range(range_str):
 
 
 def parse_only(only_str):
-    """Parse '13,25,30' into set of ints."""
-    return {int(x.strip()) for x in only_str.split(",") if x.strip()}
+    """Parse '13,25,30' or 'exp1_saturation,exp2_overloaded' into set.
+
+    Returns a set that may contain integers (for numeric IDs) or strings (for directory names).
+    """
+    result = set()
+    for x in only_str.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        # Try to parse as int, otherwise keep as string
+        try:
+            result.add(int(x))
+        except ValueError:
+            result.add(x)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +127,12 @@ def filter_experiments(campaign_dir, hw, id_range=None, only_ids=None):
             lo, hi = id_range
             if not (lo <= exp["id"] <= hi):
                 continue
-        # Filter by specific IDs
-        if only_ids and exp["id"] not in only_ids:
-            continue
+        # Filter by specific IDs (supports both numeric IDs and directory names)
+        if only_ids:
+            # Check if exp["id"] matches (for numeric IDs)
+            # OR if directory name matches (for string names like "exp1_saturation")
+            if exp["id"] not in only_ids and d.name not in only_ids:
+                continue
 
         result.append(d)
     return result
