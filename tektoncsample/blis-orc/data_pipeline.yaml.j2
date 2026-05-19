@@ -165,6 +165,7 @@ spec:
             - { name: results_dir, value: "{{ stackModelLabel }}" }
             - { name: workloadSpec, value: {{ workload.orcSpec }} }
             - { name: horizon, value: "{{ workload.horizon }}" }
+            - { name: detectSaturation, value: "{{ workload.detectSaturation | default('false') }}" }
 
         - name: delete-model-{{ stackId }}
           description: Delete the model engine immediately after observe to release GPU.

@@ -310,6 +310,8 @@ def generate_values_yaml(experiment, models, clusters, workload_file, workload_d
     if harness in ["orc", "blis-orc"]:
         v["workload"]["orcSpec"] = workload_data
         v["workload"]["horizon"] = 600
+        # Enable saturation detection for saturation experiments
+        v["workload"]["detectSaturation"] = "true"
     else:
         raise ValueError(f"Harness '{harness}' not supported for saturation experiments (only orc/blis-orc)")
 

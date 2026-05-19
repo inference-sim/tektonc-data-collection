@@ -11,8 +11,10 @@ python saturation_exps/generate_campaign.py --experiments exp1,exp3,exp5
 This will:
 1. Read `saturation_point_rps` from each experiment's `saturation_results.json`
 2. Update all cohort `trace_rate` values in the workload YAML
-3. Generate `values.yaml`, `pipeline.yaml`, and `pipelinerun.yaml`
+3. Generate `values.yaml`, `pipeline.yaml`, and `pipelinerun.yaml` with saturation detection enabled
 4. Write all outputs to the experiment folder
+
+**Saturation Detection**: All saturation experiments automatically enable BLIS's backlog-drift saturation detector during the observe phase. Results are written to `saturation_analysis.json` in the observe output directory, containing classification (STABLE/TRANSIENT_BACKLOG/OVERLOADED) and confidence metrics.
 
 ## Input Requirements
 

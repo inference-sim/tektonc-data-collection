@@ -30,6 +30,10 @@ spec:
       type: string
       description: Time horizon in seconds (bounds workload generation)
       default: ""
+    - name: detectSaturation
+      type: string
+      description: Enable saturation detection (true/false)
+      default: "false"
 
   steps:
     - name: discover-endpoint
@@ -143,8 +147,14 @@ spec:
           HORIZON_FLAG="--horizon ${HORIZON_MICROSECONDS}"
         fi
 
+        # Build saturation detection flag if enabled
+        SATURATION_FLAG=""
+        if [ "$(params.detectSaturation)" = "true" ]; then
+          SATURATION_FLAG="--saturation-report saturation_analysis.json"
+        fi
+
         echo "🔍 BLIS observe command:"
-        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG}"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG} ${SATURATION_FLAG}"
         echo ""
         echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
         echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
@@ -152,11 +162,24 @@ spec:
         if [ -n "${HORIZON_FLAG}" ]; then
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
+        if [ "$(params.detectSaturation)" = "true" ]; then
+          echo "🎯 Saturation detection ENABLED - will output saturation_analysis.json"
+        fi
         echo ""
 
         # Run BLIS observe with 21-minute overall timeout
         # Use 'timeout' command with SIGTERM for graceful shutdown
-        # Exit code 124 = timeout reached, which we treat as success (partial data is valid)
+        # Exit code 124 = timeout reached (BLIS's internal horizon mechanism)
+        #
+        # NOTE: We ignore the exit code and check if data was exported successfully.
+        # BLIS exits with 124 when it reaches its horizon limit, but it still exports
+        # all collected data before exiting. This is a success, not a failure.
+        #
+        # CRITICAL: Disable 'set -e' around BLIS execution so we can capture its exit
+        # code without the script terminating immediately. The 'set -eu' at the top
+        # would otherwise kill the script before we can check if data was exported.
+        set +e  # Disable exit-on-error
+        set -o pipefail  # Ensure we capture timeout's exit code, not tee's
         timeout -s SIGTERM 1260 ${BLIS_BINARY} observe \
           --server-url "${ENDPOINT}" \
           --model "${MODEL}" \
@@ -168,57 +191,44 @@ spec:
           --itl-output "itl.csv" \
           --timeout 660 \
           ${HORIZON_FLAG} \
-          > >(tee -a stdout.log) \
-          2> >(tee -a stderr.log >&2)
+          ${SATURATION_FLAG} \
+          2>&1 | tee observe.log
 
-        export RC=$?
+        RC=${PIPESTATUS[0]}  # Get timeout command's exit code, not tee's
+        set -e  # Re-enable exit-on-error
 
-        # Handle exit codes:
-        # 0 = success (completed normally)
-        # 124 = timeout reached (treat as success, don't retry)
-        # other = actual error (fail the task, will retry)
-        if [ $RC -eq 124 ]; then
-          echo "⏰ BLIS observe reached 21-minute timeout - saving partial data"
-          echo "This is expected if the experiment took longer than 21 minutes"
+        echo "BLIS observe exited with code: $RC"
 
-          # Log what we got but don't fail - timeout should not trigger retry
-          if [ -f "data.csv" ]; then
-            REQUEST_COUNT=$(tail -n +2 data.csv | wc -l)
-            echo "📊 Collected ${REQUEST_COUNT} requests (partial)"
-          else
-            echo "⚠️  No data collected before timeout"
-          fi
-
-          if [ ! -f "header.yaml" ]; then
-            echo "⚠️  Warning: header.yaml not found (partial data)"
-          fi
-
-          echo "✅ BLIS observe timed out gracefully (no retry)"
-          exit 0  # Success - timeout is intentional, don't retry
-        elif [ $RC -ne 0 ]; then
-          echo "❌ BLIS observe failed with exit code $RC"
-          exit $RC
-        fi
-
-        # Only verify outputs if we completed normally (no timeout)
-        # Missing files after normal completion = real failure, should retry
-        if [ ! -f "header.yaml" ] && [ ! -f "data.csv" ]; then
-          echo "❌ No trace files found (neither header.yaml nor data.csv)"
-          ls -la
-          exit 1
-        fi
-
-        if [ ! -f "header.yaml" ]; then
-          echo "⚠️  Warning: header.yaml not found (partial data)"
-        fi
-
-        if [ ! -f "data.csv" ]; then
-          echo "⚠️  Warning: data.csv not found (partial data)"
-        else
+        # Check if data was successfully exported (the real success criterion)
+        if [ -f "data.csv" ] && [ -f "header.yaml" ]; then
           REQUEST_COUNT=$(tail -n +2 data.csv | wc -l)
+          echo "✅ BLIS observe completed - data exported successfully"
           echo "📊 Collected ${REQUEST_COUNT} requests"
-        fi
 
-        echo "✅ BLIS observe completed successfully"
-        echo "📊 Trace files:"
-        ls -lh header.yaml data.csv 2>/dev/null || echo "Some files missing (see warnings above)"
+          if [ $RC -eq 124 ]; then
+            echo "ℹ️  BLIS exited with code 124 (horizon limit reached)"
+            echo "   This is expected when observation reaches its time limit"
+          fi
+
+          echo "📊 Trace files:"
+          ls -lh header.yaml data.csv itl.csv 2>/dev/null
+
+          # Check for saturation analysis output if enabled
+          if [ "$(params.detectSaturation)" = "true" ]; then
+            if [ -f "saturation_analysis.json" ]; then
+              echo "🎯 Saturation analysis:"
+              cat saturation_analysis.json
+            else
+              echo "⚠️  Warning: Saturation detection was enabled but saturation_analysis.json was not created"
+            fi
+          fi
+
+          exit 0  # Success - data exported
+        else
+          # Data files missing - this is a real failure
+          echo "❌ BLIS observe failed - no data exported"
+          echo "Exit code was: $RC"
+          echo "Current directory contents:"
+          ls -la
+          exit 1  # Failure - retry
+        fi
