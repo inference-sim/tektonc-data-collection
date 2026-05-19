@@ -14,7 +14,11 @@ This will:
 3. Generate `values.yaml`, `pipeline.yaml`, and `pipelinerun.yaml` with saturation detection enabled
 4. Write all outputs to the experiment folder
 
-**Saturation Detection**: All saturation experiments automatically enable BLIS's backlog-drift saturation detector during the observe phase. Results are written to `saturation_analysis.json` in the observe output directory, containing classification (STABLE/TRANSIENT_BACKLOG/OVERLOADED) and confidence metrics.
+**Saturation Detection**: All saturation experiments automatically enable BLIS's **composite post-hoc detector** during the observe phase (`--post-hoc-detector composite`). This detector combines rate deficit (1 - completions/arrivals) and latency trend (second-half vs first-half mean) to classify system state. Results are written to `saturation_analysis.json` in the observe output directory as `saturation.Result` JSON containing:
+- `level`: Classification (STABLE, BACKLOGGED, or OVERLOADED)
+- `score`: Combined saturation score (0.0 to 1.0)
+- `confidence`: Detection confidence (0.0 to 1.0)
+- `signals`: Detector-specific metrics (rate_deficit, latency_trend)
 
 ## Input Requirements
 
@@ -65,8 +69,8 @@ python saturation_exps/generate_campaign.py --experiments exp1,exp2
 **Error: "No workload YAML file found"**
 - Ensure experiment folder contains exactly one `.yaml` file (excluding values.yaml, pipeline.yaml, pipelinerun.yaml)
 
-**Error: "Model X not found in models.yaml"**
-- Check that the model name in `experiment.json` matches an entry in `blis-campaign/config/models.yaml`
+**Error: "Model X must be a full HuggingFace ID"**
+- Ensure the model field in `experiment.json` contains a full HuggingFace ID with org/model format (e.g., `meta-llama/Llama-3.1-8B-Instruct`)
 
 **Error: "Hardware X not found in clusters.yaml"**
 - Check that the hw field in `experiment.json` matches an entry in `blis-campaign/config/clusters.yaml`
