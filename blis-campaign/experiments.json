@@ -1,7 +1,7 @@
 [
   {
     "id": 1,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 1,
@@ -19,7 +19,7 @@
   },
   {
     "id": 2,
-    "model": "Qwen3-14B",
+    "model": "Qwen/Qwen3-14B",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 1,
@@ -37,7 +37,7 @@
   },
   {
     "id": 3,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -55,7 +55,7 @@
   },
   {
     "id": 4,
-    "model": "Llama-2-70b",
+    "model": "meta-llama/Llama-2-70b-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -73,7 +73,7 @@
   },
   {
     "id": 5,
-    "model": "Llama-3.1-70B",
+    "model": "meta-llama/Llama-3.1-70B-Instruct",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -91,7 +91,7 @@
   },
   {
     "id": 6,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "mistralai/Mixtral-8x7B-v0.1",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -127,7 +127,7 @@
   },
   {
     "id": 8,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -145,7 +145,7 @@
   },
   {
     "id": 9,
-    "model": "DeepSeek-V2-Lite-Chat",
+    "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 1,
@@ -163,7 +163,7 @@
   },
   {
     "id": 10,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "m-mid",
     "hw": "A100-80GB",
     "tp": 1,
@@ -181,7 +181,7 @@
   },
   {
     "id": 11,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "m-mid",
     "hw": "L40S",
     "tp": 1,
@@ -199,7 +199,7 @@
   },
   {
     "id": 12,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "reasoning",
     "hw": "H100",
     "tp": 1,
@@ -217,7 +217,7 @@
   },
   {
     "id": 13,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "agentic-tau",
     "hw": "H100",
     "tp": 1,
@@ -235,7 +235,7 @@
   },
   {
     "id": 14,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "agentic-appworld",
     "hw": "H100",
     "tp": 1,
@@ -253,7 +253,7 @@
   },
   {
     "id": 15,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -271,7 +271,7 @@
   },
   {
     "id": 16,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -289,7 +289,7 @@
   },
   {
     "id": 17,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 8,
@@ -307,7 +307,7 @@
   },
   {
     "id": 18,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 1,
@@ -325,7 +325,7 @@
   },
   {
     "id": 19,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 1,
@@ -343,7 +343,7 @@
   },
   {
     "id": 20,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -361,7 +361,7 @@
   },
   {
     "id": 21,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -379,7 +379,7 @@
   },
   {
     "id": 22,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -397,7 +397,7 @@
   },
   {
     "id": 23,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -415,7 +415,7 @@
   },
   {
     "id": 24,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 8,
@@ -433,7 +433,7 @@
   },
   {
     "id": 25,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "mistralai/Mixtral-8x7B-v0.1",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -451,7 +451,7 @@
   },
   {
     "id": 26,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "mistralai/Mixtral-8x7B-v0.1",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -469,7 +469,7 @@
   },
   {
     "id": 27,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "mistralai/Mixtral-8x7B-v0.1",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -487,7 +487,7 @@
   },
   {
     "id": 28,
-    "model": "Mixtral-8x7B-v0.1",
+    "model": "mistralai/Mixtral-8x7B-v0.1",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -505,7 +505,7 @@
   },
   {
     "id": 29,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -523,7 +523,7 @@
   },
   {
     "id": 30,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -541,7 +541,7 @@
   },
   {
     "id": 31,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -577,7 +577,7 @@
   },
   {
     "id": 33,
-    "model": "Llama-3.1-70B",
+    "model": "meta-llama/Llama-3.1-70B-Instruct",
     "workload": "agentic-appworld",
     "hw": "A100-80GB",
     "tp": 1,
@@ -595,7 +595,7 @@
   },
   {
     "id": 34,
-    "model": "Llama-3.1-8B-Instruct",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "workload": "reasoning",
     "hw": "L40S",
     "tp": 1,
@@ -613,7 +613,7 @@
   },
   {
     "id": 35,
-    "model": "Qwen3-14B",
+    "model": "Qwen/Qwen3-14B",
     "workload": "agentic-tau",
     "hw": "L40S",
     "tp": 1,
@@ -649,7 +649,7 @@
   },
   {
     "id": 37,
-    "model": "CodeLlama-34B-Instruct",
+    "model": "codellama/CodeLlama-34b-Instruct-hf",
     "workload": "agentic-tau",
     "hw": "A100-80GB",
     "tp": 2,
@@ -667,7 +667,7 @@
   },
   {
     "id": 38,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "agentic-tau",
     "hw": "A100-80GB",
     "tp": 4,
@@ -685,7 +685,7 @@
   },
   {
     "id": 39,
-    "model": "Qwen2.5-7B-Instruct",
+    "model": "Qwen/Qwen2.5-7B-Instruct",
     "workload": "agentic-appworld",
     "hw": "A100-80GB",
     "tp": 1,
@@ -721,7 +721,7 @@
   },
   {
     "id": 41,
-    "model": "gpt-oss-120b",
+    "model": "openai-community/gpt2-oss-120b",
     "workload": "m-mid",
     "hw": "A100-80GB",
     "tp": 4,
