@@ -125,6 +125,31 @@ def extract_variant_rates(saturation_results: dict) -> tuple[float, float]:
     return saturation_rate, overloaded_rate
 
 
+def create_variant_workload(workload_data, variant_rate, output_path):
+    """Create workload file with specific trace_rate for a variant.
+
+    Args:
+        workload_data: Original workload dict
+        variant_rate: RPS value for this variant
+        output_path: Path where variant workload should be written
+
+    Returns:
+        Updated workload dict
+    """
+    import copy
+
+    # Deep copy to avoid modifying original
+    variant_workload = copy.deepcopy(workload_data)
+
+    # Update all cohort trace_rate values
+    updated = update_workload_trace_rate(variant_workload, variant_rate)
+
+    # Write to output path
+    write_yaml(output_path, updated)
+
+    return updated
+
+
 def load_json(path):
     """Load JSON file.
 
