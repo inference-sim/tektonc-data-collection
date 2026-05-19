@@ -487,6 +487,13 @@ spec:
     serviceAccountName: helm-installer
   pipelineRef:
     name: {pipeline_name}
+  params:
+    - name: experimentId
+      value: "{experiment_id}"
+    - name: model
+      value: "{model}"
+    - name: namespace
+      value: "{namespace}"
   workspaces:
     - name: model-cache
       persistentVolumeClaim:
@@ -516,10 +523,10 @@ def generate_pipelinerun(exp_dir, exp_id):
 
     Args:
         exp_dir: Path to experiment directory
-        exp_id: Experiment ID number
+        exp_id: Experiment ID number or string
 
     Raises:
-        FileNotFoundError: If pipeline.yaml not found
+        FileNotFoundError: If pipeline.yaml or experiment.json not found
     """
     pipeline_file = exp_dir / "pipeline.yaml"
     if not pipeline_file.exists():
@@ -532,6 +539,10 @@ def generate_pipelinerun(exp_dir, exp_id):
     pipeline_data = load_yaml(pipeline_file)
     pipeline_name = pipeline_data["metadata"]["name"]
 
+    # Read experiment config for parameters
+    experiment = load_json(exp_dir / "experiment.json")
+    model = experiment["model"]
+
     # Generate unique PipelineRun name with timestamp
     # Convert exp_id to DNS-1123 compliant (replace underscores with hyphens)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -541,7 +552,10 @@ def generate_pipelinerun(exp_dir, exp_id):
     # Generate PipelineRun YAML
     pr_yaml = PIPELINERUN_TEMPLATE.format(
         name=pr_name,
-        pipeline_name=pipeline_name
+        pipeline_name=pipeline_name,
+        experiment_id=str(exp_id),
+        model=model,
+        namespace="diya"
     )
 
     # Write to file
