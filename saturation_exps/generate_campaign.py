@@ -169,25 +169,15 @@ def make_dns_name(s):
     return s[:63]
 
 
-def resolve_model(name, models, precision=None):
-    """Returns (hf_id, extra_args_list, is_prequantized)."""
-    entry = models[name]
-    if isinstance(entry, str):
-        return entry, [], False
-    hf_id = entry.get("hf_id", name)
-    extra = entry.get("extra_vllm_args", [])
-    # Use pre-quantized FP8 checkpoint if available
-    if precision == "FP8" and "fp8_hf_id" in entry:
-        return entry["fp8_hf_id"], extra, True
-    return hf_id, extra, False
+# resolve_model() removed - experiment.json now contains full HuggingFace IDs directly
 
 
-def build_extra_overrides(experiment, model_extra_args, is_prequantized=False):
+def build_extra_overrides(experiment):
     """Build the list of Helm override strings for extra vLLM args."""
     overrides = []
 
-    # FP8 quantization - skip if using pre-quantized checkpoint
-    if experiment.get("precision") == "FP8" and not is_prequantized:
+    # FP8 quantization
+    if experiment.get("precision") == "FP8":
         overrides.append('decode.containers[name="vllm"].args=--quantization=fp8')
 
     # GPU memory utilization
@@ -223,19 +213,14 @@ def build_extra_overrides(experiment, model_extra_args, is_prequantized=False):
     if experiment.get("scheduling") == "priority":
         overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
 
-    # Model-specific extra args
-    for arg in model_extra_args:
-        overrides.append(f'decode.containers[name="vllm"].args={arg}')
-
     return overrides
 
 
-def generate_values_yaml(experiment, models, clusters, workload_file, workload_data, base_values_path):
+def generate_values_yaml(experiment, clusters, workload_file, workload_data, base_values_path):
     """Generate values.yaml for tektonc compilation using blis-campaign structure.
 
     Args:
         experiment: Experiment dict from experiment.json
-        models: Models dict from models.yaml
         clusters: Clusters dict from clusters.yaml
         workload_file: Path to workload YAML file
         workload_data: Loaded workload YAML data (with updated trace_rate)
@@ -245,14 +230,14 @@ def generate_values_yaml(experiment, models, clusters, workload_file, workload_d
         Values dict for YAML serialization
 
     Raises:
-        KeyError: If model or hw not found in configs
+        KeyError: If hw not found in configs
     """
     model_name = experiment["model"]
     hw = experiment["hw"]
 
-    # Validate model exists
-    if model_name not in models:
-        raise KeyError(f"Model {model_name} not found in models.yaml")
+    # Validate model ID format (must contain /)
+    if "/" not in model_name:
+        raise ValueError(f"Model '{model_name}' must be a full HuggingFace ID (org/model)")
 
     # Validate hardware exists
     if hw not in clusters:
@@ -262,9 +247,9 @@ def generate_values_yaml(experiment, models, clusters, workload_file, workload_d
     base_values = load_yaml(base_values_path)
     v = copy.deepcopy(base_values)
 
-    # Resolve model
+    # Use model ID directly from experiment.json
     precision = experiment.get("precision", "BF16")
-    hf_id, extra_args, is_prequantized = resolve_model(model_name, models, precision)
+    hf_id = model_name
 
     # Experiment identity
     exp_name = make_dns_name(f"blis-{experiment['id']}-{model_name}")
@@ -303,7 +288,7 @@ def generate_values_yaml(experiment, models, clusters, workload_file, workload_d
     decode["annotations"]["gpu-reaper.io/exclude"] = "true"
 
     # Build extra_overrides
-    v["stack"]["extra_overrides"] = build_extra_overrides(experiment, extra_args, is_prequantized)
+    v["stack"]["extra_overrides"] = build_extra_overrides(experiment)
 
     # Workload - use the loaded workload data
     harness = experiment.get("harness", "orc")
@@ -448,13 +433,12 @@ def generate_pipelinerun(exp_dir, exp_id):
     pipelinerun_file.write_text(pr_yaml)
 
 
-def process_experiment(exp_name, base_dir, models, clusters, base_values_path):
+def process_experiment(exp_name, base_dir, clusters, base_values_path):
     """Process a single saturation experiment.
 
     Args:
         exp_name: Experiment folder name (e.g., "exp1")
         base_dir: Base directory containing experiment folders
-        models: Models config dict
         clusters: Clusters config dict
         base_values_path: Path to base values template
 
@@ -481,7 +465,7 @@ def process_experiment(exp_name, base_dir, models, clusters, base_values_path):
 
         # 5. Generate values.yaml
         values = generate_values_yaml(
-            experiment, models, clusters, workload_file,
+            experiment, clusters, workload_file,
             updated_workload, base_values_path
         )
         write_yaml(exp_dir / "values.yaml", values)
@@ -520,7 +504,6 @@ def main():
     template_dir = script_dir.parent / "tektoncsample"
 
     try:
-        models = load_yaml(config_dir / "models.yaml")
         clusters = load_yaml(config_dir / "clusters.yaml")
         # Load base values template for ORC (default harness for saturation experiments)
         base_values_path = template_dir / "blis-orc" / "values.yaml"
@@ -541,7 +524,7 @@ def main():
             continue
 
         # Process experiment
-        success, error = process_experiment(exp_name, base_dir, models, clusters, base_values_path)
+        success, error = process_experiment(exp_name, base_dir, clusters, base_values_path)
         results.append((exp_name, success, error))
 
         if success:

@@ -1,6 +1,6 @@
 experiment:
-  name: blis-1-llama-3-1-8b-instruct
-  description: 'Saturation Exp #1: Llama-3.1-8B-Instruct BF16 TP1 on H100'
+  name: blis-1-meta-llama-llama-3-1-8b-instruct
+  description: 'Saturation Exp #1: meta-llama/Llama-3.1-8B-Instruct BF16 TP1 on H100'
 stack:
   treatments:
     tensorParallelism:
