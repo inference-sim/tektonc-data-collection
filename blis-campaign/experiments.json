@@ -302,7 +302,7 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048,
+    "mbt": 1024,
     "max_model_len": 8192
   },
   {
@@ -319,7 +319,7 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048,
+    "mbt": 8192,
     "max_model_len": 8192
   },
   {
@@ -489,7 +489,7 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048,
+    "mbt": 1024,
     "max_model_len": 8192
   },
   {
@@ -506,7 +506,7 @@
     "notes": "Chunk size sweep",
     "harness": "orc",
     "precision": "BF16",
-    "mbt": 2048,
+    "mbt": 8192,
     "max_model_len": 8192
   },
   {
