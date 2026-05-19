@@ -107,6 +107,24 @@ def update_workload_trace_rate(workload_data, saturation_rps):
     return workload_data
 
 
+def extract_variant_rates(saturation_results: dict) -> tuple[float, float]:
+    """
+    Extract saturation and overloaded rates from saturation results.
+
+    Args:
+        saturation_results: Parsed saturation_results.json dict
+
+    Returns:
+        (saturation_rate, overloaded_rate) where:
+        - saturation_rate = result.saturation_point_rps
+        - overloaded_rate = result.saturation_point_rps + result.final_precision_rps
+    """
+    result = saturation_results["result"]
+    saturation_rate = result["saturation_point_rps"]
+    overloaded_rate = saturation_rate + result["final_precision_rps"]
+    return saturation_rate, overloaded_rate
+
+
 def load_json(path):
     """Load JSON file.
 
