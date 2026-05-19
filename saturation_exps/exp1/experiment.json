@@ -4,6 +4,7 @@
   "workload": "m-mid",
   "hw": "H100",
   "tp": 1,
+  "chunk_size": 2048,
   "gpu_mem": 0.9,
   "kv_offload": false,
   "dp": null,
