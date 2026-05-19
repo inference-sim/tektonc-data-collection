@@ -127,7 +127,7 @@
   },
   {
     "id": 8,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -361,7 +361,7 @@
   },
   {
     "id": 21,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -379,7 +379,7 @@
   },
   {
     "id": 22,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -397,7 +397,7 @@
   },
   {
     "id": 23,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -415,7 +415,7 @@
   },
   {
     "id": 24,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 8,
@@ -505,7 +505,7 @@
   },
   {
     "id": 29,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -523,7 +523,7 @@
   },
   {
     "id": 30,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 4,
@@ -541,7 +541,7 @@
   },
   {
     "id": 31,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "H100",
     "tp": 2,
@@ -667,7 +667,7 @@
   },
   {
     "id": 38,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "agentic-tau",
     "hw": "A100-80GB",
     "tp": 4,
@@ -721,7 +721,7 @@
   },
   {
     "id": 41,
-    "model": "openai-community/gpt2-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "workload": "m-mid",
     "hw": "A100-80GB",
     "tp": 4,

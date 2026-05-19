@@ -44,11 +44,6 @@ def load_experiments(path):
         return json.load(f)
 
 
-def load_models(path):
-    """Load models.yaml config."""
-    return load_yaml(path)
-
-
 def load_clusters(path):
     """Load clusters.yaml config."""
     return load_yaml(path)
@@ -87,7 +82,7 @@ def generate_workload_for_experiment(exp, patterns_file):
 # Validation (collect all errors, don't fail on first)
 # ---------------------------------------------------------------------------
 
-def validate_all(experiments, models, clusters, patterns_data):
+def validate_all(experiments, clusters, patterns_data):
     """
     Validate all experiments. Returns list of error strings (empty = valid).
 
@@ -106,9 +101,9 @@ def validate_all(experiments, models, clusters, patterns_data):
     for exp in experiments:
         eid = exp.get("id", "?")
 
-        # Existing validations
-        if exp["model"] not in models:
-            errors.append(f"Experiment #{eid}: unknown model '{exp['model']}'")
+        # Model ID validation (must look like a HuggingFace ID with /)
+        if "/" not in exp["model"]:
+            errors.append(f"Experiment #{eid}: model '{exp['model']}' must be a full HuggingFace ID (org/model)")
         if exp["hw"] not in valid_hw:
             errors.append(f"Experiment #{eid}: unknown hw '{exp['hw']}'")
 
@@ -175,22 +170,7 @@ def make_experiment_id(exp):
     return make_dns_name(f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}")
 
 
-def resolve_model(name, models, precision=None):
-    """Returns (hf_id, extra_args_list, is_prequantized).
-
-    When precision='FP8' and the model has an fp8_hf_id, returns the
-    pre-quantized checkpoint ID and sets is_prequantized=True so the
-    caller knows to skip the --quantization=fp8 vLLM arg.
-    """
-    entry = models[name]
-    if isinstance(entry, str):
-        return entry, [], False
-    hf_id = entry["hf_id"]
-    extra = entry.get("extra_vllm_args", [])
-    # Use pre-quantized FP8 checkpoint if available
-    if precision == "FP8" and "fp8_hf_id" in entry:
-        return entry["fp8_hf_id"], extra, True
-    return hf_id, extra, False
+# resolve_model() removed - experiments.json now contains full HuggingFace IDs directly
 
 
 def extract_pipeline_name(pipeline_yaml_path):
@@ -207,23 +187,20 @@ DEFAULT_KV_OFFLOAD_GB = 8.0
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
 
-def build_values(exp, base_values, models, clusters, patterns_file):
+def build_values(exp, base_values, clusters, patterns_file):
     """
     Build per-experiment values.yaml from base template + experiment config.
 
     Args:
         exp: Experiment dict
         base_values: Base values template
-        models: Models config dict
         clusters: Clusters config dict
         patterns_file: Path to arrival-and-workload-patterns.yaml
     """
     v = copy.deepcopy(base_values)
 
-    # Resolve model (use pre-quantized FP8 checkpoint when available)
-    hf_id, extra_args, is_prequantized = resolve_model(
-        exp["model"], models, precision=exp["precision"]
-    )
+    # Use model ID directly from experiments.json (full HuggingFace ID)
+    hf_id = exp["model"]
 
     # Experiment identity
     exp_name = make_dns_name(f"blis-{exp['id']}-{exp['model']}-{exp['workload']}")
@@ -265,9 +242,7 @@ def build_values(exp, base_values, models, clusters, patterns_file):
 
     # Build extra_overrides (handles ALL capacity-related vLLM args including CPU offloading)
     # Observability template only handles observability features, NOT capacity management
-    v["stack"]["extra_overrides"] = build_extra_overrides(
-        exp, extra_args, is_prequantized=is_prequantized
-    )
+    v["stack"]["extra_overrides"] = build_extra_overrides(exp)
 
     # Workload profile - generate dynamically
     wl = generate_workload_for_experiment(exp, patterns_file)
@@ -291,7 +266,7 @@ def build_values(exp, base_values, models, clusters, patterns_file):
     return v
 
 
-def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
+def build_extra_overrides(exp):
     """Build the list of Helm override strings for extra vLLM args.
 
     This handles ALL capacity-related vLLM configuration including CPU offloading.
@@ -304,9 +279,8 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
         vllm_version = exp["vllm_version"]
         overrides.append(f'decode.containers[name="vllm"].image=vllm/vllm-openai:v{vllm_version}')
 
-    # FP8 quantization — skip if using a pre-quantized checkpoint
-    # (weights are already FP8 on disk, vLLM auto-detects from config.json)
-    if exp["precision"] == "FP8" and not is_prequantized:
+    # FP8 quantization
+    if exp.get("precision") == "FP8":
         overrides.append(
             'decode.containers[name="vllm"].args=--quantization=fp8'
         )
@@ -357,10 +331,6 @@ def build_extra_overrides(exp, model_extra_args, is_prequantized=False):
     if exp.get("scheduling") == "priority":
         overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
     # If "fcfs" or not set, omit flag (vLLM defaults to fcfs - first come first serve)
-
-    # Model-specific extra args
-    for arg in model_extra_args:
-        overrides.append(f'decode.containers[name="vllm"].args={arg}')
 
     return overrides
 
@@ -428,7 +398,6 @@ def generate_campaign(args):
     """Main entry point for 'blis-campaign generate'."""
     config_dir = Path(__file__).parent / "config"
     experiments = load_experiments(args.experiments)
-    models = load_models(config_dir / "models.yaml")
     clusters = load_clusters(config_dir / "clusters.yaml")
 
     # Load arrival and workload patterns
@@ -469,7 +438,7 @@ def generate_campaign(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Validate all experiments first (fail-fast)
-    errors = validate_all(experiments, models, clusters, patterns_data)
+    errors = validate_all(experiments, clusters, patterns_data)
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -511,7 +480,7 @@ def generate_campaign(args):
                           else base_values_inference_perf_stock)
 
         # 3. Build and save values.yaml
-        values = build_values(exp, base_values, models, clusters, patterns_file)
+        values = build_values(exp, base_values, clusters, patterns_file)
         write_yaml(exp_dir / "values.yaml", values)
 
         # 4. Compile pipeline.yaml via tektonc
@@ -530,7 +499,7 @@ def generate_campaign(args):
 
         # 5. Extract pipeline name and generate pipelinerun.yaml
         pipeline_name = extract_pipeline_name(exp_dir / "pipeline.yaml")
-        hf_id, _, _ = resolve_model(exp["model"], models, precision=exp["precision"])
+        hf_id = exp["model"]
         experiment_id = make_experiment_id(exp)
         pr_yaml = build_pipelinerun(
             pipeline_name, experiment_id, hf_id, clusters["namespace"]

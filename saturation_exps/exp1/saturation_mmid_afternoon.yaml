@@ -1,0 +1,111 @@
+version: '2'
+seed: 42
+category: ''
+clients: []
+cohorts:
+- id: afternoon-background
+  population: 1
+  slo_class: background
+  arrival:
+    process: poisson
+  input_distribution:
+    type: lognormal
+    params:
+      mu: 6.69621191290237
+      sigma: 0.5902513998220089
+  output_distribution:
+    type: lognormal
+    params:
+      mu: 4.114017268596266
+      sigma: 0.908969534506003
+  streaming: true
+  rate_fraction: 1
+  spike:
+    start_time_us: 0
+    duration_us: 600000000
+    trace_rate: 12.406919642857135
+- id: afternoon-batch
+  population: 1
+  slo_class: batch
+  arrival:
+    process: poisson
+  input_distribution:
+    type: lognormal
+    params:
+      mu: 6.607780910378171
+      sigma: 0.8727319577006727
+  output_distribution:
+    type: lognormal
+    params:
+      mu: 4.096106531698332
+      sigma: 1.2519617625757922
+  streaming: true
+  rate_fraction: 1
+  spike:
+    start_time_us: 0
+    duration_us: 600000000
+    trace_rate: 12.406919642857135
+- id: afternoon-critical
+  population: 1
+  slo_class: critical
+  arrival:
+    process: poisson
+  input_distribution:
+    type: lognormal
+    params:
+      mu: 6.582734044244264
+      sigma: 0.5629375545724375
+  output_distribution:
+    type: lognormal
+    params:
+      mu: 4.624020180084728
+      sigma: 0.8848836416915962
+  streaming: true
+  rate_fraction: 1
+  spike:
+    start_time_us: 0
+    duration_us: 600000000
+    trace_rate: 12.406919642857135
+- id: afternoon-sheddable
+  population: 1
+  slo_class: sheddable
+  arrival:
+    process: poisson
+  input_distribution:
+    type: lognormal
+    params:
+      mu: 6.4993704071213605
+      sigma: 0.6893972829089396
+  output_distribution:
+    type: lognormal
+    params:
+      mu: 4.069653546012583
+      sigma: 0.9474746650875042
+  streaming: true
+  rate_fraction: 1
+  spike:
+    start_time_us: 0
+    duration_us: 600000000
+    trace_rate: 12.406919642857135
+- id: afternoon-standard
+  population: 1
+  slo_class: standard
+  arrival:
+    process: poisson
+  input_distribution:
+    type: lognormal
+    params:
+      mu: 6.813289322036138
+      sigma: 0.7095809961919253
+  output_distribution:
+    type: lognormal
+    params:
+      mu: 3.8889842819443703
+      sigma: 0.928382494594449
+  streaming: true
+  rate_fraction: 1
+  spike:
+    start_time_us: 0
+    duration_us: 600000000
+    trace_rate: 12.406919642857135
+aggregate_rate: 0
