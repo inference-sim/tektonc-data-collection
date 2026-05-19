@@ -242,8 +242,17 @@ def handle_success(dir_name, run_info, state, context, namespace, campaign_dir):
     exp = json.loads((exp_dir / "experiment.json").read_text())
     exp_id = exp["id"]
 
-    # Use same PVC directory naming as generate.py (DNS-1123 formatted)
-    pvc_dir = make_pvc_dir(exp)
+    # Determine PVC directory format based on campaign type
+    # saturation_exps uses simple format: {experimentId}-{tp}-{dlp}
+    # blis-campaign uses complex format: {id}-{model}-tp{tp}-{workload}-{tp}-{dlp}
+    if "saturation" in str(exp_id) or "overloaded" in str(exp_id):
+        # Simple format for saturation experiments
+        tp = exp.get("tp", 1)
+        dlp = exp.get("dp", 1) if exp.get("dp") is not None else 1
+        pvc_dir = f"{exp_id}-{tp}-{dlp}"
+    else:
+        # Complex format for regular blis-campaign experiments
+        pvc_dir = make_pvc_dir(exp)
 
     # Create data directory
     data_dir = exp_dir / "data"
