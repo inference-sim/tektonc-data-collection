@@ -557,7 +557,7 @@ def process_experiment(exp_name, base_dir, clusters, base_values_path):
         base_values_path: Path to base values template
 
     Returns:
-        Tuple of (success: bool, error: str or None)
+        Tuple of (success: bool, error: str or None, saturation_rate: float or None, overloaded_rate: float or None)
     """
     source_dir = base_dir / exp_name
 
@@ -583,7 +583,7 @@ def process_experiment(exp_name, base_dir, clusters, base_values_path):
         )
 
         if not success_sat:
-            return False, f"Saturation variant failed: {error_sat}"
+            return False, f"Saturation variant failed: {error_sat}", None, None
 
         # 4. Generate overloaded variant
         overloaded_dir = base_dir / f"{exp_name}_overloaded"
@@ -599,18 +599,18 @@ def process_experiment(exp_name, base_dir, clusters, base_values_path):
         )
 
         if not success_over:
-            return False, f"Overloaded variant failed: {error_over}"
+            return False, f"Overloaded variant failed: {error_over}", None, None
 
-        return True, None
+        return True, None, saturation_rate, overloaded_rate
 
     except FileNotFoundError as e:
-        return False, f"Missing file: {e}"
+        return False, f"Missing file: {e}", None, None
     except KeyError as e:
-        return False, f"Missing required field: {e}"
+        return False, f"Missing required field: {e}", None, None
     except ValueError as e:
-        return False, f"Validation error: {e}"
+        return False, f"Validation error: {e}", None, None
     except Exception as e:
-        return False, f"Unexpected error: {e}"
+        return False, f"Unexpected error: {e}", None, None
 
 
 def main():
@@ -646,11 +646,12 @@ def main():
             continue
 
         # Process experiment
-        success, error = process_experiment(exp_name, base_dir, clusters, base_values_path)
+        success, error, sat_rate, over_rate = process_experiment(exp_name, base_dir, clusters, base_values_path)
         results.append((exp_name, success, error))
 
         if success:
-            print(f"  ✓ Generated pipeline files in {exp_dir}")
+            print(f"  ✓ Generated {exp_name}_saturation (rate: {sat_rate:.3f} RPS - saturation point)")
+            print(f"  ✓ Generated {exp_name}_overloaded (rate: {over_rate:.3f} RPS - saturation + precision)")
         else:
             print(f"  ✗ Failed: {error}")
 

@@ -131,13 +131,15 @@ def test_process_experiment_dual_variants():
         base_values_path = Path(__file__).parent.parent.parent / "tektoncsample" / "blis-orc" / "values.yaml"
 
         # Process experiment
-        success, error = process_experiment("exp1", base_dir, clusters, base_values_path)
+        success, error, sat_rate, over_rate = process_experiment("exp1", base_dir, clusters, base_values_path)
 
         if not success:
             pytest.fail(f"process_experiment failed: {error}")
 
         assert success is True
         assert error is None
+        assert sat_rate is not None
+        assert over_rate is not None
 
         # Verify both variants exist
         assert (base_dir / "exp1_saturation").is_dir()
