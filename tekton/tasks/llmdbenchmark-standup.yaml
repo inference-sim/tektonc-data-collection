@@ -240,5 +240,5 @@ spec:
 
         echo "🔍 Running smoketest"
         # shellcheck disable=SC2086
-        llmdbenchmark ${GLOBAL_ARGS} smoketest -p "$(params.namespace)"
+        llmdbenchmark --verbose ${GLOBAL_ARGS} smoketest -p "$(params.namespace)"
         echo "✅ Smoketest passed"
