@@ -172,8 +172,9 @@ def generate_variant(exp_name, variant_name, variant_rate, source_dir,
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. Copy and update experiment.json
+        # Use hyphens for DNS-1123 compliance (used in Helm release names)
         variant_experiment = experiment.copy()
-        variant_experiment["id"] = f"{exp_name}_{variant_name}"
+        variant_experiment["id"] = f"{exp_name}-{variant_name}"
         write_json(output_dir / "experiment.json", variant_experiment)
 
         # 2. Find source workload file
