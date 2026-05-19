@@ -48,6 +48,10 @@ spec:
           echo "⚠️  Warning: itl.csv not found (non-fatal, ITL recording may not be enabled)"
         fi
 
+        if [ ! -f "${OBSERVE_DIR}/saturation_analysis.json" ]; then
+          echo "⚠️  Warning: saturation_analysis.json not found (non-fatal, saturation detection may not be enabled)"
+        fi
+
         # Create a download-ready marker file
         touch "$(workspaces.data.path)/$(params.results_dir)/.observe-ready"
 
@@ -66,6 +70,7 @@ spec:
         echo "  observe/data.csv"
         echo "  observe/workload.yaml"
         echo "  observe/itl.csv (optional)"
+        echo "  observe/saturation_analysis.json (optional - when detectSaturation=true)"
         echo "  exp-config.yaml"
         echo "  vllm_logging.json"
         echo "  vllm.log"

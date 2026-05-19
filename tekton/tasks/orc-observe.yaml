@@ -147,14 +147,15 @@ spec:
           HORIZON_FLAG="--horizon ${HORIZON_MICROSECONDS}"
         fi
 
-        # Build saturation detection flag if enabled
-        SATURATION_FLAG=""
+        # Build saturation detection flags if enabled
+        # Use composite post-hoc detector for saturation experiments
+        SATURATION_FLAGS=""
         if [ "$(params.detectSaturation)" = "true" ]; then
-          SATURATION_FLAG="--saturation-report saturation_analysis.json"
+          SATURATION_FLAGS="--post-hoc-detector composite --saturation-report saturation_analysis.json"
         fi
 
         echo "🔍 BLIS observe command:"
-        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG} ${SATURATION_FLAG}"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG} ${SATURATION_FLAGS}"
         echo ""
         echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
         echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
@@ -163,7 +164,7 @@ spec:
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
         if [ "$(params.detectSaturation)" = "true" ]; then
-          echo "🎯 Saturation detection ENABLED - will output saturation_analysis.json"
+          echo "🎯 Saturation detection ENABLED (composite detector) - will output saturation_analysis.json"
         fi
         echo ""
 
@@ -191,7 +192,7 @@ spec:
           --itl-output "itl.csv" \
           --timeout 660 \
           ${HORIZON_FLAG} \
-          ${SATURATION_FLAG} \
+          ${SATURATION_FLAGS} \
           2>&1 | tee observe.log
 
         RC=${PIPESTATUS[0]}  # Get timeout command's exit code, not tee's
