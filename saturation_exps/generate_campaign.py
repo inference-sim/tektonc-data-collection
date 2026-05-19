@@ -69,9 +69,6 @@ def find_workload_file(exp_dir):
     return yaml_files[0]
 
 
-if __name__ == "__main__":
-    exit(main())
-
 
 import json
 import yaml
@@ -184,18 +181,26 @@ def generate_values_yaml(experiment, models, clusters, workload_file):
     model_config = models[model_name]
     cluster_config = clusters[hw]
 
+    # Get image with default fallback
+    image = model_config.get("image", "vllm/vllm-openai:latest")
+    # Get checkpoint - prefer hf_id, then checkpoint, then model name
+    checkpoint = model_config.get("checkpoint", model_config.get("hf_id", model_name))
+
+    # Get namespace - it's at top level in clusters.yaml
+    namespace = clusters.get("namespace", "default")
+
     # Build values structure
     values = {
         "model": {
             "name": model_name,
-            "image": model_config["image"],
-            "checkpoint": model_config.get("checkpoint", model_name),
+            "image": image,
+            "checkpoint": checkpoint,
             "tp": experiment.get("tp", 1),
             "dp": experiment.get("dp", 1) if experiment.get("dp") else 1,
         },
         "cluster": {
             "context": cluster_config["context"],
-            "namespace": cluster_config["namespace"],
+            "namespace": namespace,
         },
         "workload_file": str(workload_file),
         "harness": experiment.get("harness", "orc"),
@@ -449,3 +454,7 @@ def main():
 
     # Exit code: 0 if any succeeded, 1 if all failed
     return 0 if succeeded else 1
+
+
+if __name__ == "__main__":
+    exit(main())
