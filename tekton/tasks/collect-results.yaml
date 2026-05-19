@@ -10,6 +10,20 @@ spec:
     and EPP pod logs into the workload results directory on data-pvc
     before the finally block tears down deployments.
 
+
+    ASSUMPTIONS:
+
+    1. One model stack per namespace — pod discovery uses type-based
+       selectors (not model-specific labels), so all pods of a given
+       type in the namespace are collected. This invariant is enforced
+       by deploy.py slot allocation in the sim2real pipeline.
+
+    2. Stack deployed via llmdbenchmark standup — which installs the
+       llm-d-modelservice Helm chart (applies llm-d.ai/role=decode and
+       llm-d.ai/role=prefill) and the inferencepool Helm chart (applies
+       app.kubernetes.io/managed-by=inferencepool on EPP pods).
+       Alternative deployment methods may not apply these labels.
+
   workspaces:
     - name: data
       description: "Shared PVC (data-pvc)"
