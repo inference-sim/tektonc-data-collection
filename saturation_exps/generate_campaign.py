@@ -547,7 +547,7 @@ def generate_pipelinerun(exp_dir, exp_id):
     # Convert exp_id to DNS-1123 compliant (replace underscores with hyphens)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     exp_id_dns = str(exp_id).replace("_", "-")
-    pr_name = f"saturation-exp{exp_id_dns}-{timestamp}"
+    pr_name = f"saturation-{exp_id_dns}-{timestamp}"
 
     # Generate PipelineRun YAML
     pr_yaml = PIPELINERUN_TEMPLATE.format(
