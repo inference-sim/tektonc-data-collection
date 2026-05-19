@@ -152,14 +152,94 @@ def write_yaml(path, data):
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, width=200)
 
 
-def generate_values_yaml(experiment, models, clusters, workload_file):
-    """Generate values.yaml for tektonc compilation.
+import copy
+import re
+
+
+DEFAULT_KV_OFFLOAD_GB = 8.0
+MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
+
+
+def make_dns_name(s):
+    """Convert string to DNS-1123 compatible name."""
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9-]', '-', s)
+    s = re.sub(r'-+', '-', s)
+    s = s.strip('-')
+    return s[:63]
+
+
+def resolve_model(name, models, precision=None):
+    """Returns (hf_id, extra_args_list, is_prequantized)."""
+    entry = models[name]
+    if isinstance(entry, str):
+        return entry, [], False
+    hf_id = entry.get("hf_id", name)
+    extra = entry.get("extra_vllm_args", [])
+    # Use pre-quantized FP8 checkpoint if available
+    if precision == "FP8" and "fp8_hf_id" in entry:
+        return entry["fp8_hf_id"], extra, True
+    return hf_id, extra, False
+
+
+def build_extra_overrides(experiment, model_extra_args, is_prequantized=False):
+    """Build the list of Helm override strings for extra vLLM args."""
+    overrides = []
+
+    # FP8 quantization - skip if using pre-quantized checkpoint
+    if experiment.get("precision") == "FP8" and not is_prequantized:
+        overrides.append('decode.containers[name="vllm"].args=--quantization=fp8')
+
+    # GPU memory utilization
+    if experiment.get("gpu_mem") and experiment["gpu_mem"] != 0.9:
+        overrides.append(f'decode.containers[name="vllm"].args=--gpu-memory-utilization={experiment["gpu_mem"]}')
+
+    # KV cache offloading
+    if experiment.get("cpu_offload") or experiment.get("kv_offload"):
+        overrides.append(f'decode.containers[name="vllm"].args=--kv-offloading-size={DEFAULT_KV_OFFLOAD_GB}')
+        overrides.append('decode.containers[name="vllm"].args=--disable-hybrid-kv-cache-manager')
+
+    # Expert parallelism for MoE models
+    dp = experiment.get("dp")
+    if dp and dp > 1 and experiment["model"] in MOE_MODELS:
+        overrides.append('decode.containers[name="vllm"].args=--enable-expert-parallel')
+
+    # Block size
+    if "block_size" in experiment:
+        overrides.append(f'decode.containers[name="vllm"].args=--block-size={experiment["block_size"]}')
+
+    # Prefix caching
+    if "enable_prefix_caching" in experiment:
+        if experiment["enable_prefix_caching"]:
+            overrides.append('decode.containers[name="vllm"].args=--enable-prefix-caching')
+        else:
+            overrides.append('decode.containers[name="vllm"].args=--no-enable-prefix-caching')
+
+    # Chunked prefill
+    if experiment.get("enable_chunked_prefill"):
+        overrides.append('decode.containers[name="vllm"].args=--enable-chunked-prefill')
+
+    # Priority scheduling
+    if experiment.get("scheduling") == "priority":
+        overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
+
+    # Model-specific extra args
+    for arg in model_extra_args:
+        overrides.append(f'decode.containers[name="vllm"].args={arg}')
+
+    return overrides
+
+
+def generate_values_yaml(experiment, models, clusters, workload_file, workload_data, base_values_path):
+    """Generate values.yaml for tektonc compilation using blis-campaign structure.
 
     Args:
         experiment: Experiment dict from experiment.json
         models: Models dict from models.yaml
         clusters: Clusters dict from clusters.yaml
         workload_file: Path to workload YAML file
+        workload_data: Loaded workload YAML data (with updated trace_rate)
+        base_values_path: Path to base values template
 
     Returns:
         Values dict for YAML serialization
@@ -178,44 +258,68 @@ def generate_values_yaml(experiment, models, clusters, workload_file):
     if hw not in clusters:
         raise KeyError(f"Hardware {hw} not found in clusters.yaml")
 
-    model_config = models[model_name]
-    cluster_config = clusters[hw]
+    # Load base values template
+    base_values = load_yaml(base_values_path)
+    v = copy.deepcopy(base_values)
 
-    # Get image with default fallback
-    image = model_config.get("image", "vllm/vllm-openai:latest")
-    # Get checkpoint - prefer hf_id, then checkpoint, then model name
-    checkpoint = model_config.get("checkpoint", model_config.get("hf_id", model_name))
+    # Resolve model
+    precision = experiment.get("precision", "BF16")
+    hf_id, extra_args, is_prequantized = resolve_model(model_name, models, precision)
 
-    # Get namespace - it's at top level in clusters.yaml
-    namespace = clusters.get("namespace", "default")
+    # Experiment identity
+    exp_name = make_dns_name(f"blis-{experiment['id']}-{model_name}")
+    v["experiment"]["name"] = exp_name
+    v["experiment"]["description"] = (
+        f"Saturation Exp #{experiment['id']}: {model_name} {precision} "
+        f"TP{experiment.get('tp', 1)} on {hw}"
+    )
 
-    # Build values structure
-    values = {
-        "model": {
-            "name": model_name,
-            "image": image,
-            "checkpoint": checkpoint,
-            "tp": experiment.get("tp", 1),
-            "dp": experiment.get("dp", 1) if experiment.get("dp") else 1,
-        },
-        "cluster": {
-            "context": cluster_config["context"],
-            "namespace": namespace,
-        },
-        "workload_file": str(workload_file),
-        "harness": experiment.get("harness", "orc"),
-        "scheduling": experiment.get("scheduling", "fcfs"),
-    }
+    # Stack config
+    v["stack"]["MAX_NUM_BATCHED_TOKENS"] = experiment.get("mbt", 2048)
+    if "max_model_len" in experiment:
+        v["stack"]["MAX_MODEL_LEN"] = experiment["max_model_len"]
+    if "max_num_seqs" in experiment:
+        v["stack"]["MAX_NUM_SEQS"] = experiment["max_num_seqs"]
+    if "block_size" in experiment:
+        v["stack"]["BLOCK_SIZE"] = experiment["block_size"]
 
-    # Add optional fields if present
-    if "precision" in experiment:
-        values["precision"] = experiment["precision"]
-    if "gpu_mem" in experiment:
-        values["gpu_mem"] = experiment["gpu_mem"]
-    if "chunk_size" in experiment:
-        values["chunk_size"] = experiment["chunk_size"]
+    v["stack"]["treatments"]["tensorParallelism"] = [experiment.get("tp", 1)]
+    v["stack"]["treatments"]["dataLocalParallelism"] = [experiment.get("dp", 1) if experiment.get("dp") else 1]
 
-    return values
+    # CPU offload
+    v["stack"]["cpu_offload"] = experiment.get("cpu_offload", experiment.get("kv_offload", False))
+    v["stack"]["kv_offloading_size"] = DEFAULT_KV_OFFLOAD_GB if v["stack"]["cpu_offload"] else 0
+
+    # GPU targeting
+    cluster = clusters[hw]
+    v["stack"]["model"]["helmValues"]["decode"]["acceleratorTypes"]["labelValues"] = [
+        cluster["gpu_label_value"]
+    ]
+
+    # GPU reaper exclusion
+    decode = v["stack"]["model"]["helmValues"]["decode"]
+    if "annotations" not in decode:
+        decode["annotations"] = {}
+    decode["annotations"]["gpu-reaper.io/exclude"] = "true"
+
+    # Build extra_overrides
+    v["stack"]["extra_overrides"] = build_extra_overrides(experiment, extra_args, is_prequantized)
+
+    # Workload - use the loaded workload data
+    harness = experiment.get("harness", "orc")
+    if harness in ["orc", "blis-orc"]:
+        v["workload"]["orcSpec"] = workload_data
+        v["workload"]["horizon"] = 600
+    else:
+        raise ValueError(f"Harness '{harness}' not supported for saturation experiments (only orc/blis-orc)")
+
+    # ORC config
+    if "orc" not in v:
+        v["orc"] = {}
+    v["orc"]["latency_model"] = "trained-physics"
+    v["orc"]["gpu_type"] = hw
+
+    return v
 
 
 # Template mapping
@@ -342,7 +446,7 @@ def generate_pipelinerun(exp_dir, exp_id):
     pipelinerun_file.write_text(pr_yaml)
 
 
-def process_experiment(exp_name, base_dir, models, clusters):
+def process_experiment(exp_name, base_dir, models, clusters, base_values_path):
     """Process a single saturation experiment.
 
     Args:
@@ -350,6 +454,7 @@ def process_experiment(exp_name, base_dir, models, clusters):
         base_dir: Base directory containing experiment folders
         models: Models config dict
         clusters: Clusters config dict
+        base_values_path: Path to base values template
 
     Returns:
         Tuple of (success: bool, error: str or None)
@@ -373,7 +478,10 @@ def process_experiment(exp_name, base_dir, models, clusters):
         write_yaml(workload_file, updated_workload)
 
         # 5. Generate values.yaml
-        values = generate_values_yaml(experiment, models, clusters, workload_file)
+        values = generate_values_yaml(
+            experiment, models, clusters, workload_file,
+            updated_workload, base_values_path
+        )
         write_yaml(exp_dir / "values.yaml", values)
 
         # 6. Compile pipeline
@@ -407,10 +515,13 @@ def main():
 
     # Load shared configs
     config_dir = script_dir.parent / "blis-campaign" / "config"
+    template_dir = script_dir.parent / "tektoncsample"
 
     try:
         models = load_yaml(config_dir / "models.yaml")
         clusters = load_yaml(config_dir / "clusters.yaml")
+        # Load base values template for ORC (default harness for saturation experiments)
+        base_values_path = template_dir / "blis-orc" / "values.yaml"
     except FileNotFoundError as e:
         print(f"ERROR: Config file not found: {e}")
         return 1
@@ -428,7 +539,7 @@ def main():
             continue
 
         # Process experiment
-        success, error = process_experiment(exp_name, base_dir, models, clusters)
+        success, error = process_experiment(exp_name, base_dir, models, clusters, base_values_path)
         results.append((exp_name, success, error))
 
         if success:
