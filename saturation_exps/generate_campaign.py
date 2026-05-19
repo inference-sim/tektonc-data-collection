@@ -544,11 +544,9 @@ def generate_pipelinerun(exp_dir, exp_id):
     experiment = load_json(exp_dir / "experiment.json")
     model = experiment["model"]
 
-    # Generate unique PipelineRun name with timestamp
-    # Convert exp_id to DNS-1123 compliant (replace underscores with hyphens)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    exp_id_dns = str(exp_id).replace("_", "-")
-    pr_name = f"saturation-{exp_id_dns}-{timestamp}"
+    # Use placeholder name - run.py will replace with unique timestamped name
+    # This allows run.py to track the PipelineRun it creates
+    pr_name = "__PIPELINE_RUN_NAME__"
 
     # Generate PipelineRun YAML
     pr_yaml = PIPELINERUN_TEMPLATE.format(
