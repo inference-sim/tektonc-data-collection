@@ -150,6 +150,61 @@ def create_variant_workload(workload_data, variant_rate, output_path):
     return updated
 
 
+def generate_variant(exp_name, variant_name, variant_rate, source_dir,
+                     output_dir, experiment, clusters, base_values_path):
+    """Generate a complete variant directory with all pipeline files.
+
+    Args:
+        exp_name: Base experiment name (e.g., "exp1")
+        variant_name: Variant suffix (e.g., "saturation" or "overloaded")
+        variant_rate: RPS value for this variant
+        source_dir: Source experiment directory (contains original workload)
+        output_dir: Output directory for variant
+        experiment: Parsed experiment.json dict
+        clusters: Clusters config dict
+        base_values_path: Path to base values template
+
+    Returns:
+        Tuple of (success: bool, error: str or None)
+    """
+    try:
+        # Create output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Copy and update experiment.json
+        variant_experiment = experiment.copy()
+        variant_experiment["id"] = f"{exp_name}_{variant_name}"
+        write_json(output_dir / "experiment.json", variant_experiment)
+
+        # 2. Find source workload file
+        workload_file = find_workload_file(source_dir)
+        workload_data = load_yaml(workload_file)
+
+        # 3. Create variant workload with updated trace_rate
+        variant_workload_path = output_dir / f"workload_{variant_name}.yaml"
+        create_variant_workload(workload_data, variant_rate, variant_workload_path)
+
+        # 4. Generate values.yaml
+        variant_workload_data = load_yaml(variant_workload_path)
+        values = generate_values_yaml(
+            variant_experiment, clusters, variant_workload_path,
+            variant_workload_data, base_values_path
+        )
+        write_yaml(output_dir / "values.yaml", values)
+
+        # 5. Compile pipeline.yaml
+        harness = variant_experiment.get("harness", "orc")
+        compile_pipeline(harness, output_dir)
+
+        # 6. Generate pipelinerun.yaml
+        generate_pipelinerun(output_dir, variant_experiment["id"])
+
+        return True, None
+
+    except Exception as e:
+        return False, str(e)
+
+
 def load_json(path):
     """Load JSON file.
 
@@ -193,6 +248,17 @@ def write_yaml(path, data):
     """
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, width=200)
+
+
+def write_json(path, data):
+    """Write data to JSON file.
+
+    Args:
+        path: Path to output JSON file
+        data: Data to serialize
+    """
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 import copy
@@ -381,11 +447,16 @@ def compile_pipeline(harness, exp_dir):
     values_file = exp_dir / "values.yaml"
     output_file = exp_dir / "pipeline.yaml"
 
+    # Compute absolute path to tektonc (relative to this script)
+    script_dir = Path(__file__).parent
+    tektonc_path = script_dir.parent / "tektonc" / "tektonc.py"
+    template_path = script_dir.parent / template
+
     # Call tektonc
     cmd = [
         "python",
-        "tektonc/tektonc.py",
-        "-t", template,
+        str(tektonc_path),
+        "-t", str(template_path),
         "-f", str(values_file),
         "-o", str(output_file),
     ]
