@@ -108,3 +108,47 @@ def test_generate_variant():
         # Verify workload has correct rate
         workload = load_yaml(output_dir / "workload_saturation.yaml")
         assert workload["cohorts"][0]["spike"]["trace_rate"] == variant_rate
+
+
+def test_process_experiment_dual_variants():
+    """Test that process_experiment generates both variants."""
+    from generate_campaign import process_experiment
+    import tempfile
+    import shutil
+
+    # Use exp1 as test data
+    exp1_dir = Path(__file__).parent.parent / "exp1"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_dir = Path(tmpdir)
+
+        # Copy exp1 to temp dir
+        src_dir = base_dir / "exp1"
+        shutil.copytree(exp1_dir, src_dir)
+
+        # Mock configs
+        clusters = {"H100": {"gpu_label_value": "nvidia.com/gpu.product=H100"}}
+        base_values_path = Path(__file__).parent.parent.parent / "tektoncsample" / "blis-orc" / "values.yaml"
+
+        # Process experiment
+        success, error = process_experiment("exp1", base_dir, clusters, base_values_path)
+
+        if not success:
+            pytest.fail(f"process_experiment failed: {error}")
+
+        assert success is True
+        assert error is None
+
+        # Verify both variants exist
+        assert (base_dir / "exp1_saturation").is_dir()
+        assert (base_dir / "exp1_overloaded").is_dir()
+
+        # Verify saturation variant files
+        assert (base_dir / "exp1_saturation" / "experiment.json").exists()
+        assert (base_dir / "exp1_saturation" / "workload_saturation.yaml").exists()
+        assert (base_dir / "exp1_saturation" / "values.yaml").exists()
+
+        # Verify overloaded variant files
+        assert (base_dir / "exp1_overloaded" / "experiment.json").exists()
+        assert (base_dir / "exp1_overloaded" / "workload_overloaded.yaml").exists()
+        assert (base_dir / "exp1_overloaded" / "values.yaml").exists()

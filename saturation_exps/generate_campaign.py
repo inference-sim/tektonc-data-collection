@@ -548,7 +548,7 @@ def generate_pipelinerun(exp_dir, exp_id):
 
 
 def process_experiment(exp_name, base_dir, clusters, base_values_path):
-    """Process a single saturation experiment.
+    """Process a single saturation experiment - generates both variants.
 
     Args:
         exp_name: Experiment folder name (e.g., "exp1")
@@ -559,37 +559,47 @@ def process_experiment(exp_name, base_dir, clusters, base_values_path):
     Returns:
         Tuple of (success: bool, error: str or None)
     """
-    exp_dir = base_dir / exp_name
+    source_dir = base_dir / exp_name
 
     try:
-        # 1. Load experiment config
-        experiment = load_json(exp_dir / "experiment.json")
+        # 1. Load source experiment config
+        experiment = load_json(source_dir / "experiment.json")
 
-        # 2. Load saturation results
-        sat_results = load_json(exp_dir / "saturation_results.json")
-        saturation_rps = sat_results["result"]["saturation_point_rps"]
+        # 2. Load saturation results and extract rates
+        sat_results = load_json(source_dir / "saturation_results.json")
+        saturation_rate, overloaded_rate = extract_variant_rates(sat_results)
 
-        # 3. Find and load workload file
-        workload_file = find_workload_file(exp_dir)
-        workload_data = load_yaml(workload_file)
-
-        # 4. Update workload trace_rate
-        updated_workload = update_workload_trace_rate(workload_data, saturation_rps)
-        write_yaml(workload_file, updated_workload)
-
-        # 5. Generate values.yaml
-        values = generate_values_yaml(
-            experiment, clusters, workload_file,
-            updated_workload, base_values_path
+        # 3. Generate saturation variant
+        saturation_dir = base_dir / f"{exp_name}_saturation"
+        success_sat, error_sat = generate_variant(
+            exp_name=exp_name,
+            variant_name="saturation",
+            variant_rate=saturation_rate,
+            source_dir=source_dir,
+            output_dir=saturation_dir,
+            experiment=experiment,
+            clusters=clusters,
+            base_values_path=base_values_path
         )
-        write_yaml(exp_dir / "values.yaml", values)
 
-        # 6. Compile pipeline
-        harness = experiment.get("harness", "orc")
-        compile_pipeline(harness, exp_dir)
+        if not success_sat:
+            return False, f"Saturation variant failed: {error_sat}"
 
-        # 7. Generate PipelineRun
-        generate_pipelinerun(exp_dir, experiment["id"])
+        # 4. Generate overloaded variant
+        overloaded_dir = base_dir / f"{exp_name}_overloaded"
+        success_over, error_over = generate_variant(
+            exp_name=exp_name,
+            variant_name="overloaded",
+            variant_rate=overloaded_rate,
+            source_dir=source_dir,
+            output_dir=overloaded_dir,
+            experiment=experiment,
+            clusters=clusters,
+            base_values_path=base_values_path
+        )
+
+        if not success_over:
+            return False, f"Overloaded variant failed: {error_over}"
 
         return True, None
 
@@ -599,8 +609,6 @@ def process_experiment(exp_name, base_dir, clusters, base_values_path):
         return False, f"Missing required field: {e}"
     except ValueError as e:
         return False, f"Validation error: {e}"
-    except RuntimeError as e:
-        return False, f"Compilation error: {e}"
     except Exception as e:
         return False, f"Unexpected error: {e}"
 
