@@ -5,18 +5,32 @@ metadata:
   name: collect-results
 spec:
   description: >-
-    Synchronization barrier. Runs after all run-workload-blis-observe tasks.
-    Also collects EPP and vLLM decode pod logs into the workload results directory
-    on data-pvc before the finally block deletes those deployments.
+    Synchronization barrier and log collector. Runs after all
+    run-workload-blis-observe tasks. Collects vLLM (decode + prefill)
+    and EPP pod logs into the workload results directory on data-pvc
+    before the finally block tears down deployments.
+
+
+    ASSUMPTIONS:
+
+    1. One model stack per namespace — pod discovery uses type-based
+       selectors (not model-specific labels), so all pods of a given
+       type in the namespace are collected. This invariant is enforced
+       by deploy.py slot allocation in the sim2real pipeline.
+
+    2. Stack deployed via llmdbenchmark standup — which installs the
+       llm-d-modelservice Helm chart (applies llm-d.ai/role=decode and
+       llm-d.ai/role=prefill) and the inferencepool Helm chart (applies
+       app.kubernetes.io/managed-by=inferencepool on EPP pods).
+       Alternative deployment methods may not apply these labels.
 
   workspaces:
     - name: data
       description: "Shared PVC (data-pvc)"
 
   params:
-    - { name: namespace,   type: string }
-    - { name: modelLabel,  type: string }
-    - { name: resultsDir,  type: string }
+    - { name: namespace,       type: string }
+    - { name: resultsDir,      type: string }
     - { name: containerName,   type: string, default: "epp" }
     - { name: windowMinutes,   type: string, default: "2" }
 
@@ -34,35 +48,47 @@ spec:
         runAsUser: 0
       script: |
         #!/bin/sh
-        # Non-fatal: failures here must not fail the pipeline.
         set +e
 
         NAMESPACE="$(params.namespace)"
-        MODEL_LABEL="$(params.modelLabel)"
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+        SERVER_LOG_DIR="${RESULTS_DIR}/server_logs"
 
         mkdir -p "${RESULTS_DIR}"
-
-        # --- vLLM decode pod logs ---
-        SERVER_LOG_DIR="${RESULTS_DIR}/server_logs"
         rm -rf "${SERVER_LOG_DIR}"
         mkdir -p "${SERVER_LOG_DIR}"
 
+        # --- vLLM decode pod logs (llm-d-modelservice chart label) ---
         DECODE_PODS=$(kubectl get pods -n "${NAMESPACE}" \
-          -l "llm-d.ai/model=${MODEL_LABEL}" \
+          -l "llm-d.ai/role=decode" \
           --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
 
         if [ -z "${DECODE_PODS}" ]; then
-          echo "No vLLM decode pods found for llm-d.ai/model=${MODEL_LABEL}, skipping."
+          echo "WARNING: No vLLM decode pods found (llm-d.ai/role=decode), skipping."
         else
           for pod in ${DECODE_PODS}; do
-            echo "Collecting vLLM logs: ${pod}"
+            echo "Collecting vLLM decode logs: ${pod}"
             kubectl logs "${pod}" -n "${NAMESPACE}" -c vllm \
               > "${SERVER_LOG_DIR}/${pod}_vllm.log" 2>&1
           done
         fi
 
-        echo "Log collection complete for $(params.resultsDir)."
+        # --- vLLM prefill pod logs (llm-d-modelservice chart label) ---
+        PREFILL_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+          -l "llm-d.ai/role=prefill" \
+          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+
+        if [ -z "${PREFILL_PODS}" ]; then
+          echo "No vLLM prefill pods found (llm-d.ai/role=prefill), skipping."
+        else
+          for pod in ${PREFILL_PODS}; do
+            echo "Collecting vLLM prefill logs: ${pod}"
+            kubectl logs "${pod}" -n "${NAMESPACE}" -c vllm \
+              > "${SERVER_LOG_DIR}/${pod}_vllm.log" 2>&1
+          done
+        fi
+
+        echo "Server log collection complete for $(params.resultsDir)."
 
     - name: collect-epp-logs
       image: alpine/kubectl:1.34.1
@@ -73,7 +99,6 @@ spec:
         set +e
 
         NAMESPACE="$(params.namespace)"
-        MODEL_LABEL="$(params.modelLabel)"
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
         LOG_DIR="${RESULTS_DIR}/epp_logs"
         WINDOW="$(params.windowMinutes)"
@@ -82,8 +107,7 @@ spec:
         rm -rf "${LOG_DIR}"
         mkdir -p "${LOG_DIR}"
 
-        # Determine collection window from the marker written by run-workload-blis-observe.
-        # Falls back to --since=30m if marker is missing (e.g. old pipeline run).
+        # Determine collection window from marker written by run-workload-blis-observe.
         if [ -f "${SINCE_FILE}" ]; then
           SINCE_TIME=$(cat "${SINCE_FILE}")
           SINCE_ARG="--since-time=${SINCE_TIME}"
@@ -93,20 +117,19 @@ spec:
           SINCE_ARG="--since=30m"
         fi
 
-        # Pod discovery — same truncation logic as deploy-gaie and stream-epp-logs.
-        RELEASE="${MODEL_LABEL}-gaie"
-        EPP_DEPLOY="$(echo -n "${RELEASE}" | cut -c1-40)-epp"
-
-        EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-          | grep "^${EPP_DEPLOY}" | awk '$3 == "Running" {print $1}' || true)
+        # --- EPP pod discovery (inferencepool chart label) ---
+        EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+          -l "app.kubernetes.io/managed-by=inferencepool" \
+          --field-selector=status.phase=Running \
+          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
 
         if [ -z "${EPP_PODS}" ]; then
-          echo "WARNING: No running EPP pods found with prefix ${EPP_DEPLOY}, skipping."
+          echo "WARNING: No running EPP pods found (app.kubernetes.io/managed-by=inferencepool), skipping."
           exit 0
         fi
 
         for pod in ${EPP_PODS}; do
-          echo "Collecting EPP logs: ${pod} → ${LOG_DIR}/"
+          echo "Collecting EPP logs: ${pod} -> ${LOG_DIR}/"
           kubectl logs ${SINCE_ARG} --timestamps=true "${pod}" \
             -n "${NAMESPACE}" -c "$(params.containerName)" \
             | awk -v outdir="${LOG_DIR}" -v pod="${pod}" -v win="${WINDOW}" '
