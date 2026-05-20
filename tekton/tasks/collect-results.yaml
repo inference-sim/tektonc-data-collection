@@ -21,7 +21,7 @@ spec:
     2. Stack deployed via llmdbenchmark standup — which installs the
        llm-d-modelservice Helm chart (applies llm-d.ai/role=decode and
        llm-d.ai/role=prefill) and the inferencepool Helm chart (applies
-       app.kubernetes.io/managed-by=inferencepool on EPP pods).
+       inferencepool=<name>-gaie-epp on EPP pods).
        Alternative deployment methods may not apply these labels.
 
   workspaces:
@@ -119,12 +119,12 @@ spec:
 
         # --- EPP pod discovery (inferencepool chart label) ---
         EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
-          -l "app.kubernetes.io/managed-by=inferencepool" \
+          -l "inferencepool" \
           --field-selector=status.phase=Running \
           --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
 
         if [ -z "${EPP_PODS}" ]; then
-          echo "WARNING: No running EPP pods found (app.kubernetes.io/managed-by=inferencepool), skipping."
+          echo "WARNING: No running EPP pods found (label: inferencepool), skipping."
           exit 0
         fi
 
