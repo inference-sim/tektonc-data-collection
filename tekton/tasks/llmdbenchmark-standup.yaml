@@ -162,7 +162,7 @@ spec:
         fi
 
         # shellcheck disable=SC2086
-        llmdbenchmark ${GLOBAL_ARGS} standup ${STANDUP_ARGS}
+        llmdbenchmark --verbose ${GLOBAL_ARGS} standup ${STANDUP_ARGS}
 
         echo "🔎 Discovering gateway endpoint"
         ENDPOINT=$(llmdbenchmark --spec "${SPEC_FILE}" run \
