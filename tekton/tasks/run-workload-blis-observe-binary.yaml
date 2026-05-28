@@ -62,6 +62,7 @@ spec:
           --model $(params.model) \
           --workload-spec /workspace/workload.yaml \
           --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
-          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv
+          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv \
+          --saturation-report /workspace/data/$(params.resultsDir)/saturation.json
         echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
         ls /workspace/data/$(params.resultsDir)
