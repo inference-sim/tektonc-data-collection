@@ -58,6 +58,7 @@ spec:
           --max-concurrency 10000 \
           --timeout 900 \
           --warmup-requests 200 \
+          --post-hoc-detector composite \
           --server-url $(params.endpoint) \
           --model $(params.model) \
           --workload-spec /workspace/workload.yaml \
