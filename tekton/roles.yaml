@@ -110,6 +110,10 @@ rules:
 - apiGroups: ["gateway.kgateway.dev"]
   resources: ["gatewayparameters"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["llm-d.ai"]
+  resources: ["inferenceobjectives", "inferencemodelrewrites",
+              "inferenceobjectives/status", "inferencemodelrewrites/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencepools", "inferencemodels", "inferenceobjectives", "inferencemodelrewrites",
               "inferenceobjectives/status", "inferencemodelrewrites/status"]
