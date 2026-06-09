@@ -5,10 +5,11 @@ metadata:
   name: collect-results
 spec:
   description: >-
-    Synchronization barrier and log collector. Runs after all
-    run-workload-blis-observe tasks. Collects vLLM (decode + prefill)
-    and EPP pod logs into the workload results directory on data-pvc
-    before the finally block tears down deployments.
+    Synchronization barrier and vLLM log collector. Runs after all
+    run-workload-blis-observe tasks. Collects vLLM decode + prefill pod
+    logs into the workload results directory on data-pvc, then writes the
+    epp_stream_done sentinel that signals stream-epp-logs to stop following
+    EPP pods, before the finally block tears down deployments.
 
 
     ASSUMPTIONS:
@@ -20,9 +21,11 @@ spec:
 
     2. Stack deployed via llmdbenchmark standup — which installs the
        llm-d-modelservice Helm chart (applies llm-d.ai/role=decode and
-       llm-d.ai/role=prefill) and the inferencepool Helm chart (applies
-       inferencepool=<name>-gaie-epp on EPP pods).
+       llm-d.ai/role=prefill).
        Alternative deployment methods may not apply these labels.
+
+    3. EPP logs are captured by the parallel stream-epp-logs task; this
+       task no longer reads EPP container logs directly.
 
   workspaces:
     - name: data
@@ -32,7 +35,6 @@ spec:
     - { name: namespace,       type: string }
     - { name: resultsDir,      type: string }
     - { name: containerName,   type: string, default: "epp" }
-    - { name: windowMinutes,   type: string, default: "2" }
 
   steps:
     - name: barrier
@@ -55,6 +57,7 @@ spec:
         SERVER_LOG_DIR="${RESULTS_DIR}/server_logs"
 
         mkdir -p "${RESULTS_DIR}"
+        rm -f "${RESULTS_DIR}/epp_stream_done"
         rm -rf "${SERVER_LOG_DIR}"
         mkdir -p "${SERVER_LOG_DIR}"
 
@@ -88,68 +91,7 @@ spec:
           done
         fi
 
+        # Signal stream-epp-logs that this workload is done so it can stop following.
+        touch "${RESULTS_DIR}/epp_stream_done"
+
         echo "Server log collection complete for $(params.resultsDir)."
-
-    - name: collect-epp-logs
-      image: alpine/kubectl:1.34.1
-      securityContext:
-        runAsUser: 0
-      script: |
-        #!/bin/sh
-        set +e
-
-        NAMESPACE="$(params.namespace)"
-        RESULTS_DIR="/workspace/data/$(params.resultsDir)"
-        LOG_DIR="${RESULTS_DIR}/epp_logs"
-        WINDOW="$(params.windowMinutes)"
-        SINCE_FILE="${RESULTS_DIR}/epp_log_since"
-
-        rm -rf "${LOG_DIR}"
-        mkdir -p "${LOG_DIR}"
-
-        # Determine collection window from marker written by run-workload-blis-observe.
-        if [ -f "${SINCE_FILE}" ]; then
-          SINCE_TIME=$(cat "${SINCE_FILE}")
-          SINCE_ARG="--since-time=${SINCE_TIME}"
-          echo "Collecting EPP logs since ${SINCE_TIME}"
-        else
-          echo "WARNING: epp_log_since marker not found, falling back to --since=30m"
-          SINCE_ARG="--since=30m"
-        fi
-
-        # --- EPP pod discovery (inferencepool chart label) ---
-        EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
-          -l "inferencepool" \
-          --field-selector=status.phase=Running \
-          --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
-
-        if [ -z "${EPP_PODS}" ]; then
-          echo "WARNING: No running EPP pods found (label: inferencepool), skipping."
-          exit 0
-        fi
-
-        for pod in ${EPP_PODS}; do
-          echo "Collecting EPP logs: ${pod} -> ${LOG_DIR}/"
-          kubectl logs ${SINCE_ARG} --timestamps=true "${pod}" \
-            -n "${NAMESPACE}" -c "$(params.containerName)" \
-            | awk -v outdir="${LOG_DIR}" -v pod="${pod}" -v win="${WINDOW}" '
-              {
-                split($1, dt, "T")
-                split(dt[2], tm, ":")
-                hour = tm[1]
-                min  = int(tm[2])
-                bucket = int(min / win) * win
-                fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
-                if (fname != _prev) {
-                  system("mkdir -p " outdir)
-                  _prev = fname
-                }
-                out = ""
-                for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
-                print out >> fname
-                fflush(fname)
-              }
-            '
-        done
-
-        echo "EPP log collection complete for $(params.resultsDir)"
