@@ -106,6 +106,91 @@ else
 fi
 
 echo ""
+echo "=== Regression: outdir removed between writes (run-workload rm -rf race) ==="
+# In the live pipeline, run-workload-blis-observe-binary's first action is
+# `rm -rf "${RESULTS_DIR}"`, which can wipe out the streamer's epp_logs/
+# directory between two awk writes. The awk script must recreate outdir on
+# every new bucket-file transition so the second write still lands.
+TMPDIR_RACE=$(mktemp -d)
+RACE_OUT="${TMPDIR_RACE}/epp_logs"
+mkdir -p "${RACE_OUT}"
+
+# Two log lines into the same bucket (no transition), then nuke outdir, then
+# a third line into a NEW bucket — the new-bucket transition should mkdir.
+cat > "${TMPDIR_RACE}/input.txt" << 'EOF'
+2026-04-11T23:28:39Z {"msg":"line A"}
+2026-04-11T23:28:50Z {"msg":"line B"}
+2026-04-11T23:30:00Z {"msg":"line C after rm -rf"}
+EOF
+
+# Run the awk in two stages so we can rm -rf in the middle. We use the same
+# awk body as stream-epp-logs.yaml (fname/_prev/system mkdir defense). The
+# stages share state via a single awk invocation reading from a fifo we feed
+# manually — simpler: do it via two separate awk runs and check outcomes.
+#
+# Stage 1: feed lines A+B (single bucket 2325), expect file with 2 lines.
+awk -v outdir="${RACE_OUT}" -v pod="${POD}" -v win="5" '
+  {
+    split($1, dt, "T")
+    split(dt[2], tm, ":")
+    hour = tm[1]
+    min  = int(tm[2])
+    bucket = int(min / win) * win
+    fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
+    if (fname != _prev) {
+      system("mkdir -p " outdir)
+      _prev = fname
+    }
+    out = ""
+    for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
+    print out >> fname
+    fflush(fname)
+  }
+' <<'EOF'
+2026-04-11T23:28:39Z {"msg":"line A"}
+2026-04-11T23:28:50Z {"msg":"line B"}
+EOF
+
+# Sabotage: simulate run-workload's rm -rf.
+rm -rf "${RACE_OUT}"
+
+# Stage 2: feed line C (new bucket 2330). Defensive mkdir should recreate
+# outdir; the write should land.
+awk -v outdir="${RACE_OUT}" -v pod="${POD}" -v win="5" '
+  {
+    split($1, dt, "T")
+    split(dt[2], tm, ":")
+    hour = tm[1]
+    min  = int(tm[2])
+    bucket = int(min / win) * win
+    fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
+    if (fname != _prev) {
+      system("mkdir -p " outdir)
+      _prev = fname
+    }
+    out = ""
+    for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
+    print out >> fname
+    fflush(fname)
+  }
+' <<'EOF'
+2026-04-11T23:30:00Z {"msg":"line C after rm -rf"}
+EOF
+
+POST_RACE_FILE="${RACE_OUT}/${POD}_2330.log"
+if [ -f "${POST_RACE_FILE}" ]; then
+  echo "PASS: write after outdir rm -rf landed (${POST_RACE_FILE})"
+else
+  echo "FAIL: outdir was rm -rf'd and the next write was lost"
+  PASS=false
+fi
+
+# The stage-1 file at 2325 was wiped by rm -rf — that's expected, not a regression.
+# We're testing that the streamer survives the wipe and continues.
+
+rm -rf "${TMPDIR_RACE}"
+
+echo ""
 if ${PASS}; then
   echo "ALL TESTS PASSED"
   exit 0
