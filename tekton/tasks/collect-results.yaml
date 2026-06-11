@@ -41,7 +41,8 @@ spec:
       default: "pod,deployment,service,inferencepool,inferencemodel,gateway,httproute"
       description: >-
         Comma-separated list of Kubernetes resource kinds to collect
-        manifests for. Kinds that don't exist on the cluster are skipped.
+        manifests for. Kinds not registered on the cluster or with zero
+        instances in the namespace are silently skipped.
 
   steps:
     - name: barrier
@@ -132,7 +133,11 @@ spec:
           for name in ${ITEMS}; do
             echo "Collecting ${kind}: ${name}"
             kubectl get "${kind}" "${name}" -n "${NAMESPACE}" -o yaml \
-              > "${RES_DIR}/${kind}-${name}.yaml" 2>&1
+              > "${RES_DIR}/${kind}-${name}.yaml" 2>/dev/null
+            if [ $? -ne 0 ]; then
+              echo "WARNING: failed to get ${kind}/${name}, removing partial file"
+              rm -f "${RES_DIR}/${kind}-${name}.yaml"
+            fi
           done
         done
 
