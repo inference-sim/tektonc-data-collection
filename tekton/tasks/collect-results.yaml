@@ -5,11 +5,12 @@ metadata:
   name: collect-results
 spec:
   description: >-
-    Synchronization barrier and vLLM log collector. Runs after all
-    run-workload-blis-observe tasks. Collects vLLM decode + prefill pod
-    logs into the workload results directory on data-pvc, then writes the
-    epp_stream_done sentinel that signals stream-epp-logs to stop following
-    EPP pods, before the finally block tears down deployments.
+    Synchronization barrier, vLLM log collector, and resource manifest
+    snapshot. Runs after all run-workload-blis-observe tasks. Collects
+    vLLM decode + prefill pod logs and deployed resource manifests into
+    the workload results directory on data-pvc, then writes the
+    epp_stream_done sentinel that signals stream-epp-logs to stop
+    following EPP pods, before the finally block tears down deployments.
 
 
     ASSUMPTIONS:
@@ -35,6 +36,13 @@ spec:
     - { name: namespace,       type: string }
     - { name: resultsDir,      type: string }
     - { name: containerName,   type: string, default: "epp" }
+    - name: resourceKinds
+      type: string
+      default: "pod,deployment,service,inferencepool,inferencemodel,gateway,httproute"
+      description: >-
+        Comma-separated list of Kubernetes resource kinds to collect
+        manifests for. Kinds not registered on the cluster or with zero
+        instances in the namespace are silently skipped.
 
   steps:
     - name: barrier
@@ -95,3 +103,42 @@ spec:
         touch "${RESULTS_DIR}/epp_stream_done"
 
         echo "Server log collection complete for $(params.resultsDir)."
+
+    - name: collect-resources
+      image: alpine/kubectl:1.34.1
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        set +e
+
+        NAMESPACE="$(params.namespace)"
+        RESULTS_DIR="/workspace/data/$(params.resultsDir)"
+        RES_DIR="${RESULTS_DIR}/resources"
+
+        rm -rf "${RES_DIR}"
+        mkdir -p "${RES_DIR}"
+
+        KINDS="$(params.resourceKinds)"
+
+        for kind in $(echo "${KINDS}" | tr ',' ' '); do
+          ITEMS=$(kubectl get "${kind}" -n "${NAMESPACE}" \
+            --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+
+          if [ -z "${ITEMS}" ]; then
+            echo "No ${kind} resources found, skipping."
+            continue
+          fi
+
+          for name in ${ITEMS}; do
+            echo "Collecting ${kind}: ${name}"
+            kubectl get "${kind}" "${name}" -n "${NAMESPACE}" -o yaml \
+              > "${RES_DIR}/${kind}-${name}.yaml" 2>/dev/null
+            if [ $? -ne 0 ]; then
+              echo "WARNING: failed to get ${kind}/${name}, removing partial file"
+              rm -f "${RES_DIR}/${kind}-${name}.yaml"
+            fi
+          done
+        done
+
+        echo "Resource collection complete for $(params.resultsDir)"
