@@ -90,21 +90,39 @@ spec:
 
         export GITHUB_TOKEN="${GITHUB_TOKEN}"
 
-        python3 -c "import sys; open('/tmp/llmdbench-config/spec.yaml.j2','w').write(sys.argv[1])" \
-          '$(params.spec_content)'
+        # Write Tekton params to files via QUOTED heredocs.
+        # Param substitution is verbatim text-replace, so embedded shell
+        # metacharacters (single quotes, `@`, `$`, backticks, `%`) survived
+        # untouched here — vs. interpolation into a single-quoted bash arg,
+        # where embedded `'` would close the outer quoting and corrupt the
+        # value (e.g. YAML keys like '@type' lose their quoting and break
+        # downstream yaml.safe_load).
+        cat <<'__TEKTON_PARAM_EOF__' > /tmp/llmdbench-config/spec.yaml.j2
+        $(params.spec_content)
+        __TEKTON_PARAM_EOF__
 
-        SCENARIO='$(params.scenario_content)'
-        if [ -n "${SCENARIO}" ]; then
+        cat <<'__TEKTON_PARAM_EOF__' > /tmp/llmdbench-config/scenario_in.yaml
+        $(params.scenario_content)
+        __TEKTON_PARAM_EOF__
+
+        if [ -s /tmp/llmdbench-config/scenario_in.yaml ]; then
           PLANS_DIR="$(params.plans_dir)"
           if [ -n "${PLANS_DIR}" ] && [ -d "$(workspaces.data.path)" ]; then
-            WORK_DIR="$(workspaces.data.path)/${PLANS_DIR}"
+            export WORK_DIR="$(workspaces.data.path)/${PLANS_DIR}"
             mkdir -p "${WORK_DIR}"
             pip install pyyaml -q
-            python3 -c "import sys,yaml; s=yaml.safe_load(sys.argv[1]); sc=s.get('scenario',[]); sc and sc[0].update({'workDir':sys.argv[2]}); open('/tmp/llmdbench-config/scenario.yaml','w').write(yaml.dump(s,default_flow_style=False))" \
-              "${SCENARIO}" "${WORK_DIR}"
+            python3 <<'__TEKTON_PY_EOF__'
+        import os, yaml
+        with open('/tmp/llmdbench-config/scenario_in.yaml') as f:
+            s = yaml.safe_load(f)
+        sc = s.get('scenario', [])
+        if sc:
+            sc[0]['workDir'] = os.environ['WORK_DIR']
+        with open('/tmp/llmdbench-config/scenario.yaml', 'w') as f:
+            yaml.dump(s, f, default_flow_style=False)
+        __TEKTON_PY_EOF__
           else
-            python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
-              "${SCENARIO}"
+            cp /tmp/llmdbench-config/scenario_in.yaml /tmp/llmdbench-config/scenario.yaml
           fi
         fi
 
