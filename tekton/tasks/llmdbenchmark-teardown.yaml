@@ -63,13 +63,25 @@ spec:
         #!/bin/bash
         set -eux
 
-        python3 -c "import sys; open('/tmp/llmdbench-config/spec.yaml.j2','w').write(sys.argv[1])" \
-          '$(params.spec_content)'
+        # Write Tekton params to files via QUOTED heredocs.
+        # Param substitution is verbatim text-replace, so embedded shell
+        # metacharacters (single quotes, `@`, `$`, backticks, `%`) survive
+        # untouched here — vs. interpolation into a single-quoted bash arg,
+        # where embedded `'` would close the outer quoting and corrupt the
+        # value (e.g. YAML keys like '@type' lose their quoting and break
+        # downstream yaml.safe_load).
+        cat <<'__TEKTON_PARAM_EOF__' > /tmp/llmdbench-config/spec.yaml.j2
+        $(params.spec_content)
+        __TEKTON_PARAM_EOF__
 
-        SCENARIO='$(params.scenario_content)'
-        if [ -n "${SCENARIO}" ]; then
-          python3 -c "import sys; open('/tmp/llmdbench-config/scenario.yaml','w').write(sys.argv[1])" \
-            '$(params.scenario_content)'
+        cat <<'__TEKTON_PARAM_EOF__' > /tmp/llmdbench-config/scenario.yaml
+        $(params.scenario_content)
+        __TEKTON_PARAM_EOF__
+
+        # If scenario_content is empty, leave an empty file (matches prior
+        # semantics: empty scenario means no override).
+        if [ ! -s /tmp/llmdbench-config/scenario.yaml ]; then
+          rm -f /tmp/llmdbench-config/scenario.yaml
         fi
 
     - name: install-and-teardown

@@ -44,24 +44,39 @@ spec:
           exit 0
         fi
 
-        # Phase 1 — Pod discovery (inferencepool chart label, matches collect-results)
-        echo "Waiting for running EPP pod (label: inferencepool)"
+        # Phase 1 — Pod discovery
+        # Try llm-d-router-gateway label first (post-#1455 migration); fall back to
+        # the legacy inferencepool chart label for older deployments.
+        echo "Waiting for running EPP pod (labels: llm-d.ai/igw-mode=llm-d-router-gateway, then inferencepool)"
         EPP_PODS=""
+        EPP_SELECTOR=""
         i=0
         while [ $i -lt 20 ]; do
+          EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+            -l "llm-d.ai/igw-mode=llm-d-router-gateway" \
+            --field-selector=status.phase=Running \
+            --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+          if [ -n "${EPP_PODS}" ]; then
+            EPP_SELECTOR="llm-d.ai/igw-mode=llm-d-router-gateway"
+            break
+          fi
           EPP_PODS=$(kubectl get pods -n "${NAMESPACE}" \
             -l "inferencepool" \
             --field-selector=status.phase=Running \
             --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
-          [ -n "${EPP_PODS}" ] && break
+          if [ -n "${EPP_PODS}" ]; then
+            EPP_SELECTOR="inferencepool"
+            break
+          fi
           i=$((i+1))
           sleep 3
         done
 
         if [ -z "${EPP_PODS}" ]; then
-          echo "WARNING: No running EPP pods found (label: inferencepool) after 60s, skipping."
+          echo "WARNING: No running EPP pods found (tried: llm-d.ai/igw-mode=llm-d-router-gateway, inferencepool) after 60s, skipping."
           exit 0
         fi
+        echo "Discovered EPP pods via selector: ${EPP_SELECTOR}"
 
         # Phase 2 — Streaming
         rm -f "${SENTINEL}"
@@ -109,8 +124,13 @@ spec:
             echo "Sentinel found, stopping streams."
             break
           fi
+          # Use the same selector that found pods at startup so the alive-poll
+          # set matches the streaming set. Without ${EPP_SELECTOR} pinned here,
+          # a deployment using llm-d-router-gateway labels would always look
+          # "no pods alive" under the legacy inferencepool selector and exit
+          # the loop immediately.
           EPP_ALIVE=$(kubectl get pods -n "${NAMESPACE}" \
-            -l "inferencepool" \
+            -l "${EPP_SELECTOR}" \
             --field-selector=status.phase=Running \
             --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
           if [ -z "${EPP_ALIVE}" ]; then
