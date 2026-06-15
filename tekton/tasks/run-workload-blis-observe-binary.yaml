@@ -57,7 +57,8 @@ spec:
         "${BLIS}" observe \
           --max-concurrency 10000 \
           --timeout 1800 \
-          --warmup-requests 200 \
+          --prewarm-duration 60s \
+          --warmup-requests 50 \
           --post-hoc-detector composite \
           --server-url $(params.endpoint) \
           --model $(params.model) \
