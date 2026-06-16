@@ -9,8 +9,9 @@ spec:
     snapshot. Runs after all run-workload-blis-observe tasks. Collects
     vLLM decode + prefill pod logs and deployed resource manifests into
     the workload results directory on data-pvc, then writes the
-    epp_stream_done sentinel that signals stream-epp-logs to stop
-    following EPP pods, before the finally block tears down deployments.
+    epp_stream_done and gpu_stream_done sentinels that signal the
+    parallel streamers (stream-epp-logs, stream-gpu-stats) to stop,
+    before the finally block tears down deployments.
 
 
     ASSUMPTIONS:
@@ -66,6 +67,7 @@ spec:
 
         mkdir -p "${RESULTS_DIR}"
         rm -f "${RESULTS_DIR}/epp_stream_done"
+        rm -f "${RESULTS_DIR}/gpu_stream_done"
         rm -rf "${SERVER_LOG_DIR}"
         mkdir -p "${SERVER_LOG_DIR}"
 
@@ -99,8 +101,11 @@ spec:
           done
         fi
 
-        # Signal stream-epp-logs that this workload is done so it can stop following.
+        # Signal sibling streamers that this workload is done so they can stop.
+        # Two sentinels — one per streamer — keeps the streamers independent;
+        # any pipeline running only one streamer is unaffected by the other.
         touch "${RESULTS_DIR}/epp_stream_done"
+        touch "${RESULTS_DIR}/gpu_stream_done"
 
         echo "Server log collection complete for $(params.resultsDir)."
 
