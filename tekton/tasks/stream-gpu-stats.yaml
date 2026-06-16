@@ -39,7 +39,8 @@ spec:
       description: >-
         Namespace where the DCGM exporter DaemonSet runs (commonly
         nvidia-gpu-operator, gpu-operator, or nvidia). Empty = search
-        across all namespaces and cache the discovered ns.
+        across all namespaces on first resolve, then cache the
+        discovered namespace for the rest of the run.
     - { name: dcgmSelector,  type: string, default: "app.kubernetes.io/name=nvidia-dcgm-exporter" }
     - { name: dcgmContainer, type: string, default: "nvidia-dcgm-exporter" }
     - { name: vllmContainer, type: string, default: "vllm" }
@@ -63,9 +64,13 @@ spec:
         DCGM_CONTAINER="$(params.dcgmContainer)"
         VLLM_CONTAINER="$(params.vllmContainer)"
 
-        # Re-resolve the vLLM-pod -> node mapping every K iterations of the
-        # sampling loop. K=6 with the default INTERVAL=10s means we re-check
-        # for node churn (pod reschedule, DCGM restart) once per minute.
+        # Every K iterations of the sampling loop, re-evaluate exit conditions
+        # and the (node -> DCGM pod) map. K=6 at the default INTERVAL=10s means
+        # we re-check once per minute. The re-resolve block detects:
+        #   - all vLLM pods gone (workload finished without sentinel)
+        #   - vLLM node-set change (pod rescheduled)
+        #   - DCGM pod restart on a stable node set (the build_node_dcgm call
+        #     runs unconditionally so this case is covered too)
         RE_RESOLVE_EVERY=6
 
         # Phase 0 — Validation
@@ -184,6 +189,10 @@ spec:
         # NODE_DCGM is a space-separated list of "node|ns|pod" tuples. None
         # of those fields can contain spaces or pipes in a valid k8s setup,
         # so the simple split with `cut` is unambiguous.
+        #
+        # Side effect: caches the auto-discovered DCGM namespace into DCGM_NS
+        # the first time a tuple is built, so subsequent re-resolves skip the
+        # cluster-wide `-A` search.
         build_node_dcgm() {
           BND_OUT=""
           for bnd_node in $1; do
@@ -196,8 +205,11 @@ spec:
             bnd_pod=$(echo "${bnd_r}" | awk '{print $2}')
             echo "  ${bnd_node} -> ${bnd_ns}/${bnd_pod}"
             BND_OUT="${BND_OUT} ${bnd_node}|${bnd_ns}|${bnd_pod}"
+            if [ -z "${DCGM_NS}" ]; then
+              DCGM_NS="${bnd_ns}"
+              echo "  cached DCGM namespace: ${DCGM_NS}"
+            fi
           done
-          echo "${BND_OUT}" >/dev/null  # silence unused-var lint paths
           NODE_DCGM="${BND_OUT}"
         }
 
@@ -239,18 +251,27 @@ spec:
 
           iter=$((iter+1))
           if [ $((iter % RE_RESOLVE_EVERY)) -eq 0 ]; then
+            # Independent exit conditions, evaluated every K iterations:
+            #   (a) no running vLLM pods remain (workload finished cleanly
+            #       without writing the sentinel — mirrors stream-epp-logs)
+            #   (b) no DCGM pod resolvable on any target node (issue Phase 4)
+            # Both must be checked unconditionally; they are not nested.
             NEW_PN=$(discover_vllm_pods)
-            if [ -n "${NEW_PN}" ]; then
-              NEW_NODES=$(echo "${NEW_PN}" | awk '{print $2}' | sort -u | grep -v '^$')
-              if [ "${NEW_NODES}" != "${NODES}" ]; then
-                echo "Node set changed; re-resolving DCGM pods"
-                NODES="${NEW_NODES}"
-                build_node_dcgm "${NODES}"
-                if [ -z "${NODE_DCGM}" ]; then
-                  echo "All target nodes lost their DCGM pod, stopping."
-                  break
-                fi
-              fi
+            if [ -z "${NEW_PN}" ]; then
+              echo "No running vLLM pods remain, stopping samples."
+              break
+            fi
+            NEW_NODES=$(echo "${NEW_PN}" | awk '{print $2}' | sort -u | grep -v '^$')
+            if [ "${NEW_NODES}" != "${NODES}" ]; then
+              echo "Node set changed; updating target nodes"
+              NODES="${NEW_NODES}"
+            fi
+            # Always re-build NODE_DCGM so a DCGM-pod restart on a stable node
+            # set is detected. Per-node WARNINGs come from build_node_dcgm.
+            build_node_dcgm "${NODES}"
+            if [ -z "${NODE_DCGM}" ]; then
+              echo "All target nodes lost their DCGM pod, stopping samples."
+              break
             fi
           fi
 
