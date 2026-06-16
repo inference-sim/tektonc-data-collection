@@ -15,6 +15,13 @@ rules:
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+# pods/exec is needed cross-namespace by the stream-gpu-stats Task to run
+# `kubectl exec ... -- nvidia-smi` inside per-node DCGM exporter pods (which
+# typically live in nvidia-gpu-operator) and inside in-namespace vLLM pods
+# (Phase 1.5 pod->GPU-UUID snapshot).
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
