@@ -22,6 +22,26 @@ spec:
     - name: resultsDir
       type: string
       description: "Path under /workspace/data to write TraceV2 output"
+    - name: maxConcurrency
+      type: string
+      default: "10000"
+      description: "Maximum concurrent requests blis will drive"
+    - name: timeout
+      type: string
+      default: "1800"
+      description: "Workload run timeout in seconds"
+    - name: warmupRequests
+      type: string
+      default: "50"
+      description: "Number of warmup requests before measurement begins"
+    - name: prewarmDuration
+      type: string
+      default: "60s"
+      description: "Duration of system priming phase before real workload (e.g., 60s). 0s disables."
+    - name: extraArgs
+      type: string
+      default: ""
+      description: "Additional CLI flags appended to the blis observe command (one-off experimentation)"
 
   workspaces:
     - name: data
@@ -55,16 +75,17 @@ spec:
         BLIS="$(workspaces.source.path)/blis/blis"
         mkdir -p /workspace/data/$(params.resultsDir)
         "${BLIS}" observe \
-          --max-concurrency 10000 \
-          --timeout 1800 \
-          --prewarm-duration 60s \
-          --warmup-requests 50 \
+          --max-concurrency $(params.maxConcurrency) \
+          --timeout $(params.timeout) \
+          --prewarm-duration $(params.prewarmDuration) \
+          --warmup-requests $(params.warmupRequests) \
           --post-hoc-detector composite \
           --server-url $(params.endpoint) \
           --model $(params.model) \
           --workload-spec /workspace/workload.yaml \
           --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
           --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv \
-          --saturation-report /workspace/data/$(params.resultsDir)/saturation.json
+          --saturation-report /workspace/data/$(params.resultsDir)/saturation.json \
+          $(params.extraArgs)
         echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
         ls /workspace/data/$(params.resultsDir)
