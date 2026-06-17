@@ -1,0 +1,45 @@
+# tektonc-data-collection/tekton/tasks/prepare-results-dir.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-results-dir
+spec:
+  description: >-
+    Wipes and re-creates resultsDir on data-pvc before any writer
+    starts. Must runAfter nothing and runBefore the parallel
+    workload-runner + streamer fan-out.
+
+    Removes the rm -rf race that surfaced when
+    run-workload-blis-observe[-binary] cleared its own RESULTS_DIR
+    while stream-gpu-stats / stream-epp-logs were already writing
+    into subdirectories of it. Every writer of resultsDir/* should
+    runAfter this task; nothing else in the pipeline should rm -rf
+    resultsDir.
+
+  workspaces:
+    - name: data
+      description: "Shared PVC (data-pvc)"
+
+  params:
+    - { name: resultsDir, type: string }
+
+  steps:
+    - name: prepare
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        set -e
+        # Guard the rm -rf: an empty / absolute / parent-traversing
+        # resultsDir would expand to a path that wipes a shared parent
+        # of every other run on the data PVC.
+        RD='$(params.resultsDir)'
+        case "${RD}" in
+          ""|/*|*..*|*//*)
+            echo "FATAL: refusing to wipe with unsafe resultsDir: '${RD}'"
+            exit 1
+            ;;
+        esac
+        RESULTS_DIR="/workspace/data/${RD}"
+        rm -rf "${RESULTS_DIR}"
+        mkdir -p "${RESULTS_DIR}"
+        echo "Prepared ${RESULTS_DIR}"

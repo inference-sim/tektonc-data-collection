@@ -35,10 +35,10 @@ spec:
       script: |
         #!/bin/sh
         set -e
+        # RESULTS_DIR is created by an upstream pipeline step; we use it
+        # as-is. chmod 777 lets subsequent steps that run as a different
+        # uid write into it.
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
-        # Clean any stale results from a previous iteration of this workload slot.
-        rm -rf "${RESULTS_DIR}"
-        mkdir -p "${RESULTS_DIR}"
         chmod 777 "${RESULTS_DIR}"
         # Write timestamp marker before workload runs; collect-results uses this
         # to bound EPP log collection to this workload's window only.
@@ -56,7 +56,6 @@ spec:
       script: |
         #!/bin/sh
         set -e
-        mkdir -p /workspace/data/$(params.resultsDir)
         blis observe \
           --server-url $(params.endpoint) \
           --model $(params.model) \

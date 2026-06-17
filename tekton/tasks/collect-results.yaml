@@ -65,7 +65,8 @@ spec:
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
         SERVER_LOG_DIR="${RESULTS_DIR}/server_logs"
 
-        mkdir -p "${RESULTS_DIR}"
+        # RESULTS_DIR is created by an upstream pipeline step; do not wipe
+        # it here. This task only owns server_logs/ within it.
         rm -f "${RESULTS_DIR}/epp_stream_done"
         rm -f "${RESULTS_DIR}/gpu_stream_done"
         rm -rf "${SERVER_LOG_DIR}"
