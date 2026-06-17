@@ -42,7 +42,7 @@ spec:
         across all namespaces on first resolve, then cache the
         discovered namespace for the rest of the run.
     - { name: dcgmSelector,  type: string, default: "app.kubernetes.io/name=nvidia-dcgm-exporter" }
-    - { name: dcgmContainer, type: string, default: "nvidia-dcgm-exporter" }
+    - { name: dcgmContainer, type: string, default: "nvidia-dcgm-ctr" }
     - { name: vllmContainer, type: string, default: "vllm" }
 
   steps:
@@ -80,7 +80,14 @@ spec:
           exit 0
         fi
 
-        mkdir -p "${LOG_DIR}"
+        # Fail loudly if we cannot prepare the log directory. Without this,
+        # `set +e` swallows the mkdir failure and every per-sample write
+        # below silently goes to nowhere — producing a "Succeeded" task
+        # with an empty gpu_stream_done sentinel and no per-host logs.
+        mkdir -p "${LOG_DIR}" || {
+          echo "FATAL: cannot create ${LOG_DIR}"
+          exit 1
+        }
         rm -f "${SENTINEL}"
 
         # ────────────────────────────────────────────────────────────
@@ -237,6 +244,11 @@ spec:
           fi
 
           ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # Re-assert LOG_DIR each iteration so a directory wiped by a
+          # concurrent task (or one that the startup mkdir somehow didn't
+          # land for, e.g., a parent that did not yet exist) cannot make
+          # every subsequent sample disappear. Idempotent and cheap.
+          mkdir -p "${LOG_DIR}"
           for entry in ${NODE_DCGM}; do
             ne_node=$(echo "${entry}" | cut -d'|' -f1)
             ne_ns=$(echo "${entry}"   | cut -d'|' -f2)
