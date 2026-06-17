@@ -93,15 +93,6 @@ spec:
                 min  = int(tm[2])
                 bucket = int(min / win) * win
                 fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
-                # Defensive: run-workload-blis-observe-binary may rm -rf the
-                # parent results dir at startup (see that task script). When
-                # that happens between awk writes, we have to recreate outdir
-                # before the next print or the open() returns ENOENT and the
-                # awk process dies, taking the whole stream with it.
-                if (fname != _prev) {
-                  system("mkdir -p " outdir)
-                  _prev = fname
-                }
                 out = ""
                 for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
                 print out >> fname

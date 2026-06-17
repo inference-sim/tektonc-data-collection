@@ -10,11 +10,16 @@ spec:
     pod once per intervalSeconds. Output lands in resultsDir/gpu_logs/
     on data-pvc, one log file per node.
 
-    Also captures a one-shot pod -> GPU-UUID snapshot at startup
-    (Phase 1.5) by exec-ing `nvidia-smi -L` inside each vLLM container.
-    This gives downstream analysis a direct pod -> UUID join that is
-    not available from `kubectl get pod -o yaml` (the device-plugin
-    assignment is invisible to the API server).
+    Also captures two one-shot snapshots at startup:
+      - Phase 1.5: pod -> GPU UUID, by exec-ing `nvidia-smi -L` inside
+        each vLLM container. Failures persist combined exit code +
+        stderr to resultsDir/gpu_logs/<pod>.uuids.err.
+      - Phase 2.5: per-node GPU UUID -> host-index/bus-id, by exec-ing
+        `nvidia-smi --query-gpu=index,uuid,gpu_bus_id` against each
+        node's DCGM pod (same channel as Phase 3 sampling).
+    Together these give downstream analysis a pod -> UUID -> host-index
+    join chain not available from `kubectl get pod -o yaml` (the
+    device-plugin assignment is invisible to the API server).
 
     Runs in parallel with run-workload; exits when collect-results
     writes resultsDir/gpu_stream_done. Non-fatal: failures do not fail
@@ -138,17 +143,28 @@ spec:
         #
         # If pods are rescheduled mid-run, the snapshot goes stale. Re-running
         # the exec when the pod set changes is a future enhancement.
+        # On failure stderr is persisted to ${pod}.uuids.err — the gpu-stats
+        # pod's stdout is not retained after the task ends, so without the
+        # err file the failure reason is lost.
         echo "Phase 1.5 — capturing pod -> GPU UUID snapshot"
         for pod in ${PODS}; do
+          err_file="${LOG_DIR}/${pod}.uuids.err"
           out=$(kubectl exec -n "${NAMESPACE}" "${pod}" -c "${VLLM_CONTAINER}" \
-                  -- nvidia-smi -L 2>&1)
+                  -- nvidia-smi -L 2>"${err_file}")
           rc=$?
           if [ ${rc} -eq 0 ] && [ -n "${out}" ]; then
             printf '%s\n' "${out}" > "${LOG_DIR}/${pod}.uuids"
+            rm -f "${err_file}"
             n_gpu=$(printf '%s\n' "${out}" | wc -l | tr -d ' ')
             echo "  ${pod}: ${n_gpu} GPU(s)"
+          elif [ ${rc} -ne 0 ]; then
+            echo "EXIT=${rc}" >> "${err_file}"
+            echo "  WARNING: ${pod}: nvidia-smi -L failed (exit=${rc}), see ${pod}.uuids.err"
           else
-            echo "  WARNING: ${pod}: nvidia-smi -L failed (image may lack the binary), skipping .uuids"
+            # rc=0 but stdout was empty — distinct failure mode from a
+            # non-zero exit; flag it without writing a misleading EXIT line.
+            echo "EMPTY_STDOUT" >> "${err_file}"
+            echo "  WARNING: ${pod}: nvidia-smi -L returned exit=0 with empty stdout, see ${pod}.uuids.err"
           fi
         done
 
@@ -229,6 +245,46 @@ spec:
         fi
 
         # ────────────────────────────────────────────────────────────
+        # Phase 2.5 — Per-node GPU UUID/index/bus-id snapshot (one-shot)
+        # ────────────────────────────────────────────────────────────
+        # Produces ${LOG_DIR}/${node}.gpus.csv with rows like:
+        #   0, GPU-abc..., 00000000:18:00.0
+        # Per-pod .uuids only carries UUIDs and container-local indices
+        # (which reset 0..N-1 inside each pod and don't map to host
+        # indices); per-sample ${node}.log carries only host index +
+        # bus-id with no UUID. The CSV is the missing UUID->host-index
+        # join key. Uses the same DCGM exec channel as Phase 3 sampling.
+        # On failure, stderr is persisted to ${node}.gpus.csv.err and
+        # the partial CSV is removed (mirrors Phase 1.5 stderr capture).
+        echo "Phase 2.5 — capturing per-node GPU UUID/index/bus-id"
+        for entry in ${NODE_DCGM}; do
+          pe_node=$(echo "${entry}" | cut -d'|' -f1)
+          pe_ns=$(echo "${entry}"   | cut -d'|' -f2)
+          pe_pod=$(echo "${entry}"  | cut -d'|' -f3)
+          pe_csv="${LOG_DIR}/${pe_node}.gpus.csv"
+          pe_err="${LOG_DIR}/${pe_node}.gpus.csv.err"
+          kubectl exec -n "${pe_ns}" "${pe_pod}" -c "${DCGM_CONTAINER}" \
+            -- nvidia-smi --query-gpu=index,uuid,gpu_bus_id --format=csv,noheader \
+            > "${pe_csv}" 2>"${pe_err}"
+          rc=$?
+          if [ ${rc} -eq 0 ] && [ -s "${pe_csv}" ]; then
+            rm -f "${pe_err}"
+            n_rows=$(wc -l < "${pe_csv}" | tr -d ' ')
+            echo "  ${pe_node}: ${n_rows} GPU(s) -> ${pe_node}.gpus.csv"
+          elif [ ${rc} -ne 0 ]; then
+            echo "EXIT=${rc}" >> "${pe_err}"
+            rm -f "${pe_csv}"
+            echo "  WARNING: ${pe_node}: nvidia-smi --query-gpu failed (exit=${rc}), see ${pe_node}.gpus.csv.err"
+          else
+            # rc=0 but CSV was empty — distinct failure mode from a non-zero
+            # exit; flag it without writing a misleading EXIT line.
+            echo "EMPTY_STDOUT" >> "${pe_err}"
+            rm -f "${pe_csv}"
+            echo "  WARNING: ${pe_node}: nvidia-smi --query-gpu returned exit=0 with empty CSV, see ${pe_node}.gpus.csv.err"
+          fi
+        done
+
+        # ────────────────────────────────────────────────────────────
         # Phase 3 — Sampling loop (with Phase 4 sentinel polling)
         # ────────────────────────────────────────────────────────────
         # Every ${INTERVAL}s, exec into each DCGM pod and append a
@@ -244,11 +300,6 @@ spec:
           fi
 
           ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          # Re-assert LOG_DIR each iteration so a directory wiped by a
-          # concurrent task (or one that the startup mkdir somehow didn't
-          # land for, e.g., a parent that did not yet exist) cannot make
-          # every subsequent sample disappear. Idempotent and cheap.
-          mkdir -p "${LOG_DIR}"
           for entry in ${NODE_DCGM}; do
             ne_node=$(echo "${entry}" | cut -d'|' -f1)
             ne_ns=$(echo "${entry}"   | cut -d'|' -f2)

@@ -55,9 +55,10 @@ spec:
       script: |
         #!/bin/sh
         set -e
+        # RESULTS_DIR is created by an upstream pipeline step; we use it
+        # as-is. chmod 777 lets subsequent steps that run as a different
+        # uid write into it.
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
-        rm -rf "${RESULTS_DIR}"
-        mkdir -p "${RESULTS_DIR}"
         chmod 777 "${RESULTS_DIR}"
         date -u +"%Y-%m-%dT%H:%M:%SZ" > "${RESULTS_DIR}/epp_log_since"
         cat > /tmp/spec_raw.txt << '__WORKLOAD_SPEC_END__'
@@ -73,7 +74,6 @@ spec:
         #!/bin/sh
         set -e
         BLIS="$(workspaces.source.path)/blis/blis"
-        mkdir -p /workspace/data/$(params.resultsDir)
         "${BLIS}" observe \
           --max-concurrency $(params.maxConcurrency) \
           --timeout $(params.timeout) \
