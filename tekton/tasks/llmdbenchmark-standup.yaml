@@ -9,9 +9,11 @@ spec:
     gateway endpoint via llmdbenchmark run --list-endpoints and emits it as a
     task result.
 
-    Expects two prerequisite tasks to have run:
-      - install-llmdbenchmark: creates the Python venv
-      - (implicit) workspace setup: llm-d-benchmark source is on the workspace
+    Expects install-llmdbenchmark to have run first and populated:
+      - Python venv at $(workspaces.source.path)/llm-d-benchmark/.venv
+      - CLI tool cache at $(workspaces.source.path)/llm-d-benchmark/.tools/bin
+      - helm-diff plugin under $(workspaces.source.path)/llm-d-benchmark/.helm-data
+    A missing cache fails the task loudly (mismatched task graph).
 
     The spec_content param is a Jinja2 spec template (.yaml.j2) with absolute
     paths for values_file, template_dir, and scenario_file already embedded by
@@ -126,7 +128,7 @@ spec:
           fi
         fi
 
-    - name: install-and-standup
+    - name: standup
       image: python:3.12-slim
       securityContext:
         runAsUser: 0
@@ -143,20 +145,21 @@ spec:
         #!/bin/bash
         set -eux
 
-        # python:3.12-slim runs as root; sudo is absent but required by install.sh
-        apt-get update -y -qq
-        apt-get install -y sudo
-        export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
-        (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
-
-        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        VENV_PATH="${REPO_DIR}/.venv"
+        TOOL_BIN="${REPO_DIR}/.tools/bin"
+        export HELM_DATA_HOME="${REPO_DIR}/.helm-data"
         SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
 
-        echo "🐍 Activating venv at ${VENV_PATH}"
-        if [ ! -f "${VENV_PATH}/bin/activate" ]; then
-          echo "❌ venv not found at ${VENV_PATH} — run install-llmdbenchmark first"
+        # Preamble: install-llmdbenchmark must have populated venv + tool cache.
+        # Tekton's runAfter contract guarantees this when the task graph is
+        # intact; a missing cache here is a bug we want to surface loudly.
+        if [ ! -f "${VENV_PATH}/bin/activate" ] || [ ! -x "${TOOL_BIN}/kubectl" ] \
+           || [ ! -x "${TOOL_BIN}/helmfile" ] || [ ! -d "${HELM_DATA_HOME}/plugins/helm-diff" ]; then
+          echo "❌ install-llmdbenchmark did not populate venv/tools/plugin cache — should never happen"
           exit 1
         fi
+        export PATH="${TOOL_BIN}:${PATH}"
         source "${VENV_PATH}/bin/activate"
 
         echo "🔍 Verifying llmdbenchmark installation"
@@ -194,16 +197,6 @@ spec:
 
         echo "✅ Endpoint discovered: ${ENDPOINT}"
         printf "%s" "${ENDPOINT}" > "$(results.endpoint.path)"
-
-        # Persist CLI tools to the workspace so later steps/tasks can reuse them
-        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
-        mkdir -p "${TOOL_BIN}"
-        for tool in kubectl helmfile helm kustomize yq jq crane skopeo; do
-          if [ -f "/usr/local/bin/${tool}" ]; then
-            cp "/usr/local/bin/${tool}" "${TOOL_BIN}/"
-          fi
-        done
-        echo "🔧 Persisted CLI tools to ${TOOL_BIN}"
 
     - name: smoketest-delay
       image: python:3.12-slim
@@ -244,9 +237,11 @@ spec:
           exit 0
         fi
 
-        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        VENV_PATH="${REPO_DIR}/.venv"
+        TOOL_BIN="${REPO_DIR}/.tools/bin"
+        export HELM_DATA_HOME="${REPO_DIR}/.helm-data"
         SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
-        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
 
         export PATH="${TOOL_BIN}:${PATH}"
         source "${VENV_PATH}/bin/activate"

@@ -12,7 +12,9 @@ spec:
     prepare.py. No --base-dir flag is needed.
 
     This task is intended to run in the finally block of a pipeline so that
-    resources are cleaned up even when standup failed partway through.
+    resources are cleaned up even when standup failed partway through. If
+    install-llmdbenchmark failed (after retries), the venv/tool cache won't
+    exist; the task exits 0 because there's nothing on the cluster to clean.
 
   params:
     - name: spec_content
@@ -84,7 +86,7 @@ spec:
           rm -f /tmp/llmdbench-config/scenario.yaml
         fi
 
-    - name: install-and-teardown
+    - name: teardown
       image: python:3.12-slim
       securityContext:
         runAsUser: 0
@@ -92,11 +94,6 @@ spec:
         - name: config-scratch
           mountPath: /tmp/llmdbench-config
       env:
-        - name: GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: github-token
-              key: token
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
@@ -106,29 +103,22 @@ spec:
         #!/bin/bash
         set -eux
 
-        export GITHUB_TOKEN="${GITHUB_TOKEN}"
-
-        # Reuse CLI tools persisted by standup if available; otherwise full install
-        TOOL_BIN="$(workspaces.source.path)/llm-d-benchmark/.tools/bin"
-        if [ -x "${TOOL_BIN}/kubectl" ] && [ -x "${TOOL_BIN}/helmfile" ]; then
-          echo "🔧 Reusing cached CLI tools from ${TOOL_BIN}"
-          export PATH="${TOOL_BIN}:${PATH}"
-        else
-          apt-get update -y -qq
-          apt-get install -y sudo
-          export LLMDBENCH_VENV_DIR="$(workspaces.source.path)/llm-d-benchmark/.venv"
-          (cd "$(workspaces.source.path)/llm-d-benchmark" && bash install.sh --no-uv)
-        fi
-
-        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        VENV_PATH="${REPO_DIR}/.venv"
+        TOOL_BIN="${REPO_DIR}/.tools/bin"
+        export HELM_DATA_HOME="${REPO_DIR}/.helm-data"
         SPEC_FILE="/tmp/llmdbench-config/spec.yaml.j2"
 
-        echo "🐍 Activating venv at ${VENV_PATH}"
-        # Exit 0: if venv absent, install-llmdbenchmark never ran → standup never ran → no resources to clean up
-        if [ ! -f "${VENV_PATH}/bin/activate" ]; then
-          echo "⚠️ venv not found at ${VENV_PATH} — nothing to tear down"
+        # Preamble (mirrors standup): install-llmdbenchmark must have populated
+        # venv + tool cache. teardown runs in finally:, so a missing cache here
+        # means install-llmdbenchmark failed (after retries) → standup never ran
+        # → no resources on the cluster to tear down → exit 0.
+        if [ ! -f "${VENV_PATH}/bin/activate" ] || [ ! -x "${TOOL_BIN}/kubectl" ] \
+           || [ ! -x "${TOOL_BIN}/helmfile" ] || [ ! -d "${HELM_DATA_HOME}/plugins/helm-diff" ]; then
+          echo "⚠️ install-llmdbenchmark did not populate venv/tools/plugin cache — nothing to tear down"
           exit 0
         fi
+        export PATH="${TOOL_BIN}:${PATH}"
         source "${VENV_PATH}/bin/activate"
 
         echo "🔍 Verifying llmdbenchmark installation"

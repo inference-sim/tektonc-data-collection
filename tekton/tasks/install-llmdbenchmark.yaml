@@ -4,8 +4,16 @@ metadata:
   name: install-llmdbenchmark
 spec:
   description: |
-    Install llm-d-benchmark into a Python venv on the shared source workspace.
-    Uses a sentinel file to skip reinstall when the same git commit is already installed.
+    Prepare everything standup/teardown need: clone llm-d-benchmark, install
+    its Python venv, install CLI tools (helm/kubectl/helmfile/etc), install
+    the helm-diff plugin, and persist tools to the shared source workspace.
+
+    Uses a sentinel file to skip the whole task when the same git commit is
+    already installed and the workspace tool/plugin caches are intact.
+
+    Tools are persisted to ${TOOL_BIN} on the workspace; the helm-diff plugin
+    is installed under ${HELM_DATA_HOME} on the workspace so subsequent tasks
+    (standup, teardown) running in fresh pods find both via PATH/env.
 
   params:
     - name: git_commit
@@ -36,23 +44,32 @@ spec:
 
         export GITHUB_TOKEN="${GITHUB_TOKEN}"
 
-        VENV_PATH="$(workspaces.source.path)/llm-d-benchmark/.venv"
+        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
+        VENV_PATH="${REPO_DIR}/.venv"
+        TOOL_BIN="${REPO_DIR}/.tools/bin"
+        export HELM_DATA_HOME="${REPO_DIR}/.helm-data"
         SENTINEL=${VENV_PATH}/installed-commit
         GIT_COMMIT="$(params.git_commit)"
         REPO_URL="$(params.git_repo_url)"
         SENTINEL_KEY="${REPO_URL}@${GIT_COMMIT}"
 
-        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${SENTINEL_KEY}" ]; then
-          echo "✔ llm-d-benchmark already installed (${SENTINEL_KEY}), skipping"
+        # Fast path: same commit, tools+plugin caches intact → skip everything
+        if [ -f "${SENTINEL}" ] && [ "$(cat ${SENTINEL})" = "${SENTINEL_KEY}" ] \
+           && [ -x "${TOOL_BIN}/kubectl" ] && [ -x "${TOOL_BIN}/helmfile" ] \
+           && [ -x "${TOOL_BIN}/helm" ] && [ -d "${HELM_DATA_HOME}/plugins/helm-diff" ]; then
+          echo "✔ llm-d-benchmark already prepared (${SENTINEL_KEY}), skipping"
           exit 0
         fi
 
-        echo "🔄 Installing required tools"
+        echo "🔄 Installing apt packages"
         apt-get update -y
-        apt-get install -y git
-        rm -rf /var/lib/apt/lists/*
+        apt-get install -y git sudo
+        # Do NOT clear /var/lib/apt/lists/* here: install.sh later runs apt
+        # installs (curl, etc.) and only refreshes lists on Ubuntu (install.sh
+        # line 208), so on Debian-based images (python:3.12-slim → trixie)
+        # the next `apt install curl` would fail with "Unable to locate
+        # package curl".
 
-        REPO_DIR="$(workspaces.source.path)/llm-d-benchmark"
         CURRENT_REMOTE=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
         if [ ! -d "${REPO_DIR}/.git" ]; then
           echo "📥 Cloning llm-d-benchmark@${GIT_COMMIT} from ${REPO_URL}"
@@ -78,7 +95,7 @@ spec:
         echo "✔ Done installing llm-d-benchmark"
 
         echo "📦 Installing planner (llm-d-planner)"
-        PLANNER_GIT=$(grep 'PLANNER_GIT=' "$(workspaces.source.path)/llm-d-benchmark/install.sh" | head -1 | sed 's/.*="\(.*\)"/\1/')
+        PLANNER_GIT=$(grep 'PLANNER_GIT=' "${REPO_DIR}/install.sh" | head -1 | sed 's/.*="\(.*\)"/\1/')
         if [ -z "${PLANNER_GIT}" ]; then
           echo "❌ Could not extract PLANNER_GIT from install.sh — check grep pattern matches file format"
           exit 1
@@ -87,8 +104,29 @@ spec:
         echo "✔ Done installing planner"
         pip list
 
-        echo "🔍 Verifying installation"
+        echo "🔍 Verifying llmdbenchmark installation"
         llmdbenchmark --version
 
+        # CLI tools (helm, kubectl, helmfile, kustomize, yq, jq, crane, skopeo)
+        # plus the helm-diff plugin required by `helmfile apply`. install.sh has
+        # per-tool already-installed checks, so re-running is a fast no-op.
+        # HELM_DATA_HOME is on the PVC so the helm-diff plugin survives across
+        # pods/containers (standup and teardown run in fresh pods and rely on
+        # the cached plugin to drive `helmfile apply`/`destroy`).
+        mkdir -p "${HELM_DATA_HOME}"
+        echo "🔧 Installing CLI tools and helm-diff plugin via install.sh"
+        (cd "${REPO_DIR}" && bash install.sh --no-uv)
+
+        # Persist binaries to the workspace so standup/teardown find them on PATH.
+        echo "🔧 Persisting CLI tools to ${TOOL_BIN}"
+        mkdir -p "${TOOL_BIN}"
+        for tool in kubectl helmfile helm kustomize yq jq crane skopeo; do
+          if [ -f "/usr/local/bin/${tool}" ]; then
+            cp -f "/usr/local/bin/${tool}" "${TOOL_BIN}/"
+          fi
+        done
+
+        # Sentinel written last so an interrupted run leaves it unset and the
+        # next attempt redoes everything end-to-end.
         echo "${SENTINEL_KEY}" > "${SENTINEL}"
         echo "✔ Sentinel written: ${SENTINEL}"
