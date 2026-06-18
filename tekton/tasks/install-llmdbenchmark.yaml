@@ -64,7 +64,11 @@ spec:
         echo "🔄 Installing apt packages"
         apt-get update -y
         apt-get install -y git sudo
-        rm -rf /var/lib/apt/lists/*
+        # Do NOT clear /var/lib/apt/lists/* here: install.sh later runs apt
+        # installs (curl, etc.) and only refreshes lists on Ubuntu (install.sh
+        # line 208), so on Debian-based images (python:3.12-slim → trixie)
+        # the next `apt install curl` would fail with "Unable to locate
+        # package curl".
 
         CURRENT_REMOTE=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
         if [ ! -d "${REPO_DIR}/.git" ]; then
