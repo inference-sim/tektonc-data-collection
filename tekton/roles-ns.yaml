@@ -1,0 +1,165 @@
+# tektonc-data-collection/tekton/roles-rb.yaml
+#
+# Namespaced-only RBAC bundle for clusters where the operator cannot
+# create ClusterRole / ClusterRoleBinding. Intended as an alternative to
+# roles.yaml — same Tekton pipeline, fewer cluster-scoped grants.
+#
+# What still works with this bundle:
+#   - install-llmdbenchmark, install-blis, prepare-results-dir,
+#     run-workload-blis-observe-binary (no K8s API)
+#   - llmdbenchmark-standup with --non-admin=true (all in-namespace)
+#   - stream-epp-logs (in-namespace pod log follow)
+#   - stream-gpu-stats Phase 1.5 (in-namespace `kubectl exec` into vLLM
+#     pods for `nvidia-smi -L`); .uuids files still produced
+#   - collect-results (in-namespace get/logs)
+#   - llmdbenchmark-teardown
+#
+# What degrades silently (task is non-fatal, exits 0 with WARNING):
+#   - stream-gpu-stats Phase 2/2.5/3 (cross-namespace `kubectl exec` into
+#     DCGM exporter pods in nvidia-gpu-operator). No <node>.log per-sample
+#     metrics, no <node>.gpus.csv per-node UUID->host-index map. To
+#     restore, ask the cluster admin to install a Role+RoleBinding in the
+#     DCGM namespace granting this namespace's SAs `pods` get/list and
+#     `pods/exec` create — a bounded ask, no cluster-wide grant.
+#
+# What this bundle does NOT cover (handled separately by setup.py):
+#   - tekton/rbac/sim2real-runner.yaml
+#   - pipeline/rbac/sim2real-runner-cluster.yaml
+#   - pipeline/rbac/sim2real-runner-ns.yaml
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-installer
+  namespace: ${NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helm-access
+  namespace: ${NAMESPACE}
+rules:
+- apiGroups: [""]
+  resources: ["secrets", "configmaps", "services", "pods", "namespaces", "serviceaccounts", "persistentvolumeclaims", "nodes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+# pods/exec: in-namespace only. stream-gpu-stats Phase 1.5 exec's into
+# the vLLM pod for `nvidia-smi -L`. Phase 2/3 cross-ns exec into the
+# DCGM exporter is intentionally NOT granted here.
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+- apiGroups: [""]
+  resources: ["pods/attach"]
+  verbs: ["create"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Namespaced rbac for scenario extraObjects (e.g. Role + RoleBinding for
+# the gaie-epp ServiceAccount). ClusterRole/ClusterRoleBinding are
+# deliberately omitted — standup must run with --non-admin=true.
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways", "httproutes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["gateway.kgateway.dev"]
+  resources: ["gatewayparameters"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["llm-d.ai"]
+  resources: ["inferenceobjectives", "inferencemodelrewrites",
+              "inferenceobjectives/status", "inferencemodelrewrites/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencepools", "inferencemodels", "inferenceobjectives", "inferencemodelrewrites",
+              "inferenceobjectives/status", "inferencemodelrewrites/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.istio.io"]
+  resources: ["destinationrules", "envoyfilters"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["telemetry.istio.io"]
+  resources: ["telemetries"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["route.openshift.io"]
+  resources: ["routes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelineruns"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# OpenShift SCC use: bound below via RoleBinding to the pre-installed
+# system:openshift:scc:* ClusterRoles. resourceNames here pins which
+# SCCs the holder may select; the actual `use` permission is conferred
+# by the RoleBinding to the ClusterRole, which exists by default on
+# every OpenShift cluster (no ClusterRole creation needed).
+- apiGroups: ["security.openshift.io"]
+  resources: ["securitycontextconstraints"]
+  resourceNames: ["restricted", "anyuid"]
+  verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helm-access-binding
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: helm-installer
+  namespace: ${NAMESPACE}
+- kind: ServiceAccount
+  name: default
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: Role
+  name: helm-access
+  apiGroup: rbac.authorization.k8s.io
+---
+# OpenShift SCC bindings. Each RoleBinding references a pre-existing
+# system:openshift:scc:<name> ClusterRole (no creation needed). On
+# non-OpenShift K8s, the ClusterRole is absent and the binding is a
+# no-op — safe to leave in place.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helm-installer-restricted-scc
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: helm-installer
+  namespace: ${NAMESPACE}
+- kind: ServiceAccount
+  name: default
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:restricted
+  apiGroup: rbac.authorization.k8s.io
+---
+# anyuid: vLLM container images commonly run as a fixed non-zero uid;
+# the default OpenShift `restricted` SCC randomizes the uid which can
+# break image expectations. anyuid lets the deployment keep its image's
+# declared uid. Drop this binding if your images are restricted-clean.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helm-installer-anyuid-scc
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: helm-installer
+  namespace: ${NAMESPACE}
+- kind: ServiceAccount
+  name: default
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+  apiGroup: rbac.authorization.k8s.io

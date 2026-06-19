@@ -10,7 +10,7 @@ metadata:
   name: helm-installer-clusterrole
 rules:
 - apiGroups: [""]
-  resources: ["pods", "services", "namespaces", "persistentvolumeclaims", "secrets", "configmaps", "serviceaccounts"]
+  resources: ["pods", "services", "namespaces", "persistentvolumeclaims", "secrets", "configmaps", "serviceaccounts", "nodes"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: [""]
   resources: ["pods/log"]
