@@ -73,9 +73,6 @@ subjects:
 - kind: ServiceAccount
   name: helm-installer
   namespace: ${NAMESPACE}
-- kind: ServiceAccount
-  name: default
-  namespace: ${NAMESPACE}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -156,9 +153,6 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: helm-installer
-  namespace: ${NAMESPACE}
-- kind: ServiceAccount
-  name: default
   namespace: ${NAMESPACE}
 roleRef:
   kind: Role
