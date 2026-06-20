@@ -23,6 +23,10 @@ spec:
   steps:
     - name: build-blis
       image: golang:1.24
+      env:
+        - { name: HOME,       value: /tmp }
+        - { name: GOCACHE,    value: /tmp/go-build }
+        - { name: GOMODCACHE, value: /tmp/go-mod }
       script: |
         #!/bin/bash
         set -eux
