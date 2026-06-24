@@ -413,13 +413,19 @@ if kubectl get pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
   kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false &>/dev/null
 fi
 
-# Apply RBAC (read-only from tekton/roles.yaml)
+# Apply RBAC: namespaced base (required) + cluster augment (best-effort).
+# tektonc-data-collection#48 split the monolithic roles.yaml into:
+#   - roles-ns.yaml: namespaced base (always required)
+#   - roles-cluster.yaml: cluster augment (cluster-admin only)
+# The cluster augment unlocks `kubectl get nodes`, cross-ns DCGM exec, and
+# admin-mode prerequisites; missing it is non-fatal (degrades silently).
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
 export NAMESPACE=${NAMESPACE}
-envsubst < tekton/roles.yaml | kubectl apply -f - >/dev/null 2>&1
+envsubst < tekton/roles-ns.yaml | kubectl apply -f - >/dev/null 2>&1
+envsubst < tekton/roles-cluster.yaml | kubectl apply -f - >/dev/null 2>&1 || true
 if ! kubectl get serviceaccount helm-installer -n ${NAMESPACE} &>/dev/null; then
   echo -e "\033[1;31m✗\033[0m Failed to create helm-installer service account"
-  echo -e "  \033[90m→ Check RBAC permissions and tekton/roles.yaml\033[0m"
+  echo -e "  \033[90m→ Check RBAC permissions and tekton/roles-ns.yaml\033[0m"
   exit 1
 fi
 echo -e "\033[32m✓\033[0m RBAC applied (helm-installer SA verified)"

@@ -1,0 +1,75 @@
+# tektonc-data-collection/tekton/roles-cluster.yaml
+#
+# Cluster augment for the helm-installer SA. Pair with roles-ns.yaml
+# (the always-required namespaced base).
+#
+# Sized per the audit in inference-sim/tektonc-data-collection#48: every rule
+# below is either a cluster-scoped/non-namespaced API resource or a
+# documented cross-namespace task usage with a code reference. Resources
+# used only in the install namespace live in roles-ns.yaml.
+#
+# This file is OPTIONAL. Apply it on top of the namespaced base when the
+# operator has cluster-admin and wants:
+#   - llm-d-benchmark auto-discovery (kubectl get nodes)
+#   - admin-mode prerequisites (Namespace, ClusterRole/ClusterRoleBinding,
+#     CRD installs — gated behind --non-admin=false)
+#   - cross-ns DCGM exec (stream-gpu-stats Phase 2/2.5/3, in
+#     nvidia-gpu-operator)
+#   - cross-ns config patches (openshift-monitoring/cluster-monitoring-config)
+#
+# Skip this file on namespace-only clusters; the namespaced base alone is
+# sufficient for non-admin installs.
+#
+# Note on customresourcedefinitions: the audit flags this as a likely gap
+# (step_02_admin_prerequisites.py installs Gateway API + inference extension
+# CRDs in admin mode). It is NOT included here because that step currently
+# uses the Tekton controller SA, not helm-installer. Add a CRD rule here if
+# step 02 is migrated to use helm-installer.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: helm-installer-clusterrole
+rules:
+# Cluster-scoped resources.
+- apiGroups: [""]
+  resources: ["namespaces", "nodes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["clusterroles", "clusterrolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Non-namespaced virtual resources (auth checks for EPP/router).
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+# Cross-namespace pods read + exec for stream-gpu-stats Phase 2/2.5/3
+# (DCGM exporter pods in nvidia-gpu-operator). In-namespace pods CRUD and
+# Phase 1.5 in-namespace exec live in the namespaced Role.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+# Cross-namespace ConfigMap patch for openshift-monitoring/cluster-monitoring-config
+# (admin path, OpenShift only). In-namespace ConfigMap CRUD lives in the
+# namespaced Role.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: helm-installer-crb-${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: helm-installer-clusterrole
+subjects:
+- kind: ServiceAccount
+  name: helm-installer
+  namespace: ${NAMESPACE}

@@ -380,10 +380,14 @@ if kubectl get pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} &>/dev/null; then
   kubectl delete pipeline ${EXPERIMENT_ID} -n ${NAMESPACE} --wait=false &>/dev/null
 fi
 
-# Apply RBAC
+# Apply RBAC: namespaced base (required) + cluster augment (best-effort).
+# tektonc-data-collection#48 split the monolithic roles.yaml into:
+#   - roles-ns.yaml: namespaced base (always required)
+#   - roles-cluster.yaml: cluster augment (cluster-admin only; degrades silently)
 echo -e "\033[34m⠋\033[0m Applying RBAC..."
 export NAMESPACE=${NAMESPACE}
-envsubst < tekton/roles.yaml | kubectl apply -f - >/dev/null 2>&1
+envsubst < tekton/roles-ns.yaml | kubectl apply -f - >/dev/null 2>&1
+envsubst < tekton/roles-cluster.yaml | kubectl apply -f - >/dev/null 2>&1 || true
 echo -e "\033[32m✓\033[0m RBAC applied"
 
 # Apply Tekton tasks
