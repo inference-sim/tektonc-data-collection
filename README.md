@@ -73,13 +73,18 @@ Each Step is implemented by a Container in the Pod.
     ```
 
 5. Give the tasks needed permissions
+
+    Apply the namespaced base (always required):
     ```shell
-    envsubst '$NAMESPACE' < tekton/roles.yaml | kubectl apply -f -
+    envsubst '$NAMESPACE' < tekton/roles-ns.yaml | kubectl apply -f -
     ```
 
+    Optionally apply the cluster augment (cluster-admin only — enables `kubectl get nodes` auto-discovery, cross-namespace DCGM exec for GPU streaming, and admin-mode prerequisites):
     ```shell
-    oc adm policy add-scc-to-user anyuid -z default -n $NAMESPACE
+    envsubst '$NAMESPACE' < tekton/roles-cluster.yaml | kubectl apply -f -
     ```
+
+    The namespaced base already binds `default` and `helm-installer` SAs to the `restricted` and `anyuid` SCCs, so the previous `oc adm policy add-scc-to-user anyuid -z default` step is no longer required.
 
 6. Create RWX PVC `model-pvc` (300Gi) and `data-pvc` (20Gi) and `source-pvc` (20Gi) for storing models and execution results, respectively. These PVC is shared between all tasks.  For example:
     ```shell
