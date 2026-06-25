@@ -120,7 +120,11 @@ spec:
         # Persist binaries to the workspace so standup/teardown find them on PATH.
         echo "🔧 Persisting CLI tools to ${TOOL_BIN}"
         mkdir -p "${TOOL_BIN}"
-        for tool in kubectl helmfile helm kustomize yq jq crane skopeo; do
+        # `oc` is required: llmdbenchmark shells out to `oc` directly on
+        # OpenShift (no PATH fallback to kubectl). install.sh installs it to
+        # /usr/local/bin/oc only when neither kubectl nor oc is already on
+        # PATH, so the `[ -f ]` guard below makes this a no-op elsewhere.
+        for tool in kubectl helmfile helm kustomize yq jq crane skopeo oc; do
           if [ -f "/usr/local/bin/${tool}" ]; then
             cp -f "/usr/local/bin/${tool}" "${TOOL_BIN}/"
           fi
