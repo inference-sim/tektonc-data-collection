@@ -26,6 +26,14 @@ spec:
   steps:
     - name: prepare
       image: alpine:3.19
+      # Symmetric with stream-epp-logs / stream-gpu-stats / collect-results,
+      # which all run as uid 0 and produce root-owned subdirs (epp_logs/,
+      # gpu_logs/, server_logs/). Under OpenShift's restricted SCC the
+      # cleaner pod would otherwise be coerced to a non-zero uid and
+      # cannot unlink files inside those root-owned dirs after a
+      # force-cancelled run.
+      securityContext:
+        runAsUser: 0
       script: |
         #!/bin/sh
         set -e
