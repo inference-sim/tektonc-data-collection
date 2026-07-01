@@ -79,30 +79,40 @@ spec:
         echo "Discovered EPP pods via selector: ${EPP_SELECTOR}"
 
         # Phase 2 — Streaming
+        # Split kubectl+awk into two jobs via a FIFO so both PIDs are known.
+        # A pipelined `kubectl logs -f` blocked in read() with nothing to
+        # write never receives SIGPIPE when awk dies, so cleanup would hang
+        # in `wait` until the TaskRun timeout — see #57.
         rm -f "${SENTINEL}"
         mkdir -p "${LOG_DIR}"
-        PIDS=""
+        FIFOS=""
+        AWK_PIDS=""
+        KUBECTL_PIDS=""
         for pod in ${EPP_PODS}; do
           echo "Streaming EPP logs: ${pod} -> ${LOG_DIR}/"
-          kubectl logs --follow --timestamps=true "${pod}" -n "${NAMESPACE}" -c "$(params.containerName)" \
-            | awk -v outdir="${LOG_DIR}" -v pod="${pod}" -v win="${WINDOW}" '
-              {
-                split($1, dt, "T")
-                split(dt[2], tm, ":")
-                hour = tm[1]
-                min  = int(tm[2])
-                bucket = int(min / win) * win
-                fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
-                out = ""
-                for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
-                print out >> fname
-                fflush(fname)
-              }
-            ' &
-          # $! is the awk PID (rightmost in pipe). Killing awk breaks the pipe;
-          # kubectl receives SIGPIPE and exits cleanly.
-          PIDS="${PIDS} $!"
+          FIFO="/tmp/epp-${pod}.fifo"
+          rm -f "${FIFO}"
+          mkfifo "${FIFO}"
+          FIFOS="${FIFOS} ${FIFO}"
+          awk -v outdir="${LOG_DIR}" -v pod="${pod}" -v win="${WINDOW}" '
+            {
+              split($1, dt, "T")
+              split(dt[2], tm, ":")
+              hour = tm[1]
+              min  = int(tm[2])
+              bucket = int(min / win) * win
+              fname = sprintf("%s/%s_%s%02d.log", outdir, pod, hour, bucket)
+              out = ""
+              for (i = 2; i <= NF; i++) out = out (i > 2 ? " " : "") $i
+              print out >> fname
+              fflush(fname)
+            }
+          ' < "${FIFO}" &
+          AWK_PIDS="${AWK_PIDS} $!"
+          kubectl logs --follow --timestamps=true "${pod}" -n "${NAMESPACE}" -c "$(params.containerName)" > "${FIFO}" &
+          KUBECTL_PIDS="${KUBECTL_PIDS} $!"
         done
+        PIDS="${AWK_PIDS} ${KUBECTL_PIDS}"
 
         # Phase 3 — Sentinel poll
         # Exits when any of these is true:
@@ -143,5 +153,6 @@ spec:
         done
 
         kill ${PIDS} 2>/dev/null || true
-        wait ${PIDS} 2>/dev/null || true
+        wait 2>/dev/null || true
+        rm -f ${FIFOS}
         echo "EPP log streaming complete for $(params.resultsDir)"
