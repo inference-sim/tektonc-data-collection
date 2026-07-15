@@ -67,6 +67,18 @@ spec:
        override via ``eppSelector`` / ``eppSelectorFallback`` /
        ``vllmSelector``.
 
+    4. EPP /metrics is served with secure-serving on (GAIE default):
+       every scrape must present a valid k8s bearer token, verified
+       via TokenReview. The task reads the auto-projected SA token at
+       ``/var/run/secrets/kubernetes.io/serviceaccount/token`` and
+       passes it as ``Authorization: Bearer <token>``. If a deployment
+       additionally enforces SubjectAccessReview on ``/metrics``, the
+       pipeline ServiceAccount will need a ClusterRole binding for
+       ``nonResourceURLs: ["/metrics"]`` — that is not shipped here
+       (add it if 401 becomes 403 in a future deploy). vLLM /metrics
+       is unauthenticated in the currently-supported stack, so the
+       token is only used for the EPP target kind.
+
   workspaces:
     - name: data
       description: "Shared PVC (data-pvc)"
@@ -110,6 +122,16 @@ spec:
         VLLM_SELECTOR="$(params.vllmSelector)"
         ALLOW="$(params.metricsAllowlist)"
 
+        # Bearer token for EPP /metrics (GAIE serves secure metrics by
+        # default: TokenReview + optionally SubjectAccessReview). Every
+        # Tekton step pod auto-mounts a projected SA token at the path
+        # below — no explicit volume mount is required. If the token
+        # can't be read (older cluster, non-standard mount), leave TOKEN
+        # empty and scrape unauthenticated; EPP will return 401 and the
+        # per-target .err file will record it. vLLM /metrics on port 8000
+        # is unauthenticated so the token is only used for EPP.
+        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
+
         # Every K iterations of the scrape loop, re-run pod discovery.
         # K=15 at the default INTERVAL=2s means we re-check every 30s.
         RE_RESOLVE_EVERY=15
@@ -129,9 +151,17 @@ spec:
         # selector so we don't retry the fallback on every re-discovery.
         #
         # Called both up-front (Phase 1) and periodically from Phase 3.
-        EPP_SELECTOR_USED=""
+        #
+        # The function is invoked via ``TARGETS=$(discover_targets)`` which
+        # runs the body in a subshell — any variable assignments in the
+        # function body do not survive back to the parent shell. To
+        # publish the working EPP selector (for the operator-visible
+        # startup log line), the function writes it to a file that the
+        # parent shell reads after each call. Same pattern as the
+        # /tmp/targets.{epp,vllm} handoff for the target list itself.
         discover_targets() {
           out=""
+          : > /tmp/targets.epp_selector
 
           # EPP — try primary, fall back to legacy.
           epp_pods=""
@@ -143,7 +173,7 @@ spec:
               --no-headers \
               -o custom-columns=NAME:.metadata.name,IP:.status.podIP 2>/dev/null || true)
             if [ -n "${epp_pods}" ]; then
-              EPP_SELECTOR_USED="${sel}"
+              printf '%s' "${sel}" > /tmp/targets.epp_selector
               break
             fi
           done
@@ -188,6 +218,7 @@ spec:
           exit 0
         fi
 
+        EPP_SELECTOR_USED=$(cat /tmp/targets.epp_selector 2>/dev/null || true)
         echo "Discovered scrape targets (EPP selector: ${EPP_SELECTOR_USED}):"
         for t in ${TARGETS}; do
           echo "  ${t}"
@@ -236,7 +267,22 @@ spec:
 
             body=/tmp/scrape.${name}.$$
             rm -f "${body}"
-            wget -q -T 5 -O "${body}" "http://${ip}:${port}/metrics"
+            # Kind is the prefix before the first ':' in the target label
+            # (e.g. "epp" from "epp:qwen-…"). Only EPP /metrics requires
+            # auth on port 9090; vLLM /metrics on port 8000 is open.
+            #
+            # wget -q suppresses busybox's progress bar but NOT HTTP-error
+            # messages ("wget: server returned error: HTTP/1.1 401 …"), so
+            # every failed scrape floods the pod log. Redirecting stderr
+            # to /dev/null silences that flood — the failure state is
+            # already captured in ${name}.err with the exit code below.
+            kind=${name%%:*}
+            if [ "${kind}" = "epp" ] && [ -n "${TOKEN}" ]; then
+              wget -q -T 5 --header="Authorization: Bearer ${TOKEN}" \
+                   -O "${body}" "http://${ip}:${port}/metrics" 2>/dev/null
+            else
+              wget -q -T 5 -O "${body}" "http://${ip}:${port}/metrics" 2>/dev/null
+            fi
             rc=$?
             if [ ${rc} -ne 0 ] || [ ! -s "${body}" ]; then
               # Log the failure but keep going — sibling targets stay live.
