@@ -5,389 +5,183 @@ metadata:
   name: stream-metrics
 spec:
   description: >-
-    Scrapes the EPP and every vLLM decode pod's Prometheus /metrics endpoint
-    on a fixed cadence throughout a workload run, appending one row per
-    (scrape × metric-line) into resultsDir/metrics/timeseries.csv on data-pvc.
-    One sidecar, N targets — the Prometheus ecosystem's own pattern.
+    Runs llm-d-benchmark's collect_metrics.sh scraper as a Tekton
+    sidecar, in parallel with the workload. Same sentinel-exit
+    contract as stream-epp-logs and stream-gpu-stats: starts after
+    llmdbenchmark-standup + prepare-results-dir, exits when
+    collect-results writes ${RESULTS_DIR}/metrics_stream_done.
 
-    Behaviour parity with stream-epp-logs and stream-gpu-stats: same
-    lifecycle (starts alongside the workload after standup +
-    prepare-results-dir, exits when collect-results writes
-    resultsDir/metrics_stream_done), same output-into-cell-dir contract,
-    same non-fatal posture (failures do not fail the pipeline).
+    collect_metrics.sh + process_metrics.py are pulled from raw
+    GitHub at a task-param SHA — no image customization, no
+    workspace mount. The scraper reads its EPP bearer token from
+    the ``inference-gateway-sa-metrics-reader-secret`` Secret which
+    ``cluster.py provision`` / ``cluster.py slot add`` creates
+    per-namespace (annotated to helm-installer,
+    ``type: kubernetes.io/service-account-token``). Cluster-scoped
+    RBAC (ClusterRole + per-namespace ClusterRoleBinding) is
+    created by the same admin bootstrap step from
+    tekton/roles-cluster.yaml.
 
-    Output columns match trace_data.csv's ``_us`` timestamp convention:
-      timestamp_us,target,metric_name,labels,value
+    Output layout (collect_metrics.sh convention):
 
-    - ``timestamp_us`` is integer microseconds since Unix epoch. Real
-      resolution is 1 s (busybox date's %N support is inconsistent), but
-      the naming/unit matches the trace side so analysis code that
-      already handles send_time_us/arrival_time_us works unchanged for
-      metrics.
-    - ``labels`` is the raw Prometheus label-string as it appears between
-      ``{...}`` in the metric line (e.g., ``le="0.005",method="POST"``).
-      Empty for unlabeled metrics. Wrapped in double-quotes with embedded
-      quotes doubled per RFC-4180 CSV.
-    - The optional trailing timestamp in Prometheus text format
-      (``metric{...} value timestamp``) is ignored — we use our own
-      scrape timestamp so all targets sync to one clock.
+      metrics/raw/<pod>_<timestamp>_metrics.log          Prometheus text
+      metrics/raw/collection_debug.log
+      metrics/processed/replica_status.json
+      metrics/processed/replica_status_timeseries.json
+      metrics/processed/pod_startup_times.json
+      metrics/processed/metrics_summary.json
 
-    ALLOWLIST + DISCOVERY:
-
-    The default ``metricsAllowlist`` is a small curated set covering the
-    EPP SaturationDetector inputs (WaitingQueueSize, KVCacheUsagePercent),
-    the derived saturation value the flow-controller consumes, and queue-
-    time / preemption / prefix-cache signals. Prefix-match, so histogram
-    families (``vllm:request_queue_time_seconds`` → ``_bucket``, ``_sum``,
-    ``_count``) come along automatically. Empty string in the param =
-    capture everything (research escape hatch; expect ~500 metrics/target).
-
-    On the first successful scrape of each target, the task writes
-    ``metrics/<target>.discovered.txt`` — a sorted-unique list of every
-    metric name that target exposed, unfiltered by the allowlist. Read
-    this file after any run to decide what to add to the allowlist next
-    time; it lives with the data so it stays consistent with what the
-    target actually ships.
+    Non-fatal: any install / fetch / discovery failure logs a warning
+    and exits 0 so the pipeline is never blocked by scraper failures.
 
     ASSUMPTIONS:
 
-    1. Pipeline runs under the ``helm-installer`` ServiceAccount, which
-       carries ``pods list`` in-namespace via
-       tektonc-data-collection/tekton/roles-ns.yaml. No cross-ns access
-       needed — every scrape target is in the pipelinerun namespace.
+    1. Pipeline runs under the ``helm-installer`` ServiceAccount and
+       the namespace has the ``inference-gateway-sa-metrics-reader-secret``
+       Secret provisioned by roles-ns.yaml. If the Secret is absent,
+       ``collect_metrics.sh`` falls back to unauthenticated scrapes
+       (EPP will then 401 and land in the .err file — same failure
+       mode as before the RBAC fix, but bounded to EPP data loss).
 
-    2. EPP + vLLM Deployments expose ``/metrics`` on the ports named by
-       ``eppPort`` (default 9090) and ``vllmPort`` (default 8000). Both
-       are task params so operators can override per deployment.
+    2. ClusterRole ``sim2real-metrics-reader`` and its per-namespace
+       ClusterRoleBinding exist. Without them, EPP's own SA cannot
+       call TokenReview / SubjectAccessReview to validate incoming
+       bearer tokens and every EPP scrape 401s.
 
-    3. Label conventions match stream-epp-logs.yaml (EPP:
-       ``llm-d.ai/igw-mode=llm-d-router-gateway`` with ``inferencepool``
-       fallback) and stream-gpu-stats.yaml (vLLM:
-       ``llm-d.ai/role=decode``). If a deployment uses different labels,
-       override via ``eppSelector`` / ``eppSelectorFallback`` /
-       ``vllmSelector``.
-
-    4. EPP /metrics is served with secure-serving on (GAIE default):
-       every scrape must present a valid k8s bearer token, verified
-       via TokenReview. The task reads the auto-projected SA token at
-       ``/var/run/secrets/kubernetes.io/serviceaccount/token`` and
-       passes it as ``Authorization: Bearer <token>``. If a deployment
-       additionally enforces SubjectAccessReview on ``/metrics``, the
-       pipeline ServiceAccount will need a ClusterRole binding for
-       ``nonResourceURLs: ["/metrics"]`` — that is not shipped here
-       (add it if 401 becomes 403 in a future deploy). vLLM /metrics
-       is unauthenticated in the currently-supported stack, so the
-       token is only used for the EPP target kind.
+    3. Network egress from the workload pod to raw.githubusercontent.com
+       for the harness-script fetch. Airgapped clusters need a mirror.
 
   workspaces:
     - name: data
       description: "Shared PVC (data-pvc)"
 
   params:
-    - { name: namespace,             type: string }
-    - { name: resultsDir,            type: string }
-    - { name: intervalSeconds,       type: string, default: "2" }
-    - { name: eppPort,               type: string, default: "9090" }
-    - { name: vllmPort,              type: string, default: "8000" }
-    - { name: eppSelector,           type: string, default: "llm-d.ai/igw-mode=llm-d-router-gateway" }
-    - { name: eppSelectorFallback,   type: string, default: "inferencepool" }
-    - { name: vllmSelector,          type: string, default: "llm-d.ai/role=decode" }
-    - name: metricsAllowlist
+    - { name: namespace,       type: string }
+    - { name: resultsDir,      type: string }
+    - { name: intervalSeconds, type: string, default: "15" }
+    - name: harnessSha
       type: string
-      # Curated defaults: the SaturationDetector inputs + derived value +
-      # queue-time histogram + preemption + prefix-cache + iteration
-      # throughput. Prefix-match, so ``_bucket`` / ``_sum`` / ``_count``
-      # variants of histograms come along automatically. Empty string =
-      # capture everything.
-      default: "vllm:num_requests_waiting,vllm:num_requests_running,vllm:gpu_cache_usage_perc,vllm:num_preemptions_total,vllm:request_queue_time_seconds,vllm:iteration_tokens_total,vllm:gpu_prefix_cache_hits_total,vllm:gpu_prefix_cache_queries_total,flow_control_pool_saturation"
+      description: >-
+        llm-d-benchmark git ref (SHA, tag, or branch) to fetch
+        collect_metrics.sh + process_metrics.py from. Default ``main``
+        gets the tip of the upstream repo; override with a pinned SHA
+        for reproducible runs.
+      default: "main"
 
   steps:
     - name: stream-metrics
-      image: alpine/kubectl:1.34.1
+      image: python:3.12-slim-bookworm
       securityContext:
         runAsUser: 0
       script: |
-        #!/bin/sh
+        #!/usr/bin/env bash
         set +e
 
         NAMESPACE="$(params.namespace)"
         RESULTS_DIR="/workspace/data/$(params.resultsDir)"
-        METRICS_DIR="${RESULTS_DIR}/metrics"
         SENTINEL="${RESULTS_DIR}/metrics_stream_done"
         INTERVAL="$(params.intervalSeconds)"
-        EPP_PORT="$(params.eppPort)"
-        VLLM_PORT="$(params.vllmPort)"
-        EPP_SELECTOR="$(params.eppSelector)"
-        EPP_SELECTOR_FALLBACK="$(params.eppSelectorFallback)"
-        VLLM_SELECTOR="$(params.vllmSelector)"
-        ALLOW="$(params.metricsAllowlist)"
+        HARNESS_SHA="$(params.harnessSha)"
+        KUBECTL_VER="v1.34.1"
 
-        # Bearer token for EPP /metrics (GAIE serves secure metrics by
-        # default: TokenReview + optionally SubjectAccessReview). Every
-        # Tekton step pod auto-mounts a projected SA token at the path
-        # below — no explicit volume mount is required. If the token
-        # can't be read (older cluster, non-standard mount), leave TOKEN
-        # empty and scrape unauthenticated; EPP will return 401 and the
-        # per-target .err file will record it. vLLM /metrics on port 8000
-        # is unauthenticated so the token is only used for EPP.
-        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
-
-        # Every K iterations of the scrape loop, re-run pod discovery.
-        # K=15 at the default INTERVAL=2s means we re-check every 30s.
-        RE_RESOLVE_EVERY=15
-
-        # Phase 0 — Validation
-        if ! echo "${INTERVAL}" | grep -qE '^[1-9][0-9]?$' || [ "${INTERVAL}" -gt 60 ]; then
-          echo "ERROR: intervalSeconds must be integer 1-60, got: ${INTERVAL}"
+        # ────────────────────────────────────────────────────────────
+        # Phase 0 — install runtime deps we need on top of python:slim
+        # ────────────────────────────────────────────────────────────
+        # python:3.12-slim-bookworm ships python3 + bash + apt-get. We
+        # need to add curl (for scraping /metrics and fetching the
+        # harness) + kubectl (for pod discovery inside
+        # collect_metrics.sh). Every install step is best-effort — if
+        # egress or apt is unreachable, the task exits 0 rather than
+        # blocking the pipeline.
+        apt-get update -qq >/dev/null 2>&1 \
+          && apt-get install -y --no-install-recommends curl >/dev/null 2>&1 || {
+          echo "WARNING: apt-get install curl failed — cannot run collect_metrics.sh"
           exit 0
-        fi
-
-        # ────────────────────────────────────────────────────────────
-        # Phase 1 — Target discovery
-        # ────────────────────────────────────────────────────────────
-        # Discovers all EPP + vLLM decode pods in NAMESPACE, filters to
-        # Running phase + non-empty PodIP, and emits a space-separated
-        # list of "kind:pod|ip|port" tuples. Also caches the working EPP
-        # selector so we don't retry the fallback on every re-discovery.
-        #
-        # Called both up-front (Phase 1) and periodically from Phase 3.
-        #
-        # The function is invoked via ``TARGETS=$(discover_targets)`` which
-        # runs the body in a subshell — any variable assignments in the
-        # function body do not survive back to the parent shell. To
-        # publish the working EPP selector (for the operator-visible
-        # startup log line), the function writes it to a file that the
-        # parent shell reads after each call. Same pattern as the
-        # /tmp/targets.{epp,vllm} handoff for the target list itself.
-        discover_targets() {
-          out=""
-          : > /tmp/targets.epp_selector
-
-          # EPP — try primary, fall back to legacy.
-          epp_pods=""
-          for sel in "${EPP_SELECTOR}" "${EPP_SELECTOR_FALLBACK}"; do
-            [ -z "${sel}" ] && continue
-            epp_pods=$(kubectl get pods -n "${NAMESPACE}" \
-              -l "${sel}" \
-              --field-selector=status.phase=Running \
-              --no-headers \
-              -o custom-columns=NAME:.metadata.name,IP:.status.podIP 2>/dev/null || true)
-            if [ -n "${epp_pods}" ]; then
-              printf '%s' "${sel}" > /tmp/targets.epp_selector
-              break
-            fi
-          done
-          echo "${epp_pods}" | while read -r name ip; do
-            [ -z "${name}" ] && continue
-            [ -z "${ip}" ] && continue
-            [ "${ip}" = "<none>" ] && continue
-            printf 'epp:%s|%s|%s\n' "${name}" "${ip}" "${EPP_PORT}"
-          done > /tmp/targets.epp
-
-          # vLLM decode.
-          vllm_pods=$(kubectl get pods -n "${NAMESPACE}" \
-            -l "${VLLM_SELECTOR}" \
-            --field-selector=status.phase=Running \
-            --no-headers \
-            -o custom-columns=NAME:.metadata.name,IP:.status.podIP 2>/dev/null || true)
-          echo "${vllm_pods}" | while read -r name ip; do
-            [ -z "${name}" ] && continue
-            [ -z "${ip}" ] && continue
-            [ "${ip}" = "<none>" ] && continue
-            printf 'vllm-decode:%s|%s|%s\n' "${name}" "${ip}" "${VLLM_PORT}"
-          done > /tmp/targets.vllm
-
-          cat /tmp/targets.epp /tmp/targets.vllm | tr '\n' ' '
-          rm -f /tmp/targets.epp /tmp/targets.vllm
         }
 
-        echo "Waiting for scrape targets (EPP: ${EPP_SELECTOR} or ${EPP_SELECTOR_FALLBACK}; vLLM: ${VLLM_SELECTOR})"
-        TARGETS=""
-        i=0
-        while [ $i -lt 20 ]; do
-          TARGETS=$(discover_targets)
-          # `TARGETS` is space-separated; a non-empty result contains at
-          # least one non-space char.
-          if [ -n "$(echo "${TARGETS}" | tr -d ' ')" ]; then break; fi
-          i=$((i+1))
-          sleep 3
-        done
-
-        if [ -z "$(echo "${TARGETS}" | tr -d ' ')" ]; then
-          echo "WARNING: No EPP or vLLM decode pods found after 60s, skipping."
+        curl -fsSL -m 30 -o /usr/local/bin/kubectl \
+          "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl" || {
+          echo "WARNING: kubectl ${KUBECTL_VER} download failed"
           exit 0
-        fi
-
-        EPP_SELECTOR_USED=$(cat /tmp/targets.epp_selector 2>/dev/null || true)
-        echo "Discovered scrape targets (EPP selector: ${EPP_SELECTOR_USED}):"
-        for t in ${TARGETS}; do
-          echo "  ${t}"
-        done
-
-        # ────────────────────────────────────────────────────────────
-        # Phase 2 — Output prep
-        # ────────────────────────────────────────────────────────────
-        mkdir -p "${METRICS_DIR}" || {
-          echo "FATAL: cannot create ${METRICS_DIR}"
-          exit 1
         }
+        chmod +x /usr/local/bin/kubectl
+
+        # ────────────────────────────────────────────────────────────
+        # Phase 1 — fetch collect_metrics.sh + process_metrics.py
+        # ────────────────────────────────────────────────────────────
+        # curl -f fails on HTTP 4xx/5xx (a wrong SHA won't silently
+        # produce an empty file). -m 30 caps the fetch at 30s so a
+        # network stall doesn't hang the workload.
+        HARNESS_URL="https://raw.githubusercontent.com/llm-d/llm-d-benchmark/${HARNESS_SHA}/workload/harnesses"
+        curl -fsSL -m 30 -o /usr/local/bin/collect_metrics.sh \
+          "${HARNESS_URL}/collect_metrics.sh" || {
+          echo "WARNING: curl collect_metrics.sh failed (harnessSha=${HARNESS_SHA})"
+          exit 0
+        }
+        curl -fsSL -m 30 -o /usr/local/bin/process_metrics.py \
+          "${HARNESS_URL}/process_metrics.py" || {
+          echo "WARNING: curl process_metrics.py failed (harnessSha=${HARNESS_SHA})"
+          exit 0
+        }
+        chmod +x /usr/local/bin/collect_metrics.sh
+
+        # ────────────────────────────────────────────────────────────
+        # Phase 2 — env vars consumed by collect_metrics.sh
+        # ────────────────────────────────────────────────────────────
+        export LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR="${RESULTS_DIR}"
+        export LLMDBENCH_VLLM_COMMON_NAMESPACE="${NAMESPACE}"
+        export METRICS_COLLECTION_INTERVAL="${INTERVAL}"
+        # Explicit default matches what roles-ns.yaml creates; downstream
+        # can override if the Secret name changes.
+        export LLMDBENCH_EPP_METRICS_SECRET="inference-gateway-sa-metrics-reader-secret"
+
+        mkdir -p "${RESULTS_DIR}/metrics"
         rm -f "${SENTINEL}"
-
-        # Overwrite the CSV header — if the task is re-attempted for this
-        # iteration, we want a fresh file (parallels stream-gpu-stats's
-        # per-node .log wipe).
-        echo 'timestamp_us,target,metric_name,labels,value' > "${METRICS_DIR}/timeseries.csv"
+        LOG="${RESULTS_DIR}/metrics/metrics_collection.log"
 
         # ────────────────────────────────────────────────────────────
-        # Phase 3 — Scrape loop
+        # Phase 3 — start scraper in background
         # ────────────────────────────────────────────────────────────
-        # Every INTERVAL seconds, fetch /metrics from each target, filter
-        # by the allowlist, append to timeseries.csv. On first successful
-        # scrape of each target, dump the sorted-unique metric-name list
-        # to <target>.discovered.txt so operators can widen the allowlist
-        # from evidence, not guesswork.
-        echo "Scraping every ${INTERVAL}s; sentinel: ${SENTINEL}"
-        iter=0
+        echo "Starting collect_metrics.sh (harnessSha=${HARNESS_SHA}, interval=${INTERVAL}s)"
+        bash /usr/local/bin/collect_metrics.sh start >> "${LOG}" 2>&1 &
+        SCRAPER_PID=$!
+        echo "Scraper PID: ${SCRAPER_PID}"
+
+        # ────────────────────────────────────────────────────────────
+        # Phase 4 — sentinel poll
+        # ────────────────────────────────────────────────────────────
+        # Exits on either:
+        #   (a) sentinel file appears (collect-results wrote it — the
+        #       normal completion path)
+        #   (b) the scraper process died on its own (fault; still exit
+        #       cleanly so the workload completes)
         while true; do
           if [ -f "${SENTINEL}" ]; then
-            echo "Sentinel found, stopping scrapes."
+            echo "Sentinel found, stopping scraper."
             break
           fi
-
-          # Integer microseconds since epoch. Real precision is 1s (busybox
-          # date's %N support is inconsistent); the trailing six zeros are
-          # honest about that but keep the column type/unit consistent
-          # with trace_data.csv.
-          TS=$(( $(date -u +%s) * 1000000 ))
-
-          for target in ${TARGETS}; do
-            name=$(echo "${target}" | cut -d'|' -f1)
-            ip=$(echo "${target}"   | cut -d'|' -f2)
-            port=$(echo "${target}" | cut -d'|' -f3)
-
-            body=/tmp/scrape.${name}.$$
-            rm -f "${body}"
-            # Kind is the prefix before the first ':' in the target label
-            # (e.g. "epp" from "epp:qwen-…"). Only EPP /metrics requires
-            # auth on port 9090; vLLM /metrics on port 8000 is open.
-            #
-            # wget -q suppresses busybox's progress bar but NOT HTTP-error
-            # messages ("wget: server returned error: HTTP/1.1 401 …"), so
-            # every failed scrape floods the pod log. Redirecting stderr
-            # to /dev/null silences that flood — the failure state is
-            # already captured in ${name}.err with the exit code below.
-            kind=${name%%:*}
-            if [ "${kind}" = "epp" ] && [ -n "${TOKEN}" ]; then
-              wget -q -T 5 --header="Authorization: Bearer ${TOKEN}" \
-                   -O "${body}" "http://${ip}:${port}/metrics" 2>/dev/null
-            else
-              wget -q -T 5 -O "${body}" "http://${ip}:${port}/metrics" 2>/dev/null
-            fi
-            rc=$?
-            if [ ${rc} -ne 0 ] || [ ! -s "${body}" ]; then
-              # Log the failure but keep going — sibling targets stay live.
-              # The err file accumulates entries across scrape iterations
-              # so operators can see how often each target flapped.
-              echo "EXIT=${rc} TS=${TS}" >> "${METRICS_DIR}/${name}.err"
-              rm -f "${body}"
-              continue
-            fi
-
-            # First-successful-scrape discovery dump. The `.disc-${name}`
-            # marker file records that we already wrote the discovery for
-            # this target; parallel with the per-target target-tuple.
-            disc_marker="${METRICS_DIR}/.disc-${name}"
-            if [ ! -f "${disc_marker}" ]; then
-              grep -v '^#' "${body}" \
-                | awk 'NF>0 { sub(/\{.*/, "", $1); if ($1 != "") print $1 }' \
-                | sort -u \
-                > "${METRICS_DIR}/${name}.discovered.txt"
-              touch "${disc_marker}"
-              echo "  discovered $(wc -l < "${METRICS_DIR}/${name}.discovered.txt" | tr -d ' ') metric name(s) on ${name}"
-            fi
-
-            # Allowlist filter + CSV emit.
-            #
-            # Prometheus text format:
-            #   # HELP ... / # TYPE ...  (skip)
-            #   metric_name{labels} value [timestamp]
-            #   metric_name value [timestamp]
-            #
-            # Label values may not contain unescaped `}`, so [^}]* inside
-            # {} is safe. We ignore the trailing Prometheus timestamp and
-            # use our own scrape TS instead so all targets share a clock.
-            awk -v TS="${TS}" -v TARGET="${name}" -v ALLOW="${ALLOW}" '
-              BEGIN {
-                n = split(ALLOW, prefixes, ",")
-                # Empty ALLOW ⇒ split returns 1 with prefixes[1] = ""
-                if (n == 1 && prefixes[1] == "") n = 0
-              }
-              /^#/ || NF == 0 { next }
-              {
-                line = $0
-                if (!match(line, /^[a-zA-Z_:][a-zA-Z0-9_:]*/)) next
-                name = substr(line, RSTART, RLENGTH)
-                rest = substr(line, RLENGTH + 1)
-                labels = ""
-                if (substr(rest, 1, 1) == "{") {
-                  close_at = index(rest, "}")
-                  if (close_at == 0) next
-                  labels = substr(rest, 2, close_at - 2)
-                  rest = substr(rest, close_at + 1)
-                }
-                sub(/^[ \t]+/, "", rest)
-                split(rest, parts, /[ \t]+/)
-                value = parts[1]
-                if (value == "") next
-                # Skip non-numeric values (e.g. "NaN" or "+Inf" — analysis
-                # can filter these post-hoc if wanted; skip keeps the CSV
-                # a clean float column).
-                if (value !~ /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/) next
-                # Allowlist: prefix-match. n==0 ⇒ capture all.
-                if (n == 0) { pass = 1 }
-                else {
-                  pass = 0
-                  for (i = 1; i <= n; i++) {
-                    p = prefixes[i]
-                    if (p != "" && substr(name, 1, length(p)) == p) { pass = 1; break }
-                  }
-                }
-                if (!pass) next
-                gsub(/"/, "\"\"", labels)
-                printf "%s,%s,%s,\"%s\",%s\n", TS, TARGET, name, labels, value
-              }
-            ' "${body}" >> "${METRICS_DIR}/timeseries.csv"
-
-            rm -f "${body}"
-          done
-
-          iter=$((iter+1))
-          if [ $((iter % RE_RESOLVE_EVERY)) -eq 0 ]; then
-            new_targets=$(discover_targets)
-            if [ -z "$(echo "${new_targets}" | tr -d ' ')" ]; then
-              echo "No EPP or vLLM decode pods remain, stopping scrapes."
-              break
-            fi
-            if [ "${new_targets}" != "${TARGETS}" ]; then
-              echo "Target set changed; updating."
-              TARGETS="${new_targets}"
-              for t in ${TARGETS}; do
-                echo "  ${t}"
-              done
-            fi
+          if ! kill -0 "${SCRAPER_PID}" 2>/dev/null; then
+            echo "Scraper process ${SCRAPER_PID} exited before sentinel."
+            break
           fi
-
-          # Sleep in 1s slices so the sentinel takes effect promptly.
-          s=0
-          while [ ${s} -lt "${INTERVAL}" ]; do
-            [ -f "${SENTINEL}" ] && break
-            sleep 1
-            s=$((s+1))
-          done
+          sleep 1
         done
 
         # ────────────────────────────────────────────────────────────
-        # Phase 4 — Cleanup
+        # Phase 5 — stop + process
         # ────────────────────────────────────────────────────────────
-        rows=$(wc -l < "${METRICS_DIR}/timeseries.csv" | tr -d ' ')
-        echo "Metrics scraping complete for $(params.resultsDir): ${rows} row(s) (incl. header)."
+        # `stop` sends SIGTERM to the scraper via its PID file. `wait`
+        # then reaps our background handle. `process` runs
+        # process_metrics.py to aggregate raw scrapes into
+        # metrics_summary.json.
+        bash /usr/local/bin/collect_metrics.sh stop >> "${LOG}" 2>&1
+        wait "${SCRAPER_PID}" 2>/dev/null || true
+        echo "Processing collected metrics..."
+        bash /usr/local/bin/collect_metrics.sh process >> "${LOG}" 2>&1
+
+        # ────────────────────────────────────────────────────────────
+        # Phase 6 — final report
+        # ────────────────────────────────────────────────────────────
+        n_raw=$(find "${RESULTS_DIR}/metrics/raw" -name '*_metrics.log' 2>/dev/null | wc -l | tr -d ' ')
+        n_proc=$(find "${RESULTS_DIR}/metrics/processed" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+        echo "Metrics scraping complete for $(params.resultsDir): ${n_raw} raw scrape(s), ${n_proc} processed JSON(s)"

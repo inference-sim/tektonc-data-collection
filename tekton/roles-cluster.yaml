@@ -73,3 +73,58 @@ subjects:
 - kind: ServiceAccount
   name: helm-installer
   namespace: ${NAMESPACE}
+---
+# ClusterRole granting the RBAC the llm-d-router chart's monitoring
+# subchart would emit (see _rbac.yaml in the routerlib chart). Bundled
+# here so sim2real's cluster-admin bootstrap owns this — pipeline runs
+# stay non-admin and llmdbenchmark-standup keeps stripping the chart's
+# monitoring path, but the /metrics auth flow still works because we
+# provisioned the equivalent RBAC ourselves.
+#
+# See sim2real#579 for the design rationale. Companion Secret
+# `inference-gateway-sa-metrics-reader-secret` lives in roles-ns.yaml.
+#
+# Not merged into helm-installer-clusterrole above: that role has many
+# more verbs (nodes/create, clusterroles CRUD, configmaps patch) than
+# we want granted to every SA in every pool namespace. Keep this one
+# minimal so the Group-subject binding below stays narrow.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sim2real-metrics-reader
+rules:
+# EPP calls TokenReview against the k8s API to validate incoming
+# bearer tokens on /metrics scrapes. The EPP's own SA (chart-derived
+# per release) needs this permission — hence the Group-subject
+# binding covers every SA in the namespace.
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+# EPP additionally calls SubjectAccessReview to check whether the
+# (validated) token identifies a principal authorized to GET /metrics.
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+# Client-side authorization: the scraper SA (helm-installer) needs
+# nonResourceURL /metrics get so its bearer token passes EPP's SAR
+# check. Same rule the chart's monitoring subchart would emit.
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+# Per-namespace binding — one CRB per pool namespace, distinguished by
+# the ${NAMESPACE} substitution. Group subject covers every SA in the
+# namespace: both helm-installer (the pipeline SA presenting the
+# bearer) and the chart-derived EPP SA (which calls TokenReview/SAR
+# to validate). Blast radius = one namespace per binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sim2real-metrics-reader-${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sim2real-metrics-reader
+subjects:
+- kind: Group
+  name: system:serviceaccounts:${NAMESPACE}
+  apiGroup: rbac.authorization.k8s.io

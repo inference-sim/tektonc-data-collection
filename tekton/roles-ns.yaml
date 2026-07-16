@@ -190,3 +190,26 @@ roleRef:
   kind: ClusterRole
   name: system:openshift:scc:privileged
   apiGroup: rbac.authorization.k8s.io
+---
+# Bearer-token Secret consumed by the stream-metrics sidecar's
+# collect_metrics.sh scraper. Kubernetes auto-populates data.token
+# with a valid ServiceAccount token for helm-installer (the SA named
+# in the annotation). collect_metrics.sh reads this Secret by its
+# default name (LLMDBENCH_EPP_METRICS_SECRET) so no upstream change
+# is required.
+#
+# This is the sim2real-side replacement for the Secret that the
+# llm-d-router chart's monitoring subchart would create if we let
+# standup enable it — which we can't, because it also emits
+# cluster-scoped RBAC that the non-admin pipeline SA cannot provision.
+# The equivalent cluster-scoped RBAC lives in roles-cluster.yaml as
+# sim2real-metrics-reader + sim2real-metrics-reader-${NAMESPACE}.
+# See sim2real#579.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: inference-gateway-sa-metrics-reader-secret
+  namespace: ${NAMESPACE}
+  annotations:
+    kubernetes.io/service-account.name: helm-installer
+type: kubernetes.io/service-account-token
