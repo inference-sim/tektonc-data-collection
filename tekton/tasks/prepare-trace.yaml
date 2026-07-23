@@ -227,6 +227,7 @@ spec:
         CG="$(params.traceContextGrowth)"
         : "${CG:=accumulate}"
         OUT="/workspace/data/$(params.tracePath)"
+        mkdir -p "$(dirname "${OUT}")"   # blis convert otel does not create the --trace-output parent dir
         "${BLIS}" convert otel \
           --input /workspace/data/otel/corpus.jsonl \
           --context-growth "${CG}" \
