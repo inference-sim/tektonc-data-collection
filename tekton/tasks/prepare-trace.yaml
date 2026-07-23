@@ -8,11 +8,12 @@ spec:
     Prepare a recorded TraceV2 corpus on the data PVC for trace-input observe
     (inference-sim/tektonc-data-collection#62). Short-circuits when traceSpec is
     empty (generative workload) or when the target TraceV2 is already cached on
-    the PVC. Otherwise runs the corpus->TraceV2 chain: download corpus (if
-    absent) -> build_otel_corpus.py (filters incl. --skip-branching) ->
-    blis convert otel. One task, guarded steps; every step no-ops when the
-    guard marker is present, so a generative run's pod starts and exits in
-    seconds.
+    the PVC. Otherwise runs the corpus->TraceV2 chain: download corpus parquet
+    shards from the public HF dataset (if absent) -> build OTel JSONL (inline
+    port of build_otel_corpus.py: usable-span + min_rounds filter, deterministic
+    SHA1 train/test split; no branching filter, see #63) -> blis convert otel.
+    One task, guarded steps; every step no-ops when the guard marker is present,
+    so a generative run's pod starts and exits in seconds.
 
   params:
     - name: traceSpec
@@ -34,7 +35,7 @@ spec:
     - name: data
       description: "Shared PVC: corpus cache + output TraceV2 (data-pvc)"
     - name: source
-      description: "Shared PVC: blis binary + vendored build_otel_corpus.py (source-pvc)"
+      description: "Shared PVC: blis binary (source-pvc)"
 
   steps:
     # ---- guard: the two short-circuit conditions (issue #62) ----
@@ -62,40 +63,136 @@ spec:
         $(params.traceSpec)
         __TRACE_SPEC_END__
 
-    # ---- step 1: download corpus if absent ----
-    # NOTE (#62 / task 19): corpus fetch mechanics — HF dataset (LFS) auth via
-    # the hf-secret, target dir, and idempotency — are finalized alongside the
-    # build_otel_corpus vendoring. Structure + guard are final; the fetch body
-    # is provisional pending corpus access.
+    # ---- step 1: download corpus parquet shards if absent ----
+    # Public HF dataset (no auth): the shards live at the resolve/main URL under
+    # data/train-<NNNNN>-of-<TOTAL>.parquet. Idempotent: skips when the expected
+    # shard count is already present on the PVC.
     - name: download-corpus
-      image: alpine/git:2.43.0   # provisional: needs git-lfs / hf CLI image
+      image: curlimages/curl:8.11.0
       script: |
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        SRC=$(sed -n 's/^ *source: *//p' /workspace/trace_spec.yaml | head -1 | tr -d '"')
+        SRC=$(sed -n 's/^ *source: *//p' /workspace/trace_spec.yaml | head -1 | tr -d "\"' ")
+        SHARDS=$(sed -n 's/^ *shards: *//p' /workspace/trace_spec.yaml | head -1 | tr -d "\"' ")
+        : "${SHARDS:=39}"
+        REPO=${SRC#hf:}                 # strip hf: prefix -> <org>/<name>
         CORPUS=/workspace/data/corpus
-        if [ -d "${CORPUS}" ] && [ -n "$(ls -A "${CORPUS}" 2>/dev/null)" ]; then
-          echo "corpus present at ${CORPUS} — skipping download"; exit 0
+        mkdir -p "${CORPUS}"
+        TOTAL=$(printf '%05d' "${SHARDS}")
+        have=$(ls -1 "${CORPUS}"/*.parquet 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${have}" -ge "${SHARDS}" ]; then
+          echo "download-corpus: ${have} parquet file(s) already at ${CORPUS} — skipping"
+          exit 0
         fi
-        echo "TODO(#62): fetch corpus '${SRC}' into ${CORPUS} (HF LFS via hf-secret)"
-        exit 1   # fail loudly until the fetch body is finalized
+        i=0
+        while [ "$i" -lt "${SHARDS}" ]; do
+          FN="train-$(printf '%05d' "$i")-of-${TOTAL}.parquet"
+          DEST="${CORPUS}/${FN}"
+          if [ -f "${DEST}" ]; then
+            echo "have ${FN}"
+          else
+            URL="https://huggingface.co/datasets/${REPO}/resolve/main/data/${FN}"
+            echo "downloading ${URL}"
+            curl -fsSL "${URL}" -o "${DEST}.tmp"
+            mv "${DEST}.tmp" "${DEST}"
+          fi
+          i=$((i + 1))
+        done
+        echo "download-corpus: ${SHARDS} shard(s) present in ${CORPUS}"
 
-    # ---- step 2: parquet -> OTel JSONL (branching filter lives HERE) ----
+    # ---- step 2: parquet -> OTel JSONL (inline port of build_otel_corpus.py) ----
+    # No branching filter — Exgentic has no branch structure; see
+    # inference-sim/tektonc-data-collection#63. The python program is embedded as
+    # a quoted heredoc so no shell interpolation touches it; the sh wrapper only
+    # early-exits on the guard marker and installs the parquet/yaml deps.
     - name: build-otel
-      image: python:3.11-slim   # provisional: image must carry pyarrow
+      image: python:3.11-slim
       script: |
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        SCRIPT="$(workspaces.source.path)/pipeline/build_otel_corpus.py"  # vendored (task 19)
-        # TODO(#62/task19): pass filters parsed from trace_spec.yaml (min_rounds, split).
-        # No branching filter — Exgentic has no branch structure; see
-        # inference-sim/tektonc-data-collection#63.
-        python3 "${SCRIPT}" \
-          --data /workspace/data/corpus \
-          --out /workspace/data/otel
-        echo "OTel JSONL written to /workspace/data/otel"
+        pip install --quiet pyarrow pyyaml
+        python3 - <<'PYEOF'
+        import glob, hashlib, json, os, sys
+        import yaml
+        import pyarrow.parquet as pq
+
+        SPEC    = "/workspace/trace_spec.yaml"
+        CORPUS  = "/workspace/data/corpus"
+        OUT_DIR = "/workspace/data/otel"
+        OUT     = os.path.join(OUT_DIR, "corpus.jsonl")
+        TEST_PCT = 30  # campaign convention (build_otel_corpus.py --test-pct default)
+
+        with open(SPEC) as f:
+            spec = yaml.safe_load(f) or {}
+        filters = spec.get("filters") or {}
+        min_rounds = int(filters.get("min_rounds", 2))
+        split = str(spec.get("split", "test")).lower()
+
+        def usable_spans(spans):
+            # Keep only spans with ground-truth token counts on both sides
+            # (BA-2: output/input < 1 would panic the decode model at replay).
+            out = []
+            for s in spans:
+                a = s.get("attributes") or {}
+                it = a.get("gen_ai.usage.input_tokens", 0) or 0
+                ot = a.get("gen_ai.usage.output_tokens", 0) or 0
+                if it >= 1 and ot >= 1:
+                    out.append(s)
+            return out
+
+        def in_split(sid):
+            # Deterministic SHA1(session_id)%100 split (no RNG): test if < TEST_PCT.
+            h = int(hashlib.sha1(sid.encode()).hexdigest(), 16) % 100
+            if split == "all":
+                return True
+            if split == "train":
+                return h >= TEST_PCT
+            return h < TEST_PCT  # "test" (default)
+
+        os.makedirs(OUT_DIR, exist_ok=True)
+        files = sorted(glob.glob(os.path.join(CORPUS, "*.parquet")))
+        scanned = kept = dropped = selected = 0
+        with open(OUT, "w") as fout:
+            for f in files:
+                for r in pq.read_table(f).to_pylist():
+                    scanned += 1
+                    sid = r["session_id"]
+                    spans = usable_spans(list(r["spans"]))
+                    if len(spans) < min_rounds:
+                        dropped += 1
+                        continue
+                    kept += 1
+                    if not in_split(sid):
+                        continue
+                    selected += 1
+                    # Order each session's spans by start_time. (blis convert
+                    # otel re-sorts internally, so this is belt-and-suspenders.)
+                    spans = sorted(spans, key=lambda s: s["start_time"])
+                    rec_spans = []
+                    for s in spans:
+                        a = s["attributes"]
+                        rec_spans.append({
+                            "span_id": s["span_id"],
+                            "name": s.get("name", "chat"),
+                            "start_time": s["start_time"],
+                            "status": {"code": 1},
+                            "attributes": {
+                                "gen_ai.request.model": a.get("gen_ai.request.model", "model"),
+                                "gen_ai.usage.input_tokens": int(a["gen_ai.usage.input_tokens"]),
+                                "gen_ai.usage.output_tokens": int(a["gen_ai.usage.output_tokens"]),
+                            },
+                            "trace_id": sid,
+                        })
+                    fout.write(json.dumps({"spans": rec_spans}) + "\n")
+        print("build-otel: scanned=%d kept(>=%d usable)=%d dropped(<%d)=%d split=%s selected=%d"
+              % (scanned, min_rounds, kept, min_rounds, dropped, split, selected))
+        print("build-otel: wrote %s" % OUT)
+        if selected == 0:
+            sys.exit("build-otel: no sessions selected for split %r — nothing to convert" % split)
+        PYEOF
+        echo "OTel JSONL written to /workspace/data/otel/corpus.jsonl"
 
     # ---- step 3: OTel JSONL -> TraceV2 (blis convert otel) ----
     - name: convert
@@ -105,10 +202,19 @@ spec:
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
         BLIS="$(workspaces.source.path)/blis/blis"
-        CG=$(sed -n 's/^ *context_growth: *//p' /workspace/trace_spec.yaml | head -1 | tr -d '"')
+        # context_growth may appear block-style or inside a flow mapping
+        # (convert: {context_growth: accumulate, ...}); grab the token either way.
+        CG=$(grep -o 'context_growth:[^,}]*' /workspace/trace_spec.yaml | head -1 \
+             | sed 's/context_growth: *//' | tr -d "\"' ")
+        : "${CG:=accumulate}"
+        OUT="/workspace/data/$(params.tracePath)"
         "${BLIS}" convert otel \
-          --input /workspace/data/otel \
-          --context-growth "${CG:-accumulate}" \
-          --trace-output "/workspace/data/$(params.tracePath)"
-        echo "TraceV2 written: /workspace/data/$(params.tracePath).{yaml,csv}"
-        ls -la "/workspace/data/$(params.tracePath).yaml" "/workspace/data/$(params.tracePath).csv"
+          --input /workspace/data/otel/corpus.jsonl \
+          --context-growth "${CG}" \
+          --trace-output "${OUT}"
+        if [ ! -f "${OUT}.yaml" ] || [ ! -f "${OUT}.csv" ]; then
+          echo "ERROR: expected ${OUT}.yaml and ${OUT}.csv after conversion" >&2
+          exit 1
+        fi
+        echo "TraceV2 written: ${OUT}.{yaml,csv}"
+        ls -la "${OUT}.yaml" "${OUT}.csv"
