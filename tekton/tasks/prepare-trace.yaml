@@ -1,0 +1,112 @@
+# tektonc-data-collection/tekton/tasks/prepare-trace.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-trace
+spec:
+  description: >-
+    Prepare a recorded TraceV2 corpus on the data PVC for trace-input observe
+    (inference-sim/tektonc-data-collection#62). Short-circuits when traceSpec is
+    empty (generative workload) or when the target TraceV2 is already cached on
+    the PVC. Otherwise runs the corpus->TraceV2 chain: download corpus (if
+    absent) -> build_otel_corpus.py (filters incl. --skip-branching) ->
+    blis convert otel. One task, guarded steps; every step no-ops when the
+    guard marker is present, so a generative run's pod starts and exits in
+    seconds.
+
+  params:
+    - name: traceSpec
+      type: string
+      default: ""
+      description: >-
+        Compact-YAML trace descriptor emitted by assemble (source, shards,
+        filters incl. skip_branching, convert flags). Empty => skip (generative
+        workload).
+    - name: tracePath
+      type: string
+      default: ""
+      description: >-
+        Relative path under /workspace/data for the output TraceV2; the chain
+        writes <tracePath>.yaml + <tracePath>.csv. Hash-derived by assemble, so
+        identical descriptors reuse the cache and changed ones bust it.
+
+  workspaces:
+    - name: data
+      description: "Shared PVC: corpus cache + output TraceV2 (data-pvc)"
+    - name: source
+      description: "Shared PVC: blis binary + vendored build_otel_corpus.py (source-pvc)"
+
+  steps:
+    # ---- guard: the two short-circuit conditions (issue #62) ----
+    - name: guard
+      image: alpine:3.19
+      script: |
+        #!/bin/sh
+        set -e
+        rm -f /workspace/skip
+        if [ -z "$(params.traceSpec)" ]; then
+          echo "prepare-trace: no traceSpec (generative workload) — skipping"
+          touch /workspace/skip
+          exit 0
+        fi
+        if [ -f "/workspace/data/$(params.tracePath).yaml" ] && \
+           [ -f "/workspace/data/$(params.tracePath).csv" ]; then
+          echo "prepare-trace: TraceV2 already cached at $(params.tracePath) — skipping"
+          touch /workspace/skip
+          exit 0
+        fi
+        echo "prepare-trace: building TraceV2 at $(params.tracePath)"
+        # Write the descriptor for later steps to parse (avoids re-parsing the
+        # compact-YAML param in /bin/sh).
+        cat > /workspace/trace_spec.yaml << '__TRACE_SPEC_END__'
+        $(params.traceSpec)
+        __TRACE_SPEC_END__
+
+    # ---- step 1: download corpus if absent ----
+    # NOTE (#62 / task 19): corpus fetch mechanics — HF dataset (LFS) auth via
+    # the hf-secret, target dir, and idempotency — are finalized alongside the
+    # build_otel_corpus vendoring. Structure + guard are final; the fetch body
+    # is provisional pending corpus access.
+    - name: download-corpus
+      image: alpine/git:2.43.0   # provisional: needs git-lfs / hf CLI image
+      script: |
+        #!/bin/sh
+        set -e
+        [ -f /workspace/skip ] && { echo "skip"; exit 0; }
+        SRC=$(sed -n 's/^ *source: *//p' /workspace/trace_spec.yaml | head -1 | tr -d '"')
+        CORPUS=/workspace/data/corpus
+        if [ -d "${CORPUS}" ] && [ -n "$(ls -A "${CORPUS}" 2>/dev/null)" ]; then
+          echo "corpus present at ${CORPUS} — skipping download"; exit 0
+        fi
+        echo "TODO(#62): fetch corpus '${SRC}' into ${CORPUS} (HF LFS via hf-secret)"
+        exit 1   # fail loudly until the fetch body is finalized
+
+    # ---- step 2: parquet -> OTel JSONL (branching filter lives HERE) ----
+    - name: build-otel
+      image: python:3.11-slim   # provisional: image must carry pyarrow
+      script: |
+        #!/bin/sh
+        set -e
+        [ -f /workspace/skip ] && { echo "skip"; exit 0; }
+        SCRIPT="$(workspaces.source.path)/pipeline/build_otel_corpus.py"  # vendored (task 19)
+        # TODO(#62/task19): pass filters parsed from trace_spec.yaml, incl. --skip-branching
+        python3 "${SCRIPT}" \
+          --data /workspace/data/corpus \
+          --out /workspace/data/otel
+        echo "OTel JSONL written to /workspace/data/otel"
+
+    # ---- step 3: OTel JSONL -> TraceV2 (blis convert otel) ----
+    - name: convert
+      image: debian:bookworm-slim
+      script: |
+        #!/bin/sh
+        set -e
+        [ -f /workspace/skip ] && { echo "skip"; exit 0; }
+        BLIS="$(workspaces.source.path)/blis/blis"
+        CG=$(sed -n 's/^ *context_growth: *//p' /workspace/trace_spec.yaml | head -1 | tr -d '"')
+        "${BLIS}" convert otel \
+          --input /workspace/data/otel \
+          --context-growth "${CG:-accumulate}" \
+          --trace-output "/workspace/data/$(params.tracePath)"
+        echo "TraceV2 written: /workspace/data/$(params.tracePath).{yaml,csv}"
+        ls -la "/workspace/data/$(params.tracePath).yaml" "/workspace/data/$(params.tracePath).csv"
