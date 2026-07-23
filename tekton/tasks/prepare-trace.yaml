@@ -12,17 +12,20 @@ spec:
     shards from the public HF dataset (if absent) -> build OTel JSONL (inline
     port of build_otel_corpus.py: usable-span + min_rounds filter, deterministic
     SHA1 train/test split; no branching filter, see #63) -> blis convert otel.
-    One task, guarded steps; every step no-ops when the guard marker is present,
-    so a generative run's pod starts and exits in seconds.
+    Every field the steps need arrives as a SEPARATE SCALAR param (traceSource,
+    traceShards, traceMinRounds, traceSplit, traceContextGrowth) so no
+    in-container YAML parsing of the compact traceSpec is required. One task,
+    guarded steps; every step no-ops when the guard marker is present, so a
+    generative run's pod starts and exits in seconds.
 
   params:
     - name: traceSpec
       type: string
       default: ""
       description: >-
-        Compact-YAML trace descriptor emitted by assemble (source, shards,
-        filters incl. skip_branching, convert flags). Empty => skip (generative
-        workload).
+        Compact-YAML trace descriptor emitted by assemble. Used ONLY as the
+        empty/non-empty presence signal (empty => generative workload => skip);
+        the steps never parse it — see the traceSource/traceShards/... scalars.
     - name: tracePath
       type: string
       default: ""
@@ -30,6 +33,31 @@ spec:
         Relative path under /workspace/data for the output TraceV2; the chain
         writes <tracePath>.yaml + <tracePath>.csv. Hash-derived by assemble, so
         identical descriptors reuse the cache and changed ones bust it.
+    - name: traceSource
+      type: string
+      default: ""
+      description: >-
+        HF dataset ref for the corpus (e.g. "hf:Exgentic/agent-llm-traces"). A
+        leading "hf:" prefix is stripped to form the <org>/<name> repo path.
+    - name: traceShards
+      type: string
+      default: ""
+      description: 'Number of parquet shards to download (default 39 when empty).'
+    - name: traceMinRounds
+      type: string
+      default: ""
+      description: >-
+        Minimum usable spans per session to keep it (default 2 when empty).
+    - name: traceSplit
+      type: string
+      default: ""
+      description: >-
+        Deterministic SHA1 split to select: test | train | all (default test).
+    - name: traceContextGrowth
+      type: string
+      default: ""
+      description: >-
+        context_growth mode passed to `blis convert otel` (default accumulate).
 
   workspaces:
     - name: data
@@ -57,26 +85,22 @@ spec:
           exit 0
         fi
         echo "prepare-trace: building TraceV2 at $(params.tracePath)"
-        # Write the descriptor for later steps to parse (avoids re-parsing the
-        # compact-YAML param in /bin/sh).
-        cat > /workspace/trace_spec.yaml << '__TRACE_SPEC_END__'
-        $(params.traceSpec)
-        __TRACE_SPEC_END__
 
     # ---- step 1: download corpus parquet shards if absent ----
     # Public HF dataset (no auth): the shards live at the resolve/main URL under
-    # data/train-<NNNNN>-of-<TOTAL>.parquet. Idempotent: skips when the expected
-    # shard count is already present on the PVC.
+    # data/train-<NNNNN>-of-<TOTAL>.parquet. Repo + shard count arrive as scalar
+    # params — no YAML parsing. Idempotent: skips when the expected shard count
+    # is already present on the PVC.
     - name: download-corpus
       image: curlimages/curl:8.11.0
       script: |
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        SRC=$(sed -n 's/^ *source: *//p' /workspace/trace_spec.yaml | head -1 | tr -d "\"' ")
-        SHARDS=$(sed -n 's/^ *shards: *//p' /workspace/trace_spec.yaml | head -1 | tr -d "\"' ")
+        REPO="$(params.traceSource)"
+        REPO=${REPO#hf:}                # strip hf: prefix -> <org>/<name>
+        SHARDS="$(params.traceShards)"
         : "${SHARDS:=39}"
-        REPO=${SRC#hf:}                 # strip hf: prefix -> <org>/<name>
         CORPUS=/workspace/data/corpus
         mkdir -p "${CORPUS}"
         TOTAL=$(printf '%05d' "${SHARDS}")
@@ -104,31 +128,29 @@ spec:
     # ---- step 2: parquet -> OTel JSONL (inline port of build_otel_corpus.py) ----
     # No branching filter — Exgentic has no branch structure; see
     # inference-sim/tektonc-data-collection#63. The python program is embedded as
-    # a quoted heredoc so no shell interpolation touches it; the sh wrapper only
-    # early-exits on the guard marker and installs the parquet/yaml deps.
+    # a quoted heredoc so no shell interpolation touches it; MIN_ROUNDS/SPLIT are
+    # passed via env from scalar params (no YAML read). The sh wrapper only
+    # early-exits on the guard marker and installs the parquet dep.
     - name: build-otel
       image: python:3.11-slim
       script: |
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        pip install --quiet pyarrow pyyaml
+        pip install --quiet pyarrow
+        export MIN_ROUNDS="$(params.traceMinRounds)"
+        export SPLIT="$(params.traceSplit)"
         python3 - <<'PYEOF'
         import glob, hashlib, json, os, sys
-        import yaml
         import pyarrow.parquet as pq
 
-        SPEC    = "/workspace/trace_spec.yaml"
         CORPUS  = "/workspace/data/corpus"
         OUT_DIR = "/workspace/data/otel"
         OUT     = os.path.join(OUT_DIR, "corpus.jsonl")
         TEST_PCT = 30  # campaign convention (build_otel_corpus.py --test-pct default)
 
-        with open(SPEC) as f:
-            spec = yaml.safe_load(f) or {}
-        filters = spec.get("filters") or {}
-        min_rounds = int(filters.get("min_rounds", 2))
-        split = str(spec.get("split", "test")).lower()
+        min_rounds = int(os.environ.get("MIN_ROUNDS") or 2)
+        split = (os.environ.get("SPLIT") or "test").lower()
 
         def usable_spans(spans):
             # Keep only spans with ground-truth token counts on both sides
@@ -202,10 +224,7 @@ spec:
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
         BLIS="$(workspaces.source.path)/blis/blis"
-        # context_growth may appear block-style or inside a flow mapping
-        # (convert: {context_growth: accumulate, ...}); grab the token either way.
-        CG=$(grep -o 'context_growth:[^,}]*' /workspace/trace_spec.yaml | head -1 \
-             | sed 's/context_growth: *//' | tr -d "\"' ")
+        CG="$(params.traceContextGrowth)"
         : "${CG:=accumulate}"
         OUT="/workspace/data/$(params.tracePath)"
         "${BLIS}" convert otel \
