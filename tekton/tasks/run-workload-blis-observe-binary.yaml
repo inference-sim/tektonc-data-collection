@@ -42,6 +42,21 @@ spec:
       type: string
       default: ""
       description: "Additional CLI flags appended to the blis observe command (one-off experimentation)"
+    - name: tracePath
+      type: string
+      default: ""
+      description: >-
+        Trace-input mode: relative path under /workspace/data to a recorded TraceV2
+        (prepare-trace writes <tracePath>.yaml + <tracePath>.csv). When non-empty,
+        observe replays the trace closed-loop instead of using workloadSpec.
+    - name: concurrentSessions
+      type: string
+      default: ""
+      description: "Trace-input mode: number of concurrent sessions in the fixed pool (blis observe --concurrent-sessions)"
+    - name: totalSessions
+      type: string
+      default: ""
+      description: "Trace-input mode: total sessions to replay, corpus duplicated to fill (blis observe --total-sessions)"
 
   workspaces:
     - name: data
@@ -74,6 +89,21 @@ spec:
         #!/bin/sh
         set -e
         BLIS="$(workspaces.source.path)/blis/blis"
+        # Workload source: trace-input (closed-loop replay of a recorded TraceV2)
+        # when tracePath is set, else the synthesized workload spec. These are
+        # mutually exclusive; sourcing flags never come through extraArgs.
+        TRACE_PATH="$(params.tracePath)"
+        if [ -n "${TRACE_PATH}" ]; then
+          WL_ARGS="--input-trace-header /workspace/data/${TRACE_PATH}.yaml \
+            --input-trace-data /workspace/data/${TRACE_PATH}.csv \
+            --concurrent-sessions $(params.concurrentSessions) \
+            --total-sessions $(params.totalSessions)"
+          echo "run-observe: trace-input mode (tracePath=${TRACE_PATH})"
+        else
+          WL_ARGS="--workload-spec /workspace/workload.yaml"
+          echo "run-observe: generative workload-spec mode"
+        fi
+        # shellcheck disable=SC2086
         "${BLIS}" observe \
           --max-concurrency $(params.maxConcurrency) \
           --timeout $(params.timeout) \
@@ -82,7 +112,7 @@ spec:
           --post-hoc-detector composite \
           --server-url $(params.endpoint) \
           --model $(params.model) \
-          --workload-spec /workspace/workload.yaml \
+          ${WL_ARGS} \
           --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
           --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv \
           --saturation-report /workspace/data/$(params.resultsDir)/saturation.json \
