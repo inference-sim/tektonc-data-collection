@@ -89,7 +89,9 @@ spec:
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
         SCRIPT="$(workspaces.source.path)/pipeline/build_otel_corpus.py"  # vendored (task 19)
-        # TODO(#62/task19): pass filters parsed from trace_spec.yaml, incl. --skip-branching
+        # TODO(#62/task19): pass filters parsed from trace_spec.yaml (min_rounds, split).
+        # No branching filter — Exgentic has no branch structure; see
+        # inference-sim/tektonc-data-collection#63.
         python3 "${SCRIPT}" \
           --data /workspace/data/corpus \
           --out /workspace/data/otel
