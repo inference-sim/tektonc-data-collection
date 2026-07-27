@@ -89,16 +89,17 @@ spec:
         #!/bin/sh
         set -e
         BLIS="$(workspaces.source.path)/blis/blis"
-        # Workload source: trace-input (closed-loop replay of a recorded TraceV2)
-        # when tracePath is set, else the synthesized workload spec. These are
-        # mutually exclusive; sourcing flags never come through extraArgs.
+        # Workload source: corpus-mode (closed-loop replay of a recorded TraceV2
+        # corpus) when tracePath is set, else the synthesized workload spec.
+        # These are mutually exclusive; sourcing flags never come through
+        # extraArgs. Corpus-mode is selected by --concurrent-sessions > 0.
         TRACE_PATH="$(params.tracePath)"
         if [ -n "${TRACE_PATH}" ]; then
-          WL_ARGS="--input-trace-header /workspace/data/${TRACE_PATH}.yaml \
-            --input-trace-data /workspace/data/${TRACE_PATH}.csv \
+          WL_ARGS="--corpus-header /workspace/data/${TRACE_PATH}.yaml \
+            --corpus-data /workspace/data/${TRACE_PATH}.csv \
             --concurrent-sessions $(params.concurrentSessions) \
             --total-sessions $(params.totalSessions)"
-          echo "run-observe: trace-input mode (tracePath=${TRACE_PATH})"
+          echo "run-observe: corpus-mode (tracePath=${TRACE_PATH})"
         else
           WL_ARGS="--workload-spec /workspace/workload.yaml"
           echo "run-observe: generative workload-spec mode"
