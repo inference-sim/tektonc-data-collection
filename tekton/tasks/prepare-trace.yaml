@@ -58,6 +58,21 @@ spec:
       default: ""
       description: >-
         context_growth mode passed to `blis convert otel` (default accumulate).
+    - name: traceDedupByConversation
+      type: string
+      default: "1"
+      description: >-
+        When truthy (default), keep at most ONE session per conversation
+        (the 12-hex prefix of session_id before '_'), so the corpus is one
+        independent multi-turn session per conversation rather than many
+        correlated sub-sessions of the same conversation. "0"/""/"false" = keep all.
+    - name: traceShuffleSeed
+      type: string
+      default: "42"
+      description: >-
+        Seed for the deterministic shuffle of the selected sessions. Breaks the
+        conversation-contiguous file order so `blis observe`'s first-N pool spans
+        many conversations. Same seed => identical corpus across arms/reruns.
 
   workspaces:
     - name: data
@@ -140,8 +155,10 @@ spec:
         pip install --quiet pyarrow
         export MIN_ROUNDS="$(params.traceMinRounds)"
         export SPLIT="$(params.traceSplit)"
+        export DEDUP_BY_CONVERSATION="$(params.traceDedupByConversation)"
+        export SHUFFLE_SEED="$(params.traceShuffleSeed)"
         python3 - <<'PYEOF'
-        import glob, hashlib, json, os, sys
+        import glob, hashlib, json, os, random, sys
         import pyarrow.parquet as pq
 
         CORPUS  = "/workspace/data/corpus"
@@ -175,43 +192,74 @@ spec:
 
         os.makedirs(OUT_DIR, exist_ok=True)
         files = sorted(glob.glob(os.path.join(CORPUS, "*.parquet")))
-        scanned = kept = dropped = selected = 0
+        scanned = kept = dropped = 0
+        # Collect selected sessions as (session_id, rec_spans). We do NOT write in
+        # file order: the parquet is sorted by session_id, so a conversation's
+        # sessions are contiguous and blis observe's first-N pool would draw from
+        # only a few conversations. We dedup/shuffle below before writing.
+        records = []
+        for f in files:
+            for r in pq.read_table(f).to_pylist():
+                scanned += 1
+                sid = r["session_id"]
+                spans = usable_spans(list(r["spans"]))
+                if len(spans) < min_rounds:
+                    dropped += 1
+                    continue
+                kept += 1
+                if not in_split(sid):
+                    continue
+                # Order each session's spans by start_time. (blis convert otel
+                # re-sorts internally, so this is belt-and-suspenders.)
+                spans = sorted(spans, key=lambda s: s["start_time"])
+                rec_spans = []
+                for s in spans:
+                    a = s["attributes"]
+                    rec_spans.append({
+                        "span_id": s["span_id"],
+                        "name": s.get("name", "chat"),
+                        "start_time": s["start_time"],
+                        "status": {"code": 1},
+                        "attributes": {
+                            "gen_ai.request.model": a.get("gen_ai.request.model", "model"),
+                            "gen_ai.usage.input_tokens": int(a["gen_ai.usage.input_tokens"]),
+                            "gen_ai.usage.output_tokens": int(a["gen_ai.usage.output_tokens"]),
+                        },
+                        "trace_id": sid,
+                    })
+                records.append((sid, rec_spans))
+        selected = len(records)
+
+        # Diversity selection (deterministic, so both arms/reruns get the same
+        # corpus for a given seed):
+        #   - dedup: keep one session per CONVERSATION (12-hex prefix of the
+        #     session_id before '_') so we replay independent multi-turn sessions
+        #     rather than many correlated sub-sessions of the same conversation.
+        #   - shuffle: break the conversation-contiguous file order so blis
+        #     observe's first-N pool spans many conversations.
+        rng = random.Random(int(os.environ.get("SHUFFLE_SEED") or 42))
+        dedup = (os.environ.get("DEDUP_BY_CONVERSATION") or "1").lower() not in ("0", "false", "no", "")
+        conversations = len({sid.split("_")[0] for sid, _ in records})
+        if dedup:
+            by_base = {}
+            for sid, rec in records:
+                by_base.setdefault(sid.split("_")[0], []).append((sid, rec))
+            deduped = []
+            for base in sorted(by_base):                        # deterministic base order
+                cands = sorted(by_base[base], key=lambda x: x[0])  # deterministic within base
+                deduped.append(rng.choice(cands))               # seeded representative pick
+            records = deduped
+        rng.shuffle(records)                                    # seeded; breaks file order
+
         with open(OUT, "w") as fout:
-            for f in files:
-                for r in pq.read_table(f).to_pylist():
-                    scanned += 1
-                    sid = r["session_id"]
-                    spans = usable_spans(list(r["spans"]))
-                    if len(spans) < min_rounds:
-                        dropped += 1
-                        continue
-                    kept += 1
-                    if not in_split(sid):
-                        continue
-                    selected += 1
-                    # Order each session's spans by start_time. (blis convert
-                    # otel re-sorts internally, so this is belt-and-suspenders.)
-                    spans = sorted(spans, key=lambda s: s["start_time"])
-                    rec_spans = []
-                    for s in spans:
-                        a = s["attributes"]
-                        rec_spans.append({
-                            "span_id": s["span_id"],
-                            "name": s.get("name", "chat"),
-                            "start_time": s["start_time"],
-                            "status": {"code": 1},
-                            "attributes": {
-                                "gen_ai.request.model": a.get("gen_ai.request.model", "model"),
-                                "gen_ai.usage.input_tokens": int(a["gen_ai.usage.input_tokens"]),
-                                "gen_ai.usage.output_tokens": int(a["gen_ai.usage.output_tokens"]),
-                            },
-                            "trace_id": sid,
-                        })
-                    fout.write(json.dumps({"spans": rec_spans}) + "\n")
-        print("build-otel: scanned=%d kept(>=%d usable)=%d dropped(<%d)=%d split=%s selected=%d"
-              % (scanned, min_rounds, kept, min_rounds, dropped, split, selected))
+            for sid, rec_spans in records:
+                fout.write(json.dumps({"spans": rec_spans}) + "\n")
+        print("build-otel: scanned=%d kept(>=%d usable)=%d dropped(<%d)=%d split=%s "
+              "selected=%d conversations=%d dedup=%s written=%d shuffle_seed=%s"
+              % (scanned, min_rounds, kept, min_rounds, dropped, split, selected,
+                 conversations, dedup, len(records), os.environ.get("SHUFFLE_SEED") or 42))
         print("build-otel: wrote %s" % OUT)
-        if selected == 0:
+        if not records:
             sys.exit("build-otel: no sessions selected for split %r — nothing to convert" % split)
         PYEOF
         echo "OTel JSONL written to /workspace/data/otel/corpus.jsonl"
