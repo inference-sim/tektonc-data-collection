@@ -54,7 +54,7 @@ stack:
             - name: TRANSFORMERS_CACHE
               value: "/mnt/exp/.cache/huggingface"
           mountModelVolume: true
-          image: "vllm/vllm-openai:v0.19.1"
+          image: "vllm/vllm-openai:v0.26.0"
           modelCommand: vllmServe
           resources:
             limits:

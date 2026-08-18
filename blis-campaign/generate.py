@@ -78,17 +78,53 @@ def generate_workload_for_experiment(exp, patterns_file):
         raise RuntimeError(f"Experiment #{exp['id']}: Failed to generate workload: {e}")
 
 
+def build_inference_perf_orcspec(exp, static_workloads):
+    """Build an ORC orcSpec from a workloads.yaml inference_perf profile.
+
+    The ORC pipeline accepts inference_perf workloads inline (see the default
+    orcSpec in tektoncsample/blis-orc/values.yaml); the BLIS binary translates
+    them to a trace during observe (orc-observe.yaml). This reshapes a
+    workloads.yaml entry {load.stages, data.shared_prefix} into that orcSpec
+    shape verbatim -- no cohort/distribution synthesis needed.
+
+    Args:
+        exp: Experiment dict (its 'workload' names a workloads.yaml profile)
+        static_workloads: Parsed workloads.yaml (name -> profile)
+
+    Returns:
+        dict: {"inference_perf": {"stages": [...], "shared_prefix": {...}}}
+    """
+    wl = static_workloads[exp["workload"]]  # presence guaranteed by validate_all
+    data = wl.get("data", {})
+    data_type = data.get("type")
+    if data_type != "shared_prefix":
+        raise ValueError(
+            f"Experiment #{exp['id']}: workload '{exp['workload']}' has "
+            f"data.type='{data_type}'; only 'shared_prefix' is supported for "
+            f"inference_perf translation."
+        )
+    return {
+        "inference_perf": {
+            "stages": wl["load"]["stages"],
+            "shared_prefix": data["shared_prefix"],
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Validation (collect all errors, don't fail on first)
 # ---------------------------------------------------------------------------
 
-def validate_all(experiments, clusters, patterns_data):
+def validate_all(experiments, clusters, patterns_data, static_workloads=None):
     """
     Validate all experiments. Returns list of error strings (empty = valid).
 
     Args:
         patterns_data: Dict from arrival-and-workload-patterns.yaml with
                       'arrival_patterns' and 'workloads' keys
+        static_workloads: Dict from workloads.yaml (name -> profile). Workloads
+                      here are inference_perf profiles for which arrival_pattern
+                      is not applicable (load comes from load.stages).
     """
     errors = []
     valid_hw = {k for k in clusters if k != "namespace"}
@@ -97,6 +133,7 @@ def validate_all(experiments, clusters, patterns_data):
     # Extract arrival patterns and workloads from patterns_data
     arrival_patterns = patterns_data.get("arrival_patterns", {})
     workloads = patterns_data.get("workloads", {})
+    static_workloads = static_workloads or {}
 
     for exp in experiments:
         eid = exp.get("id", "?")
@@ -107,23 +144,29 @@ def validate_all(experiments, clusters, patterns_data):
         if exp["hw"] not in valid_hw:
             errors.append(f"Experiment #{eid}: unknown hw '{exp['hw']}'")
 
-        # Validate workload exists
-        if exp["workload"] not in workloads:
+        # Validate workload exists in one of the two sources:
+        #  - patterns file: statistical/dynamic workloads (need arrival_pattern)
+        #  - workloads.yaml: inference_perf profiles (arrival_pattern N/A)
+        is_dynamic = exp["workload"] in workloads
+        is_static = exp["workload"] in static_workloads
+        if not is_dynamic and not is_static:
             errors.append(f"Experiment #{eid}: unknown workload '{exp['workload']}'")
 
-        # Validate arrival_pattern exists
-        if "arrival_pattern" not in exp:
-            errors.append(f"Experiment #{eid}: missing 'arrival_pattern' field")
-        elif exp["arrival_pattern"] not in arrival_patterns:
-            errors.append(f"Experiment #{eid}: unknown arrival_pattern '{exp['arrival_pattern']}'")
+        # arrival_pattern is only required/validated for dynamic (patterns) workloads.
+        # For inference_perf workloads it is ignored (load comes from load.stages).
+        if is_dynamic:
+            if "arrival_pattern" not in exp:
+                errors.append(f"Experiment #{eid}: missing 'arrival_pattern' field")
+            elif exp["arrival_pattern"] not in arrival_patterns:
+                errors.append(f"Experiment #{eid}: unknown arrival_pattern '{exp['arrival_pattern']}'")
 
         # Validate harness
         harness = exp.get("harness", "inference-perf")
         if harness not in valid_harnesses:
             errors.append(f"Experiment #{eid}: unknown harness '{harness}' (valid: {valid_harnesses})")
 
-        # Validate combination is valid (workload has data for arrival_pattern)
-        if exp["workload"] in workloads and "arrival_pattern" in exp:
+        # Validate combination is valid (dynamic workload has data for arrival_pattern)
+        if is_dynamic and "arrival_pattern" in exp:
             wl = workloads[exp["workload"]]
             if exp["arrival_pattern"] not in wl:
                 available = ", ".join(wl.keys())
@@ -131,6 +174,16 @@ def validate_all(experiments, clusters, patterns_data):
                     f"Experiment #{eid}: workload '{exp['workload']}' does not have "
                     f"data for arrival_pattern '{exp['arrival_pattern']}'. "
                     f"Available: {available}"
+                )
+
+        # Static (inference_perf) workloads must be spec: inference_perf
+        if is_static and not is_dynamic:
+            spec = static_workloads[exp["workload"]].get("spec")
+            if spec != "inference_perf":
+                errors.append(
+                    f"Experiment #{eid}: workload '{exp['workload']}' in workloads.yaml "
+                    f"has spec='{spec}'; only 'inference_perf' profiles are supported "
+                    f"from experiments.json (blis_native workloads are not auto-selectable)."
                 )
 
         # Dynamic workloads require ORC harness
@@ -184,10 +237,19 @@ def extract_pipeline_name(pipeline_yaml_path):
 # ---------------------------------------------------------------------------
 
 DEFAULT_KV_OFFLOAD_GB = 8.0
+
+# vLLM v0.26 CPU KV-cache offloading (OffloadingConnector) defaults.
+# The connector takes an absolute byte budget for the CPU pool, unlike the
+# legacy --kv-offloading-size flag which took GiB. Values match the manifest
+# validated in kv-offload-cpu.yaml.
+KV_OFFLOAD_CPU_BYTES = 10 * 1024**3  # 10 GiB
+KV_OFFLOAD_BLOCK_SIZE = 16
+KV_OFFLOAD_EVICTION_POLICY = "lru"
+
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
 
-def build_values(exp, base_values, clusters, patterns_file):
+def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, static_workloads=None):
     """
     Build per-experiment values.yaml from base template + experiment config.
 
@@ -196,7 +258,11 @@ def build_values(exp, base_values, clusters, patterns_file):
         base_values: Base values template
         clusters: Clusters config dict
         patterns_file: Path to arrival-and-workload-patterns.yaml
+        patterns_data: Parsed patterns file (to decide the workload source)
+        static_workloads: Parsed workloads.yaml (inference_perf profiles)
     """
+    patterns_data = patterns_data or {}
+    static_workloads = static_workloads or {}
     v = copy.deepcopy(base_values)
 
     # Use model ID directly from experiments.json (full HuggingFace ID)
@@ -224,9 +290,13 @@ def build_values(exp, base_values, clusters, patterns_file):
     v["stack"]["treatments"]["tensorParallelism"] = [exp["tp"]]
     v["stack"]["treatments"]["dataLocalParallelism"] = [exp.get("dp") or 1]
 
-    # Store cpu_offload flag and offloading size for template access
-    v["stack"]["cpu_offload"] = exp.get("cpu_offload", False)
-    v["stack"]["kv_offloading_size"] = DEFAULT_KV_OFFLOAD_GB if exp.get("cpu_offload") else 0
+    # Store kv_offload flag and offloading size for template access.
+    # NOTE: experiments.json uses the key "kv_offload"; older code read
+    # "cpu_offload" (which never existed in the data), so offloading never
+    # actually triggered. kv_offloading_size is informational only (recorded
+    # in exp-config.yaml); the real vLLM config is built in build_extra_overrides.
+    v["stack"]["kv_offload"] = exp.get("kv_offload", False)
+    v["stack"]["kv_offloading_size"] = DEFAULT_KV_OFFLOAD_GB if exp.get("kv_offload") else 0
 
     # GPU targeting
     cluster = clusters[exp["hw"]]
@@ -244,18 +314,24 @@ def build_values(exp, base_values, clusters, patterns_file):
     # Observability template only handles observability features, NOT capacity management
     v["stack"]["extra_overrides"] = build_extra_overrides(exp)
 
-    # Workload profile - generate dynamically
-    wl = generate_workload_for_experiment(exp, patterns_file)
+    # Workload profile - two possible sources:
+    #  (a) patterns file  -> statistical BLIS-native cohorts (needs arrival_pattern)
+    #  (b) workloads.yaml  -> inference_perf profile, passed through for BLIS to translate
+    patterns_workloads = patterns_data.get("workloads", {})
+    if exp["workload"] in patterns_workloads:
+        wl = generate_workload_for_experiment(exp, patterns_file)
+    else:
+        wl = build_inference_perf_orcspec(exp, static_workloads)
     harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
 
-    # Dynamic workloads are always BLIS native format
+    # Both sources emit an orcSpec the ORC pipeline understands
     if harness in ["orc", "blis-orc"]:
         v["workload"]["orcSpec"] = wl
 
-        # Set horizon to 10 minutes (600 seconds) for ORC experiments
-        # This stops request generation when spike windows complete
-        # (spike duration is 600s; horizon should match to avoid extending generation)
-        v["workload"]["horizon"] = 600
+        # Set horizon to 25 minutes (1500 seconds) for ORC experiments
+        # This is the total simulation time to let requests complete
+        # (spike duration is 600s for request generation; horizon gives 15 more minutes for completion)
+        v["workload"]["horizon"] = 1500
     else:
         raise ValueError(
             f"Dynamically generated workloads use BLIS native format "
@@ -291,16 +367,29 @@ def build_extra_overrides(exp):
             f'decode.containers[name="vllm"].args=--gpu-memory-utilization={exp["gpu_mem"]}'
         )
 
-    # KV cache offloading (total GiB across TP ranks) - CAPACITY MANAGEMENT
-    # Stock vLLM v0.15.1 enables HMA by default which conflicts with
-    # OffloadingConnector, so we also disable HMA when offloading is on.
-    # NOTE: This is independent of observability - observability can run with or without offloading
-    if exp.get("cpu_offload"):
-        overrides.append(
-            f'decode.containers[name="vllm"].args=--kv-offloading-size={DEFAULT_KV_OFFLOAD_GB}'
+    # CPU KV cache offloading - CAPACITY MANAGEMENT (vLLM v0.26 style).
+    # Uses the OffloadingConnector / CPUOffloadingSpec kv-transfer-config, matching
+    # the config validated in kv-offload-cpu.yaml. Evicted GPU KV blocks spill to a
+    # CPU RAM pool instead of being dropped, extending effective cache capacity.
+    # The legacy --kv-offloading-size / --disable-hybrid-kv-cache-manager flags
+    # (v0.15/v0.19 era) are no longer used; the connector supersedes them.
+    # NOTE: independent of observability - observability can run with or without offloading.
+    if exp.get("kv_offload"):
+        kv_transfer_config = json.dumps(
+            {
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "spec_name": "CPUOffloadingSpec",
+                    "cpu_bytes_to_use": KV_OFFLOAD_CPU_BYTES,
+                    "block_size": KV_OFFLOAD_BLOCK_SIZE,
+                    "eviction_policy": KV_OFFLOAD_EVICTION_POLICY,
+                },
+            },
+            separators=(",", ":"),  # compact, single-line JSON for the Helm --set parser
         )
         overrides.append(
-            'decode.containers[name="vllm"].args=--disable-hybrid-kv-cache-manager'
+            f'decode.containers[name="vllm"].args=--kv-transfer-config={kv_transfer_config}'
         )
 
     # Expert parallelism for MoE models with data-local parallelism > 1
@@ -400,9 +489,12 @@ def generate_campaign(args):
     experiments = load_experiments(args.experiments)
     clusters = load_clusters(config_dir / "clusters.yaml")
 
-    # Load arrival and workload patterns
+    # Load arrival and workload patterns (dynamic/statistical workload source)
     patterns_file = Path(__file__).parent / "arrival-and-workload-patterns.yaml"
     patterns_data = load_yaml(patterns_file)
+
+    # Load workloads.yaml (static inference_perf workload source: general, codegen, ...)
+    static_workloads = load_yaml(Path(__file__).parent.parent / "workloads.yaml")
 
     # Load base values for each harness type
     tektoncsample_base = Path(__file__).parent.parent / "tektoncsample"
@@ -438,7 +530,7 @@ def generate_campaign(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Validate all experiments first (fail-fast)
-    errors = validate_all(experiments, clusters, patterns_data)
+    errors = validate_all(experiments, clusters, patterns_data, static_workloads)
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -480,7 +572,7 @@ def generate_campaign(args):
                           else base_values_inference_perf_stock)
 
         # 3. Build and save values.yaml
-        values = build_values(exp, base_values, clusters, patterns_file)
+        values = build_values(exp, base_values, clusters, patterns_file, patterns_data, static_workloads)
         write_yaml(exp_dir / "values.yaml", values)
 
         # 4. Compile pipeline.yaml via tektonc

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-kv-offload
+  namespace: diya
+  labels:
+    app: vllm-kv-offload
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-kv-offload
+  template:
+    metadata:
+      labels:
+        app: vllm-kv-offload
+    spec:
+      containers:
+      - name: vllm
+        image: docker.io/vllm/vllm-openai:v0.26.0
+        command: ["vllm", "serve"]
+        args:
+        - "/models/models/Qwen/Qwen3-14B"
+        - "--tensor-parallel-size=1"
+        - "--gpu-memory-utilization=0.85"
+        - "--max-model-len=8192"
+        - "--enable-chunked-prefill"
+        - "--kv-transfer-config"
+        - |
+          {
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+              "spec_name": "CPUOffloadingSpec",
+              "cpu_bytes_to_use": 10737418240,
+              "block_size": 16,
+              "eviction_policy": "lru"
+            }
+          }
+        env:
+        - name: PYTHONHASHSEED
+          value: "0"
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "16"
+            memory: 64Gi
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 120
+          periodSeconds: 5
+          failureThreshold: 24
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 5
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: model-pvc
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-kv-offload
+  namespace: diya
+spec:
+  selector:
+    app: vllm-kv-offload
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  type: ClusterIP

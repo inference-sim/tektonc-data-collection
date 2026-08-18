@@ -66,7 +66,7 @@ Each entry mirrors the #598 table columns:
   "hw": "H100",
   "workload": "general",
   "mbt": 2048,
-  "cpu_offload": false,
+  "kv_offload": false,
   "gpu_mem": 0.9,
   "tp": 1,
   "dp": null,
@@ -74,7 +74,7 @@ Each entry mirrors the #598 table columns:
 }
 ```
 
-Required fields: `id`, `model`, `precision`, `hw`, `workload`, `mbt`, `cpu_offload`, `gpu_mem`, `tp`.
+Required fields: `id`, `model`, `precision`, `hw`, `workload`, `mbt`, `kv_offload`, `gpu_mem`, `tp`.
 Optional fields: `dp` (defaults to null), `notes`.
 
 Valid `precision` values: `"FP16"` (default, no extra vLLM arg) and `"FP8"` (adds `--quantization fp8`).
@@ -190,7 +190,7 @@ Constructs `stack.extra_overrides` list from experiment parameters. These become
 |-----------------|-----------|-------------------|
 | `precision` | `== "FP8"` | `--quantization fp8` |
 | `gpu_mem` | `!= 0.9` | `--gpu-memory-utilization=<value>` |
-| `cpu_offload` | `== true` | `--kv-offloading-size=<DEFAULT_KV_OFFLOAD_GB>` |
+| `kv_offload` | `== true` | `--kv-transfer-config={OffloadingConnector, CPUOffloadingSpec, 10 GiB, block_size 16, lru}` |
 | `dp` | `> 1` | `--tensor-parallel-size=<tp>` and `--data-parallel-size=<dp>` |
 | `dp` + MoE model | `dp > 1` and model is MoE | `--enable-expert-parallel` |
 | model-specific | from `models.yaml` | e.g., `--override-generation-config=...` |
@@ -198,7 +198,12 @@ Constructs `stack.extra_overrides` list from experiment parameters. These become
 **Constants (configurable at top of generator):**
 
 ```python
-DEFAULT_KV_OFFLOAD_GB = 8  # GiB total across TP ranks when cpu_offload=true
+# v0.26 CPU offloading (OffloadingConnector) — used when kv_offload=true
+KV_OFFLOAD_CPU_BYTES = 10 * 1024**3  # CPU KV pool size in bytes (10 GiB)
+KV_OFFLOAD_BLOCK_SIZE = 16
+KV_OFFLOAD_EVICTION_POLICY = "lru"
+
+DEFAULT_KV_OFFLOAD_GB = 8  # legacy; only informational (recorded in exp-config.yaml)
 
 # Models that use expert parallelism when dp > 1
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
@@ -558,7 +563,7 @@ TRIAGE_PATTERNS = [
 
     # vLLM startup errors
     ("vllm-logs-*",  "CUDA out of memory",
-     "CUDA OOM during model loading — try higher TP or enable cpu_offload"),
+     "CUDA OOM during model loading — try higher TP or enable kv_offload"),
     ("vllm-logs-*",  "does not support FP8",
      "Model or hardware does not support FP8 quantization"),
     ("vllm-logs-*",  "trust_remote_code",

@@ -166,7 +166,7 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
   "hw": "H100",
   "workload": "general",
   "mbt": 2048,
-  "cpu_offload": false,
+  "kv_offload": false,
   "gpu_mem": 0.9,
   "tp": 8,
   "dp": 1,
@@ -184,7 +184,7 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
 | `hw` | Target hardware: H100, A100-80GB, or L40S |
 | `workload` | Workload profile: general, codegen, roleplay, reasoning |
 | `mbt` | MAX_NUM_BATCHED_TOKENS |
-| `cpu_offload` | Enable CPU offloading (4GB) |
+| `kv_offload` | Enable vLLM v0.26 CPU KV-cache offloading (OffloadingConnector, 10 GiB CPU pool) |
 | `gpu_mem` | GPU memory utilization (0.0-1.0) |
 | `tp` | Tensor parallelism degree |
 | `dp` | Data parallelism degree (null = 1) |
