@@ -30,10 +30,10 @@ spec:
       type: string
       description: Time horizon in seconds (bounds workload generation)
       default: ""
-    - name: detectSaturation
+    - name: saturationDetectors
       type: string
-      description: Enable saturation detection (true/false)
-      default: "false"
+      description: 'Saturation detector(s) for --detectors: composite|threshold|backlog-drift, a comma-list of those, or "all". Empty = detection off.'
+      default: ""
 
   steps:
     - name: discover-endpoint
@@ -147,11 +147,12 @@ spec:
           HORIZON_FLAG="--horizon ${HORIZON_MICROSECONDS}"
         fi
 
-        # Build saturation detection flags if enabled
-        # Use composite post-hoc detector for saturation experiments
+        # Build saturation detection flags if a detector is selected.
+        # Non-empty saturationDetectors enables detection (matches BLIS: empty --detectors = off).
+        # Value is composite|threshold|backlog-drift, a comma-list, or "all".
         SATURATION_FLAGS=""
-        if [ "$(params.detectSaturation)" = "true" ]; then
-          SATURATION_FLAGS="--post-hoc-detector composite --saturation-report saturation_analysis.json"
+        if [ -n "$(params.saturationDetectors)" ]; then
+          SATURATION_FLAGS="--detectors $(params.saturationDetectors) --saturation-report saturation_analysis.json"
         fi
 
         echo "🔍 BLIS observe command:"
@@ -159,16 +160,16 @@ spec:
         echo ""
         echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
         echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
-        echo "⏰ Using overall experiment timeout=1260 seconds (21 minutes)"
+        echo "⏰ Using overall experiment timeout=1500 seconds (25 minutes)"
         if [ -n "${HORIZON_FLAG}" ]; then
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
-        if [ "$(params.detectSaturation)" = "true" ]; then
-          echo "🎯 Saturation detection ENABLED (composite detector) - will output saturation_analysis.json"
+        if [ -n "$(params.saturationDetectors)" ]; then
+          echo "🎯 Saturation detection ENABLED (detectors: $(params.saturationDetectors)) - will output saturation_analysis.json"
         fi
         echo ""
 
-        # Run BLIS observe with 21-minute overall timeout
+        # Run BLIS observe with 25-minute overall timeout
         # Use 'timeout' command with SIGTERM for graceful shutdown
         # Exit code 124 = timeout reached (BLIS's internal horizon mechanism)
         #
@@ -181,7 +182,7 @@ spec:
         # would otherwise kill the script before we can check if data was exported.
         set +e  # Disable exit-on-error
         set -o pipefail  # Ensure we capture timeout's exit code, not tee's
-        timeout -s SIGTERM 1260 ${BLIS_BINARY} observe \
+        timeout -s SIGTERM 1500 ${BLIS_BINARY} observe \
           --server-url "${ENDPOINT}" \
           --model "${MODEL}" \
           --workload-spec "${WORKLOAD_SPEC}" \
@@ -214,8 +215,8 @@ spec:
           echo "📊 Trace files:"
           ls -lh header.yaml data.csv itl.csv 2>/dev/null
 
-          # Check for saturation analysis output if enabled
-          if [ "$(params.detectSaturation)" = "true" ]; then
+          # Check for saturation analysis output if a detector was selected
+          if [ -n "$(params.saturationDetectors)" ]; then
             if [ -f "saturation_analysis.json" ]; then
               echo "🎯 Saturation analysis:"
               cat saturation_analysis.json

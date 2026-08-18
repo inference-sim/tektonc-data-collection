@@ -188,6 +188,7 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
 | `gpu_mem` | GPU memory utilization (0.0-1.0) |
 | `tp` | Tensor parallelism degree |
 | `dp` | Data parallelism degree (null = 1) |
+| `saturation_detectors` | (ORC only, optional) List of post-hoc saturation detectors to run during observe: `composite`, `threshold`, `backlog-drift`, or `["all"]`. Omit/empty = detection off |
 | `safe` | Calibration status: `safe`, `unsafe`, `blocked`, or `uncalibrated` |
 | `done` | Whether the experiment has been completed (`true`/`false`) |
 | `notes` | Free-text notes (e.g., "completed", "mbt sweep") |

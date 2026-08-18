@@ -75,7 +75,8 @@ Each entry mirrors the #598 table columns:
 ```
 
 Required fields: `id`, `model`, `precision`, `hw`, `workload`, `mbt`, `kv_offload`, `gpu_mem`, `tp`.
-Optional fields: `dp` (defaults to null), `notes`.
+Optional fields: `dp` (defaults to null), `notes`, `saturation_detectors` (ORC only; list of
+`composite`/`threshold`/`backlog-drift` or `["all"]` — enables observe-phase saturation detection; omit = off).
 
 Valid `precision` values: `"FP16"` (default, no extra vLLM arg) and `"FP8"` (adds `--quantization fp8`).
 

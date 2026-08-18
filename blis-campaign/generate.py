@@ -165,6 +165,34 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
         if harness not in valid_harnesses:
             errors.append(f"Experiment #{eid}: unknown harness '{harness}' (valid: {valid_harnesses})")
 
+        # Validate saturation_detectors (optional). Mirrors BLIS rules:
+        # must be a list of strings; "all" only alone; other names must be valid.
+        # Saturation is an observe-phase feature -> ORC harness only.
+        if "saturation_detectors" in exp:
+            dets = exp["saturation_detectors"]
+            if not isinstance(dets, list) or not all(isinstance(d, str) for d in dets):
+                errors.append(
+                    f"Experiment #{eid}: 'saturation_detectors' must be a list of strings"
+                )
+            elif dets:  # non-empty
+                if harness not in ["orc", "blis-orc"]:
+                    errors.append(
+                        f"Experiment #{eid}: 'saturation_detectors' requires harness "
+                        f"'orc'/'blis-orc' (saturation is an observe-phase feature)"
+                    )
+                if "all" in dets and len(dets) > 1:
+                    errors.append(
+                        f"Experiment #{eid}: 'saturation_detectors' \"all\" cannot be "
+                        f"combined with individual detector names"
+                    )
+                bad = [d for d in dets if d != "all" and d not in VALID_SATURATION_DETECTORS]
+                if bad:
+                    valid = ", ".join(sorted(VALID_SATURATION_DETECTORS)) + ', or "all"'
+                    errors.append(
+                        f"Experiment #{eid}: unknown saturation detector(s) {bad}; "
+                        f"valid: {valid}"
+                    )
+
         # Validate combination is valid (dynamic workload has data for arrival_pattern)
         if is_dynamic and "arrival_pattern" in exp:
             wl = workloads[exp["workload"]]
@@ -245,6 +273,11 @@ DEFAULT_KV_OFFLOAD_GB = 8.0
 KV_OFFLOAD_CPU_BYTES = 10 * 1024**3  # 10 GiB
 KV_OFFLOAD_BLOCK_SIZE = 16
 KV_OFFLOAD_EVICTION_POLICY = "lru"
+
+# Valid BLIS saturation detectors (source: inference-sim sim/saturation/bank.go
+# rosterOrder; surfaced by `blis observe --detectors`). "all" is a keyword that
+# expands to the whole roster and cannot be combined with individual names.
+VALID_SATURATION_DETECTORS = {"composite", "threshold", "backlog-drift"}
 
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
@@ -332,6 +365,13 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
         # This is the total simulation time to let requests complete
         # (spike duration is 600s for request generation; horizon gives 15 more minutes for completion)
         v["workload"]["horizon"] = 1500
+
+        # Saturation detection (optional). A non-empty saturation_detectors list
+        # enables detection and selects which BLIS detector(s) to run; absent/empty
+        # = off. Joined into the comma-string `blis observe --detectors` expects
+        # (empty string = off, matching BLIS's own --detectors semantics).
+        detectors = exp.get("saturation_detectors") or []
+        v["workload"]["saturationDetectors"] = ",".join(detectors)
     else:
         raise ValueError(
             f"Dynamically generated workloads use BLIS native format "

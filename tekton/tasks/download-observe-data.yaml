@@ -70,7 +70,7 @@ spec:
         echo "  observe/data.csv"
         echo "  observe/workload.yaml"
         echo "  observe/itl.csv (optional)"
-        echo "  observe/saturation_analysis.json (optional - when detectSaturation=true)"
+        echo "  observe/saturation_analysis.json (optional - when saturationDetectors is set)"
         echo "  exp-config.yaml"
         echo "  vllm_logging.json"
         echo "  vllm.log"
