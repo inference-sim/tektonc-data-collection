@@ -15,5 +15,40 @@
     "precision": "BF16",
     "mbt": 2048,
     "max_model_len": 8192
+  },
+  {
+    "id": 2,
+    "model": "Qwen/Qwen3-14B",
+    "workload": "general",
+    "hw": "H100",
+    "tp": 1,
+    "gpu_mem": 0.4,
+    "kv_offload": true,
+    "enable_chunked_prefill": true,
+    "dp": null,
+    "scheduling": "fcfs",
+    "notes": "KV offload restore-path test: shrink GPU KV cache (gpu_mem=0.4) to force eviction of reused prefixes and trigger CPU->GPU fetches (cpu_cache_read_usage_perc > 0)",
+    "harness": "orc",
+    "precision": "BF16",
+    "mbt": 2048,
+    "max_model_len": 8192
+  },
+  {
+    "id": 3,
+    "model": "Qwen/Qwen3-14B",
+    "workload": "general",
+    "hw": "H100",
+    "tp": 1,
+    "gpu_mem": 0.4,
+    "kv_offload": true,
+    "enable_chunked_prefill": true,
+    "log_iteration_details": true,
+    "dp": null,
+    "scheduling": "fcfs",
+    "notes": "Same as exp2 (gpu_mem=0.4 KV offload restore-path test) but with per-step vLLM iteration logging enabled (--enable-logging-iteration-details)",
+    "harness": "orc",
+    "precision": "BF16",
+    "mbt": 2048,
+    "max_model_len": 8192
   }
 ]

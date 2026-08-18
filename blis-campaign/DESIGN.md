@@ -194,6 +194,7 @@ Constructs `stack.extra_overrides` list from experiment parameters. These become
 | `kv_offload` | `== true` | `--kv-transfer-config={OffloadingConnector, CPUOffloadingSpec, 10 GiB, block_size 16, lru}` |
 | `dp` | `> 1` | `--tensor-parallel-size=<tp>` and `--data-parallel-size=<dp>` |
 | `dp` + MoE model | `dp > 1` and model is MoE | `--enable-expert-parallel` |
+| `log_iteration_details` | `== true` | `--enable-logging-iteration-details` (per-step vLLM logs; diagnostic, high volume) |
 | model-specific | from `models.yaml` | e.g., `--override-generation-config=...` |
 
 **Constants (configurable at top of generator):**

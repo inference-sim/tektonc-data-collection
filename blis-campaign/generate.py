@@ -461,6 +461,13 @@ def build_extra_overrides(exp):
         overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
     # If "fcfs" or not set, omit flag (vLLM defaults to fcfs - first come first serve)
 
+    # Per-iteration (step-wise) vLLM logging - DIAGNOSTIC. Emits one log record
+    # per engine step (iteration_index, ctx/gen request+token counts, elapsed_ms).
+    # High volume (hundreds of lines/sec under load); intended for short
+    # diagnostic runs, not full campaigns.
+    if exp.get("log_iteration_details"):
+        overrides.append('decode.containers[name="vllm"].args=--enable-logging-iteration-details')
+
     return overrides
 
 

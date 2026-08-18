@@ -189,6 +189,7 @@ The `--hw` flag selects which cluster to target. Only one cluster runs at a time
 | `tp` | Tensor parallelism degree |
 | `dp` | Data parallelism degree (null = 1) |
 | `saturation_detectors` | (ORC only, optional) List of post-hoc saturation detectors to run during observe: `composite`, `threshold`, `backlog-drift`, or `["all"]`. Omit/empty = detection off |
+| `log_iteration_details` | (ORC only, optional bool) When true, adds `--enable-logging-iteration-details` to vLLM for per-step iteration logs (iteration_index, ctx/gen tokens, elapsed_ms). High volume — diagnostic use only. Omit/false = off |
 | `safe` | Calibration status: `safe`, `unsafe`, `blocked`, or `uncalibrated` |
 | `done` | Whether the experiment has been completed (`true`/`false`) |
 | `notes` | Free-text notes (e.g., "completed", "mbt sweep") |
