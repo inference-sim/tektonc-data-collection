@@ -110,7 +110,11 @@ spec:
                 - decode.parallelism.tensor={{ tp }}
                 - decode.parallelism.data={{ dlp }}
                 - decode.parallelism.dataLocal={{ dlp }}
-                - decode.containers[name="vllm"].args=--data-parallel-size={{ dlp }}
+                {# NOTE: --data-parallel-size is intentionally NOT passed as an explicit vLLM arg.
+                   The modelservice chart derives it from decode.parallelism.data (set above) and
+                   emits --data-parallel-size only when > 1 — exactly as it does for tensor
+                   parallelism. Passing it here too would be redundant (and at DP=1, a no-op that
+                   clutters the command line). Let the chart own parallelism flags. #}
                 {% if stack.MAX_MODEL_LEN is defined and stack.MAX_MODEL_LEN > 0 %}
                 - decode.containers[name="vllm"].args=--max-model-len={{ stack.MAX_MODEL_LEN }}
                 {% endif %}

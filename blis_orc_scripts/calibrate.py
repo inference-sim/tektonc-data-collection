@@ -46,7 +46,17 @@ def find_experiment_dirs(campaign_dir, experiment_ids):
     exp_dirs = []
     for exp_id in experiment_ids:
         # Find directories starting with the experiment ID
-        matches = list(campaign_path.glob(f"{exp_id}-*"))
+        # Try both hyphen and underscore patterns
+        exp_id_str = str(exp_id)
+        matches = list(campaign_path.glob(f"{exp_id_str}-*"))
+        if not matches:
+            # Try underscore pattern (e.g., exp1_overloaded)
+            matches = list(campaign_path.glob(f"{exp_id_str}_*"))
+        if not matches:
+            # Try exact match (e.g., directory name = experiment ID)
+            exact_match = campaign_path / exp_id_str
+            if exact_match.exists() and exact_match.is_dir():
+                matches = [exact_match]
         if not matches:
             print(f"⚠️  No campaign directory found for experiment {exp_id}")
             continue
@@ -210,7 +220,15 @@ def main():
     args = parser.parse_args()
 
     # Parse experiment IDs
-    exp_ids = [int(x.strip()) for x in args.experiment_ids.split(",")]
+    # Parse experiment IDs (accept both numeric and string IDs)
+    exp_ids = []
+    for x in args.experiment_ids.split(","):
+        x = x.strip()
+        # Try to convert to int, but keep as string if it fails
+        try:
+            exp_ids.append(int(x))
+        except ValueError:
+            exp_ids.append(x)
 
     # Ensure BLIS is built
     blis_repo_path = Path(args.blis_repo).resolve()

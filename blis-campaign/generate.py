@@ -111,6 +111,26 @@ def build_inference_perf_orcspec(exp, static_workloads):
     }
 
 
+def build_blis_native_orcspec(exp, static_workloads):
+    """Return a blis_native profile's WorkloadSpec verbatim as the orcSpec.
+
+    A blis_native profile's `blis:` block is already a complete BLIS WorkloadSpec
+    (version/seed/clients/num_requests/aggregate_rate/...). orc-observe.yaml writes
+    whatever dict lands at values.yaml -> workload.orcSpec straight to workload.yaml
+    and feeds it to `blis observe --workload-spec`, which parses it strictly. So no
+    reshaping is needed -- pass the block through as-is.
+
+    Args:
+        exp: Experiment dict (its 'workload' names a workloads.yaml profile)
+        static_workloads: Parsed workloads.yaml (name -> profile)
+
+    Returns:
+        dict: the profile's `blis` block (a top-level WorkloadSpec)
+    """
+    wl = static_workloads[exp["workload"]]  # presence guaranteed by validate_all
+    return wl["blis"]
+
+
 # ---------------------------------------------------------------------------
 # Validation (collect all errors, don't fail on first)
 # ---------------------------------------------------------------------------
@@ -204,15 +224,30 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
                     f"Available: {available}"
                 )
 
-        # Static (inference_perf) workloads must be spec: inference_perf
+        # Static workloads must be spec: inference_perf or blis_native.
+        #  - inference_perf: rate/duration stages + shared_prefix (translated by BLIS)
+        #  - blis_native: a full BLIS WorkloadSpec under a `blis:` block (passed through
+        #    verbatim as orcSpec). blis_native is ORC-only (needs the observe harness).
         if is_static and not is_dynamic:
-            spec = static_workloads[exp["workload"]].get("spec")
-            if spec != "inference_perf":
+            profile = static_workloads[exp["workload"]]
+            spec = profile.get("spec")
+            if spec not in ("inference_perf", "blis_native"):
                 errors.append(
                     f"Experiment #{eid}: workload '{exp['workload']}' in workloads.yaml "
-                    f"has spec='{spec}'; only 'inference_perf' profiles are supported "
-                    f"from experiments.json (blis_native workloads are not auto-selectable)."
+                    f"has spec='{spec}'; only 'inference_perf' and 'blis_native' profiles "
+                    f"are supported."
                 )
+            elif spec == "blis_native":
+                if "blis" not in profile:
+                    errors.append(
+                        f"Experiment #{eid}: workload '{exp['workload']}' has "
+                        f"spec='blis_native' but no 'blis:' block."
+                    )
+                if harness not in ("orc", "blis-orc"):
+                    errors.append(
+                        f"Experiment #{eid}: workload '{exp['workload']}' is blis_native, "
+                        f"which requires harness='orc'/'blis-orc' (got '{harness}')."
+                    )
 
         # Dynamic workloads require ORC harness
         if harness not in ["orc", "blis-orc"]:
@@ -228,13 +263,21 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def make_dns_name(s):
-    """Convert string to DNS-1123 compatible name."""
+def make_dns_name(s, max_len=63):
+    """Convert string to DNS-1123 compatible name.
+
+    max_len defaults to the DNS-1123 label limit (63). Callers that feed the
+    result into stricter contexts (e.g. Helm release names, capped at 53) pass
+    a smaller max_len. Truncation strips any trailing dash so the result stays
+    a valid DNS-1123 name.
+    """
     s = s.lower()
     s = re.sub(r'[^a-z0-9-]', '-', s)
     s = re.sub(r'-+', '-', s)
     s = s.strip('-')
-    return s[:63]
+    if len(s) > max_len:
+        s = s[:max_len].rstrip('-')
+    return s
 
 
 def make_dir_name(exp):
@@ -246,9 +289,29 @@ def make_dir_name(exp):
     return make_dns_name(base)
 
 
+# Helm caps release names at 53 chars. The deploy-model release name is
+# "{experimentId}-{tp}-{dlp}-model" (modelLabel = experimentId-tp-dlp), so the
+# experimentId itself must leave room for that "-{tp}-{dlp}-model" suffix.
+HELM_RELEASE_MAX = 53
+
+
 def make_experiment_id(exp):
-    """e.g. '13-qwen3-14b-tp1-general' -- used as PVC data path and Helm label."""
-    return make_dns_name(f"{exp['id']}-{exp['model']}-tp{exp['tp']}-{exp['workload']}")
+    """e.g. '13-qwen3-14b-tp1-general' -- used as PVC data path and Helm label.
+
+    Bounded so "{experimentId}-{tp}-{dlp}-model" (the deploy-model Helm release
+    name) stays within Helm's 53-char limit. Long full-HF model ids (e.g.
+    'nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4') would otherwise blow
+    past it; short ids are unaffected.
+    """
+    tp = exp["tp"]
+    dlp = exp.get("dp") or 1
+    # Reserve the exact suffix the template/chart append after the experiment id.
+    suffix_len = len(f"-{tp}-{dlp}-model")
+    max_len = HELM_RELEASE_MAX - suffix_len
+    return make_dns_name(
+        f"{exp['id']}-{exp['model']}-tp{tp}-{exp['workload']}",
+        max_len=max_len,
+    )
 
 
 # resolve_model() removed - experiments.json now contains full HuggingFace IDs directly
@@ -353,6 +416,8 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
     patterns_workloads = patterns_data.get("workloads", {})
     if exp["workload"] in patterns_workloads:
         wl = generate_workload_for_experiment(exp, patterns_file)
+    elif static_workloads.get(exp["workload"], {}).get("spec") == "blis_native":
+        wl = build_blis_native_orcspec(exp, static_workloads)
     else:
         wl = build_inference_perf_orcspec(exp, static_workloads)
     harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
@@ -467,6 +532,15 @@ def build_extra_overrides(exp):
     # diagnostic runs, not full campaigns.
     if exp.get("log_iteration_details"):
         overrides.append('decode.containers[name="vllm"].args=--enable-logging-iteration-details')
+
+    # Generic passthrough for model-specific vLLM flags not covered by the
+    # structured fields above (e.g. recipe flags like --mamba-backend,
+    # --moe-backend, --reasoning-parser). Each entry is appended verbatim as a
+    # vLLM arg. To avoid double-emitting, keep flags that ARE covered above
+    # (--max-num-seqs, --max-num-batched-tokens, --enable-prefix-caching,
+    # --quantization via precision, etc.) in their structured fields, not here.
+    for arg in exp.get("extra_vllm_args", []):
+        overrides.append(f'decode.containers[name="vllm"].args={arg}')
 
     return overrides
 

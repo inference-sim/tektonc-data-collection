@@ -301,6 +301,38 @@ w1-14b:
             min: 32
             max: 512
 
+nemotron-smoke:
+  spec: blis_native
+
+  # Minimal ORC smoke workload for Nemotron 3.5 Lightning (or any model).
+  # PURPOSE: Smallest useful observe run — a fixed, bounded burst of requests
+  # from a single open-loop Poisson source with simple fixed-length prompts.
+  # SHAPE: 200 total requests (generation stops at num_requests), warmup is
+  # applied by orc-observe.yaml (--warmup-requests 50, hardcoded). At ~2 req/s
+  # the 200 requests arrive over ~100s; the 1500s horizon is a safe upper bound.
+  # RUN WITH: 1 instance (tp=1, dp=null). harness: orc only.
+  blis:
+    version: "2"
+    seed: 42
+    category: language
+    aggregate_rate: 2.0          # 1 client, Poisson, ~2 req/s
+    num_requests: 200            # fixed TOTAL request count (bounds generation)
+    clients:
+      - id: "single-client"
+        slo_class: "standard"
+        rate_fraction: 1.0        # one client takes 100% of aggregate_rate
+        streaming: true
+        arrival:
+          process: poisson
+        input_distribution:
+          type: constant          # simple fixed-length prompts
+          params:
+            value: 512
+        output_distribution:
+          type: constant
+          params:
+            value: 128
+
 # ============================================================================
 # Future BLIS-Native Workload Examples
 # ============================================================================

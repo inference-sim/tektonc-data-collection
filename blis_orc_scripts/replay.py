@@ -6,10 +6,51 @@ Automatically clones/builds BLIS if needed.
 """
 import argparse
 import json
+import re
+import shlex
 import subprocess
 import sys
 import yaml
 from pathlib import Path
+
+
+def kv_blocks_from_serve_log(data_dir, block_size):
+    """Derive --total-kv-blocks from the real `vllm serve` log, if present.
+
+    The observe phase deploys the model with `vllm serve`, and that pod's log
+    (vllm.log, downloaded alongside the trace) records the exact KV cache the
+    served engine allocated:
+
+        GPU KV cache size: 15,703,524 tokens
+
+    That token count already includes the full serving-path memory profiling
+    (weights + real activation peak + cudagraph), so dividing by BLIS's block
+    size gives the authoritative --total-kv-blocks. This is strictly better than
+    letting BLIS auto-calculate: BLIS's weight estimator breaks on quantized /
+    hybrid checkpoints (e.g. it computed 190 GiB of weights for a 20 GiB NVFP4
+    model and aborted). Using the served number sidesteps that entirely.
+
+    Looks for vllm.log next to the data dir (data_dir/.. and data_dir/../..).
+    Returns (total_kv_blocks, kv_tokens, log_path) or (None, None, None) if no
+    usable log line is found (caller then falls back to BLIS auto-calc).
+    """
+    token_re = re.compile(r"GPU KV cache size:\s*([\d,]+)\s*tokens")
+    candidates = [
+        data_dir.parent / "vllm.log",       # data/<exp>/vllm.log (observe sibling)
+        data_dir.parent.parent / "vllm.log",
+    ]
+    for log_path in candidates:
+        if not log_path.exists():
+            continue
+        try:
+            text = log_path.read_text(errors="replace")
+        except Exception:
+            continue
+        matches = token_re.findall(text)
+        if matches:
+            kv_tokens = int(matches[-1].replace(",", ""))  # last = live engine
+            return kv_tokens // block_size, kv_tokens, log_path
+    return None, None, None
 
 
 def load_models_config():
@@ -104,7 +145,17 @@ def find_experiment_dirs(campaign_dir, experiment_ids):
     exp_dirs = []
     for exp_id in experiment_ids:
         # Find directories starting with the experiment ID
-        matches = list(campaign_path.glob(f"{exp_id}-*"))
+        # Try both hyphen and underscore patterns
+        exp_id_str = str(exp_id)
+        matches = list(campaign_path.glob(f"{exp_id_str}-*"))
+        if not matches:
+            # Try underscore pattern (e.g., exp1_overloaded)
+            matches = list(campaign_path.glob(f"{exp_id_str}_*"))
+        if not matches:
+            # Try exact match (e.g., directory name = experiment ID)
+            exact_match = campaign_path / exp_id_str
+            if exact_match.exists() and exact_match.is_dir():
+                matches = [exact_match]
         if not matches:
             print(f"⚠️  No campaign directory found for experiment {exp_id}")
             continue
@@ -267,6 +318,27 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         "--log", "info",
     ]
 
+    # GPU KV tier: use the size the REAL vllm serve engine allocated (from the
+    # downloaded serve log) instead of BLIS's own auto-calculation. BLIS's weight
+    # estimator mis-sizes quantized / hybrid checkpoints and can abort KV
+    # auto-calc entirely; the served number is exact and always safe. Passing
+    # --total-kv-blocks makes BLIS skip its auto-calc (see cmd/root.go).
+    #
+    # NOTE on GPU vs CPU tiers: vLLM logs the GPU KV size at INFO ("GPU KV cache
+    # size: N tokens"), which we read here for --total-kv-blocks (the GPU tier).
+    # The CPU offload tier (--kv-cpu-blocks, below) is a SEPARATE number and is
+    # NOT reliably in the serve log (vLLM logs it only at DEBUG); it is derived
+    # from the configured cpu_bytes_to_use instead. The two are distinct flags to
+    # BLIS and are kept independent -- the serve-log value is GPU-tier only.
+    gpu_kv_blocks, kv_tokens, kv_log = kv_blocks_from_serve_log(data_dir, block_size)
+    if gpu_kv_blocks:
+        cmd.extend(["--total-kv-blocks", str(gpu_kv_blocks)])
+        print(f"   GPU KV blocks: {gpu_kv_blocks} (from vllm serve log: "
+              f"{kv_tokens:,} tokens ÷ block_size {block_size})")
+    else:
+        print("   GPU KV blocks: no vllm.log found; letting BLIS auto-calculate "
+              "(may fail for quantized/hybrid models)")
+
     # Add routing scorer for dense models with dp > 1
     if dp > 1 and is_dense_model(short_model_name, models_config):
         cmd.extend(["--num-instances", str(dp)])
@@ -276,21 +348,22 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
 
-    # Add CPU offloading if configured in exp-config.yaml
-    # BLIS will auto-calculate the KV block size based on model architecture,
-    # so we calculate CPU blocks using a heuristic: assume 4 MiB per block
-    # (typical for large models with fp16 KV cache and 16-token blocks).
-    # For exact calculation: per_block_bytes = 2 × layers × kv_heads × head_dim × 2 × 16
+    # CPU KV tier (--kv-cpu-blocks): SEPARATE from the GPU tier above. vLLM does
+    # not log the CPU block count at INFO (only DEBUG), so unlike the GPU tier we
+    # cannot read it from the serve log. Instead we derive it from the configured
+    # CPU offload budget (kv_offloading_size from exp-config.yaml) using a 4 MiB/
+    # block heuristic (256 blocks/GiB) -- exact for Qwen3-32B / Llama-3.x, close
+    # for most others. This is intentionally independent of the GPU serve-log
+    # value; the two tiers are distinct BLIS flags.
     if kv_offloading_gb > 0:
-        # Heuristic: 4 MiB per block → 256 blocks per GiB
-        # This is exact for models like Qwen3-32B, Llama-3.x, and close for most others
         cpu_blocks = int(kv_offloading_gb * 256)
         cmd.extend([
             "--kv-cpu-blocks", str(cpu_blocks),
             "--kv-offload-threshold", "0.9",
             "--kv-transfer-bandwidth", "0.2"
         ])
-        print(f"   CPU offload: {kv_offloading_gb} GB → {cpu_blocks} blocks (4 MiB/block)")
+        print(f"   CPU KV blocks: {cpu_blocks} (from {kv_offloading_gb} GB offload "
+              f"budget, 4 MiB/block heuristic — NOT from serve log)")
 
     # Add model config folder if provided
     if model_config_folder:
@@ -307,6 +380,20 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         print(f"                max_model_len={max_model_len}")
     print(f"   Command: {' '.join(cmd)}")
 
+    # Persist the exact replay invocation for reproducibility. Written BEFORE the
+    # run so it survives even if replay hangs or crashes. `command_line` is a
+    # copy-pasteable string (run from `cwd`); `argv` is the unjoined list.
+    command_record = {
+        "experiment_id": exp["id"],
+        "model": model,
+        "cwd": str(blis_binary.parent),
+        "argv": cmd,
+        "command_line": shlex.join(cmd),
+        "status": "running",
+    }
+    command_record_path = replay_dir / "replay_command.json"
+    command_record_path.write_text(json.dumps(command_record, indent=2))
+
     # Run replay (change to BLIS repo dir so it finds bundled configs)
     result = subprocess.run(
         cmd,
@@ -318,6 +405,11 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     # Save logs
     (replay_dir / "stdout.log").write_text(result.stdout)
     (replay_dir / "stderr.log").write_text(result.stderr)
+
+    # Update the command record with the outcome now that the run has finished.
+    command_record["status"] = "succeeded" if result.returncode == 0 else "failed"
+    command_record["returncode"] = result.returncode
+    command_record_path.write_text(json.dumps(command_record, indent=2))
 
     if result.returncode != 0:
         print(f"❌ Replay failed for experiment {exp['id']}")
@@ -356,8 +448,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Parse experiment IDs
-    exp_ids = [int(x.strip()) for x in args.experiment_ids.split(",")]
+    # Parse experiment IDs (accept both numeric and string IDs)
+    exp_ids = []
+    for x in args.experiment_ids.split(","):
+        x = x.strip()
+        # Try to convert to int, but keep as string if it fails
+        try:
+            exp_ids.append(int(x))
+        except ValueError:
+            exp_ids.append(x)
 
     # Ensure BLIS is built
     blis_repo_path = Path(args.blis_repo).resolve()
