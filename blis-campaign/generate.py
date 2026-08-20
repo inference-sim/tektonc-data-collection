@@ -193,6 +193,26 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
                         f"valid: {valid}"
                     )
 
+        # Validate the CPU KV offload pool override.
+        if "cpu_bytes_to_use" in exp:
+            cpu_bytes = exp["cpu_bytes_to_use"]
+            if not exp.get("kv_offload"):
+                errors.append(
+                    f"Experiment #{eid}: cpu_bytes_to_use is set but kv_offload is "
+                    f"false; the OffloadingConnector is not configured, so the value "
+                    f"would be silently ignored."
+                )
+            if isinstance(cpu_bytes, bool) or not isinstance(cpu_bytes, int):
+                errors.append(
+                    f"Experiment #{eid}: cpu_bytes_to_use must be an integer number "
+                    f"of bytes, got {cpu_bytes!r}"
+                )
+            elif cpu_bytes <= 0:
+                # vLLM raises "cpu_bytes_to_use must be specified" on a falsey value.
+                errors.append(
+                    f"Experiment #{eid}: cpu_bytes_to_use must be > 0, got {cpu_bytes}"
+                )
+
         # Validate combination is valid (dynamic workload has data for arrival_pattern)
         if is_dynamic and "arrival_pattern" in exp:
             wl = workloads[exp["workload"]]
@@ -264,13 +284,12 @@ def extract_pipeline_name(pipeline_yaml_path):
 # Values builder (the core logic)
 # ---------------------------------------------------------------------------
 
-DEFAULT_KV_OFFLOAD_GB = 8.0
-
 # vLLM v0.26 CPU KV-cache offloading (OffloadingConnector) defaults.
 # The connector takes an absolute byte budget for the CPU pool, unlike the
 # legacy --kv-offloading-size flag which took GiB. Values match the manifest
 # validated in kv-offload-cpu.yaml.
-KV_OFFLOAD_CPU_BYTES = 10 * 1024**3  # 10 GiB
+KV_OFFLOAD_CPU_BYTES = 10 * 1024**3  # 10 GiB -- default when the experiment
+                                     # does not set cpu_bytes_to_use
 KV_OFFLOAD_BLOCK_SIZE = 16
 KV_OFFLOAD_EVICTION_POLICY = "lru"
 
@@ -278,6 +297,20 @@ KV_OFFLOAD_EVICTION_POLICY = "lru"
 # rosterOrder; surfaced by `blis observe --detectors`). "all" is a keyword that
 # expands to the whole roster and cannot be combined with individual names.
 VALID_SATURATION_DETECTORS = {"composite", "threshold", "backlog-drift"}
+
+
+def kv_offload_cpu_bytes(exp):
+    """Resolve the CPU offload pool size (bytes) for one experiment.
+
+    experiments.json may set "cpu_bytes_to_use" to override the module default.
+    This is the knob that sets the CPU tier's block count -- vLLM computes
+    num_blocks = cpu_bytes_to_use // kv_bytes_per_chunk (see
+    vllm/v1/kv_offload/cpu/spec.py) -- and num_blocks is the denominator of the
+    kv_offload_cpu_cache_{,write_,read_}usage_perc gauges, so sweeping this
+    value is how those gauges are exercised.
+    """
+    return int(exp.get("cpu_bytes_to_use") or KV_OFFLOAD_CPU_BYTES)
+
 
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
 
@@ -329,7 +362,12 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
     # actually triggered. kv_offloading_size is informational only (recorded
     # in exp-config.yaml); the real vLLM config is built in build_extra_overrides.
     v["stack"]["kv_offload"] = exp.get("kv_offload", False)
-    v["stack"]["kv_offloading_size"] = DEFAULT_KV_OFFLOAD_GB if exp.get("kv_offload") else 0
+    # Record the pool size that was actually configured, in GiB, so exp-config.yaml
+    # matches the --kv-transfer-config built in build_extra_overrides. Previously
+    # this was pinned to an unrelated 8.0 GiB constant regardless of the real value.
+    v["stack"]["kv_offloading_size"] = (
+        round(kv_offload_cpu_bytes(exp) / 1024**3, 3) if exp.get("kv_offload") else 0
+    )
 
     # GPU targeting
     cluster = clusters[exp["hw"]]
@@ -421,7 +459,7 @@ def build_extra_overrides(exp):
                 "kv_role": "kv_both",
                 "kv_connector_extra_config": {
                     "spec_name": "CPUOffloadingSpec",
-                    "cpu_bytes_to_use": KV_OFFLOAD_CPU_BYTES,
+                    "cpu_bytes_to_use": kv_offload_cpu_bytes(exp),
                     "block_size": KV_OFFLOAD_BLOCK_SIZE,
                     "eviction_policy": KV_OFFLOAD_EVICTION_POLICY,
                 },
