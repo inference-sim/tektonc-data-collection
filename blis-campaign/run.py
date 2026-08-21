@@ -51,6 +51,30 @@ def make_pvc_dir(exp):
     return f"{experiment_id}-{tp}-{dlp}"
 
 
+def pvc_dir_from_pipelinerun(exp_dir, exp):
+    """Derive the PVC data dir from the DEPLOYED experimentId, not a recomputed one.
+
+    The on-cluster PVC dir is "{experimentId}-{tp}-{dlp}", where experimentId is the
+    value baked into the compiled pipelinerun.yaml at generate time (generate.py's
+    make_experiment_id, which is capped for Helm's 53-char release-name limit). run.py
+    historically recomputed the id with its OWN make_experiment_id, but that copy
+    uses a different length cap / suffix and drifts from the compiled value -> the
+    download tars a non-existent dir and silently extracts nothing. Reading the
+    experimentId straight from pipelinerun.yaml is drift-proof: it is exactly what
+    was deployed. Falls back to make_pvc_dir(exp) if the file/param is unavailable.
+    """
+    tp = exp.get("tp", 1)
+    dlp = exp.get("dp", 1) if exp.get("dp") is not None else 1
+    prun = Path(exp_dir) / "pipelinerun.yaml"
+    try:
+        m = re.search(r'name:\s*experimentId,\s*value:\s*"([^"]+)"', prun.read_text())
+        if m:
+            return f"{m.group(1)}-{tp}-{dlp}"
+    except Exception:
+        pass
+    return make_pvc_dir(exp)
+
+
 def _sigint_handler(signum, frame):
     """Graceful shutdown: first Ctrl-C drains, second force-exits."""
     global _draining
@@ -251,8 +275,9 @@ def handle_success(dir_name, run_info, state, context, namespace, campaign_dir):
         dlp = exp.get("dp", 1) if exp.get("dp") is not None else 1
         pvc_dir = f"{exp_id}-{tp}-{dlp}"
     else:
-        # Complex format for regular blis-campaign experiments
-        pvc_dir = make_pvc_dir(exp)
+        # Regular blis-campaign: derive from the DEPLOYED experimentId in
+        # pipelinerun.yaml (drift-proof against generate.py's Helm-capped id).
+        pvc_dir = pvc_dir_from_pipelinerun(exp_dir, exp)
 
     # Create data directory
     data_dir = exp_dir / "data"

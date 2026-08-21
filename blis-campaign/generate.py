@@ -213,21 +213,19 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
                         f"valid: {valid}"
                     )
 
-        # Validate the CPU KV offload pool override.
-        if "cpu_bytes_to_use" in exp:
-            cpu_bytes = exp["cpu_bytes_to_use"]
-            if not exp.get("kv_offload"):
+        # Validate the CPU KV offload config. Offload is ON iff the experiment has
+        # a kv_connector_config block (presence = enabled); there is no separate
+        # kv_offload switch. Legacy flat fields are still recognized as "enabled".
+        if kv_offload_enabled(exp):
+            kvc = resolve_kv_connector(exp)
+            valid_connectors = {"OffloadingConnector", "SimpleCPUOffloadConnector"}
+            if kvc["connector"] not in valid_connectors:
                 errors.append(
-                    f"Experiment #{eid}: cpu_bytes_to_use is set but kv_offload is "
-                    f"false; the OffloadingConnector is not configured, so the value "
-                    f"would be silently ignored."
+                    f"Experiment #{eid}: unknown kv connector '{kvc['connector']}' "
+                    f"(valid: {sorted(valid_connectors)})"
                 )
-            if isinstance(cpu_bytes, bool) or not isinstance(cpu_bytes, int):
-                errors.append(
-                    f"Experiment #{eid}: cpu_bytes_to_use must be an integer number "
-                    f"of bytes, got {cpu_bytes!r}"
-                )
-            elif cpu_bytes <= 0:
+            cpu_bytes = kvc["cpu_bytes_to_use"]
+            if cpu_bytes <= 0:
                 # vLLM raises "cpu_bytes_to_use must be specified" on a falsey value.
                 errors.append(
                     f"Experiment #{eid}: cpu_bytes_to_use must be > 0, got {cpu_bytes}"
@@ -362,17 +360,61 @@ KV_OFFLOAD_EVICTION_POLICY = "lru"
 VALID_SATURATION_DETECTORS = {"composite", "threshold", "backlog-drift"}
 
 
-def kv_offload_cpu_bytes(exp):
-    """Resolve the CPU offload pool size (bytes) for one experiment.
+def kv_offload_enabled(exp):
+    """Whether CPU KV offloading is ON for an experiment.
 
-    experiments.json may set "cpu_bytes_to_use" to override the module default.
-    This is the knob that sets the CPU tier's block count -- vLLM computes
-    num_blocks = cpu_bytes_to_use // kv_bytes_per_chunk (see
-    vllm/v1/kv_offload/cpu/spec.py) -- and num_blocks is the denominator of the
-    kv_offload_cpu_cache_{,write_,read_}usage_perc gauges, so sweeping this
-    value is how those gauges are exercised.
+    Offload is enabled by the PRESENCE of a `kv_connector_config` block -- there
+    is no separate boolean switch. Legacy flat fields (kv_connector /
+    cpu_bytes_to_use, and the old kv_offload:true) are still honored so older
+    experiment tables keep working.
     """
-    return int(exp.get("cpu_bytes_to_use") or KV_OFFLOAD_CPU_BYTES)
+    return bool(
+        exp.get("kv_connector_config")
+        or exp.get("kv_connector")
+        or exp.get("cpu_bytes_to_use")
+        or exp.get("kv_offload")  # legacy switch, still respected
+    )
+
+
+def resolve_kv_connector(exp):
+    """Resolve an experiment's CPU KV-offload connector config into one dict.
+
+    Offload is configured with a single nested object (its presence enables
+    offload -- see kv_offload_enabled):
+        "kv_connector_config": {
+            "connector": "SimpleCPUOffloadConnector",   # or "OffloadingConnector"
+            "cpu_bytes_to_use": 10737418240,            # pool size in bytes
+            "lazy_offload": false,                       # SimpleCPUOffload only
+            "block_size": 16,                            # OffloadingConnector only
+            "eviction_policy": "lru"                     # OffloadingConnector only
+        }
+
+    LEGACY (flat) form still accepted for back-compat with older tables and PR #65:
+        "kv_offload": true, "kv_connector": "...", "cpu_bytes_to_use": N,
+        "kv_lazy_offload": bool
+
+    Returns a normalized dict with keys: connector, cpu_bytes_to_use,
+    lazy_offload, block_size, eviction_policy. Only the keys relevant to the
+    chosen connector are used downstream.
+    """
+    cfg = dict(exp.get("kv_connector_config") or {})
+    # Flat-field fallbacks (nested takes precedence).
+    connector = cfg.get("connector") or exp.get("kv_connector") or "OffloadingConnector"
+    cpu_bytes = cfg.get("cpu_bytes_to_use")
+    if cpu_bytes is None:
+        cpu_bytes = exp.get("cpu_bytes_to_use")
+    if cpu_bytes is None:
+        cpu_bytes = KV_OFFLOAD_CPU_BYTES
+    lazy = cfg.get("lazy_offload")
+    if lazy is None:
+        lazy = exp.get("kv_lazy_offload", False)
+    return {
+        "connector": connector,
+        "cpu_bytes_to_use": int(cpu_bytes),
+        "lazy_offload": bool(lazy),
+        "block_size": int(cfg.get("block_size", KV_OFFLOAD_BLOCK_SIZE)),
+        "eviction_policy": cfg.get("eviction_policy", KV_OFFLOAD_EVICTION_POLICY),
+    }
 
 
 MOE_MODELS = {"Mixtral-8x7B", "DeepSeek-V3", "Llama-4-Scout-17B-16E"}
@@ -424,12 +466,13 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
     # "cpu_offload" (which never existed in the data), so offloading never
     # actually triggered. kv_offloading_size is informational only (recorded
     # in exp-config.yaml); the real vLLM config is built in build_extra_overrides.
-    v["stack"]["kv_offload"] = exp.get("kv_offload", False)
+    offload_on = kv_offload_enabled(exp)
+    v["stack"]["kv_offload"] = offload_on
     # Record the pool size that was actually configured, in GiB, so exp-config.yaml
     # matches the --kv-transfer-config built in build_extra_overrides. Previously
     # this was pinned to an unrelated 8.0 GiB constant regardless of the real value.
     v["stack"]["kv_offloading_size"] = (
-        round(kv_offload_cpu_bytes(exp) / 1024**3, 3) if exp.get("kv_offload") else 0
+        round(resolve_kv_connector(exp)["cpu_bytes_to_use"] / 1024**3, 3) if offload_on else 0
     )
 
     # GPU targeting
@@ -517,17 +560,36 @@ def build_extra_overrides(exp):
     # The legacy --kv-offloading-size / --disable-hybrid-kv-cache-manager flags
     # (v0.15/v0.19 era) are no longer used; the connector supersedes them.
     # NOTE: independent of observability - observability can run with or without offloading.
-    if exp.get("kv_offload"):
+    if kv_offload_enabled(exp):
+        # Connector details come from resolve_kv_connector (nested
+        # kv_connector_config preferred, flat fields as fallback). Two connectors:
+        #  - "OffloadingConnector" (default): the v0.26 CPUOffloadingSpec path used
+        #    by exps 1-3. Chunks CPU pages in multiples of the engine KV block size.
+        #    Asserts tokens_per_chunk % tokens_per_block == 0, which FAILS on hybrid
+        #    Mamba models that force a large attention block (Nemotron -> 2128): a
+        #    block_size=16 config is not divisible into 2128 -> crash at build time.
+        #  - "SimpleCPUOffloadConnector": the connector the vLLM Nemotron recipe
+        #    prescribes. Minimal byte-budget offload (cpu_bytes_to_use_per_rank +
+        #    lazy_offload), NO block_size / divisibility constraint, so it works
+        #    with the hybrid 2128 block. Requires prefix caching.
+        kvc = resolve_kv_connector(exp)
+        if kvc["connector"] == "SimpleCPUOffloadConnector":
+            extra = {
+                "cpu_bytes_to_use_per_rank": kvc["cpu_bytes_to_use"],
+                "lazy_offload": kvc["lazy_offload"],
+            }
+        else:
+            extra = {
+                "spec_name": "CPUOffloadingSpec",
+                "cpu_bytes_to_use": kvc["cpu_bytes_to_use"],
+                "block_size": kvc["block_size"],
+                "eviction_policy": kvc["eviction_policy"],
+            }
         kv_transfer_config = json.dumps(
             {
-                "kv_connector": "OffloadingConnector",
+                "kv_connector": kvc["connector"],
                 "kv_role": "kv_both",
-                "kv_connector_extra_config": {
-                    "spec_name": "CPUOffloadingSpec",
-                    "cpu_bytes_to_use": kv_offload_cpu_bytes(exp),
-                    "block_size": KV_OFFLOAD_BLOCK_SIZE,
-                    "eviction_policy": KV_OFFLOAD_EVICTION_POLICY,
-                },
+                "kv_connector_extra_config": extra,
             },
             separators=(",", ":"),  # compact, single-line JSON for the Helm --set parser
         )

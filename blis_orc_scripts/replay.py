@@ -35,13 +35,7 @@ def kv_blocks_from_serve_log(data_dir, block_size):
     usable log line is found (caller then falls back to BLIS auto-calc).
     """
     token_re = re.compile(r"GPU KV cache size:\s*([\d,]+)\s*tokens")
-    candidates = [
-        data_dir.parent / "vllm.log",       # data/<exp>/vllm.log (observe sibling)
-        data_dir.parent.parent / "vllm.log",
-    ]
-    for log_path in candidates:
-        if not log_path.exists():
-            continue
+    for log_path in _serve_log_candidates(data_dir):
         try:
             text = log_path.read_text(errors="replace")
         except Exception:
@@ -51,6 +45,40 @@ def kv_blocks_from_serve_log(data_dir, block_size):
             kv_tokens = int(matches[-1].replace(",", ""))  # last = live engine
             return kv_tokens // block_size, kv_tokens, log_path
     return None, None, None
+
+
+def _serve_log_candidates(data_dir):
+    """Yield existing vllm.log paths near the observe data dir."""
+    for p in (data_dir.parent / "vllm.log", data_dir.parent.parent / "vllm.log"):
+        if p.exists():
+            yield p
+
+
+def cpu_blocks_from_serve_log(data_dir):
+    """Read the CPU offload block count the real `vllm serve` engine allocated.
+
+    `SimpleCPUOffloadConnector` logs its CPU tier size at INFO, e.g.:
+
+        SimpleCPUOffloadWorker: 6 unique GPU KV tensors, allocating 1642 CPU blocks (10.00 GB)
+
+    Those CPU blocks are in the model's NATIVE block units (e.g. 2128 tokens for
+    the hybrid Nemotron, not 16), so this is the authoritative count to hand BLIS
+    as --kv-cpu-blocks -- strictly better than the 4 MiB/block heuristic, which
+    assumes dense-model 16-token blocks and mis-sizes hybrids. Returns
+    (cpu_blocks, log_path) or (None, None) if the connector didn't log it (e.g.
+    the v0.26 OffloadingConnector, which logs CPU blocks only at DEBUG).
+    """
+    # "allocating N CPU blocks" (SimpleCPUOffloadWorker/Scheduler INFO line).
+    cpu_re = re.compile(r"allocating\s+([\d,]+)\s+CPU blocks")
+    for log_path in _serve_log_candidates(data_dir):
+        try:
+            text = log_path.read_text(errors="replace")
+        except Exception:
+            continue
+        matches = cpu_re.findall(text)
+        if matches:
+            return int(matches[-1].replace(",", "")), log_path
+    return None, None
 
 
 def load_models_config():
@@ -348,22 +376,39 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
 
-    # CPU KV tier (--kv-cpu-blocks): SEPARATE from the GPU tier above. vLLM does
-    # not log the CPU block count at INFO (only DEBUG), so unlike the GPU tier we
-    # cannot read it from the serve log. Instead we derive it from the configured
-    # CPU offload budget (kv_offloading_size from exp-config.yaml) using a 4 MiB/
-    # block heuristic (256 blocks/GiB) -- exact for Qwen3-32B / Llama-3.x, close
-    # for most others. This is intentionally independent of the GPU serve-log
-    # value; the two tiers are distinct BLIS flags.
-    if kv_offloading_gb > 0:
-        cpu_blocks = int(kv_offloading_gb * 256)
-        cmd.extend([
-            "--kv-cpu-blocks", str(cpu_blocks),
-            "--kv-offload-threshold", "0.9",
-            "--kv-transfer-bandwidth", "0.2"
-        ])
-        print(f"   CPU KV blocks: {cpu_blocks} (from {kv_offloading_gb} GB offload "
-              f"budget, 4 MiB/block heuristic — NOT from serve log)")
+    # CPU KV offload tier — use BLIS's modern --kv-offload-config path (#1583/#1587),
+    # NOT the legacy --kv-cpu-blocks flag. Rationale:
+    #   * --kv-cpu-blocks reuses the single GPU BlockSizeTokens (16), but vLLM's CPU
+    #     tier is in the model's native block units (2128 tokens for hybrid Nemotron),
+    #     so a raw block count is ~133x wrong AND the new BLIS refuses to combine it
+    #     with a header/flag offload config.
+    #   * --kv-offload-config takes cpu_bytes_to_use + vLLM block_size; BLIS derives
+    #     per_block_bytes from the model's KV size internally (correct units). For an
+    #     observed (mode "real") trace with no kv_offload header block, BLIS's #1583
+    #     allowFlagAdd path accepts this flag to model the observed deployment.
+    # Prefer experiment.json's kv_connector_config (the source of truth) over the
+    # derived exp-config.yaml GiB. cpu_bytes_to_use is taken verbatim; block_size
+    # falls back to the GPU block size. BLIS's --kv-offload-config wants a file path
+    # (no inline CLI form), so we materialize a tiny YAML from those values -- the
+    # file is just BLIS's required interface, not a separate source of config.
+    kvc = exp.get("kv_connector_config") or {}
+    cpu_bytes = kvc.get("cpu_bytes_to_use")
+    if cpu_bytes is None and kv_offloading_gb > 0:
+        cpu_bytes = int(round(kv_offloading_gb * 1024**3))  # fallback: pre-nested-config dirs
+    if cpu_bytes:
+        offload_block_size = kvc.get("block_size", block_size)
+        kv_offload_yaml = (
+            "kv_offload:\n"
+            f"  cpu_bytes_to_use: {int(cpu_bytes)}\n"
+            f"  block_size: {int(offload_block_size)}\n"
+        )
+        kv_offload_path = replay_dir / "kv_offload.yaml"
+        kv_offload_path.write_text(kv_offload_yaml)
+        cmd.extend(["--kv-offload-config", str(kv_offload_path.resolve())])
+        print(f"   CPU offload: --kv-offload-config (cpu_bytes_to_use={int(cpu_bytes)}, "
+              f"block_size={int(offload_block_size)}; from "
+              f"{'experiment.json kv_connector_config' if kvc.get('cpu_bytes_to_use') else 'exp-config.yaml fallback'}); "
+              f"BLIS derives per-block bytes from the model")
 
     # Add model config folder if provided
     if model_config_folder:
