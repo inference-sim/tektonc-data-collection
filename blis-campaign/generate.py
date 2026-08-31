@@ -164,13 +164,54 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
         if exp["hw"] not in valid_hw:
             errors.append(f"Experiment #{eid}: unknown hw '{exp['hw']}'")
 
-        # Validate workload exists in one of the two sources:
+        # weka-real is a corpus-mode ORC workload: it names a pre-staged TraceV2
+        # corpus on the PVC rather than a synthesizable profile, so it is neither a
+        # patterns/dynamic workload nor a workloads.yaml profile.
+        is_weka = is_weka_experiment(exp)
+
+        # Validate workload exists in one of the sources:
         #  - patterns file: statistical/dynamic workloads (need arrival_pattern)
-        #  - workloads.yaml: inference_perf profiles (arrival_pattern N/A)
+        #  - workloads.yaml: inference_perf / blis_native profiles (arrival_pattern N/A)
+        #  - weka-real: corpus-mode (no synthesis; corpus pre-staged on PVC)
         is_dynamic = exp["workload"] in workloads
         is_static = exp["workload"] in static_workloads
-        if not is_dynamic and not is_static:
+        if not is_dynamic and not is_static and not is_weka:
             errors.append(f"Experiment #{eid}: unknown workload '{exp['workload']}'")
+
+        # weka-real corpus-mode field/harness validation. Corpus-mode is an
+        # observe feature -> ORC harness only. Session sizing knobs must be
+        # non-negative ints; concurrent_sessions must be > 0 (it is what enables
+        # corpus-mode in `blis observe`).
+        if is_weka:
+            harness_w = exp.get("harness", "inference-perf")
+            if harness_w not in ("orc", "blis-orc"):
+                errors.append(
+                    f"Experiment #{eid}: workload 'weka-real' is corpus-mode ORC, "
+                    f"which requires harness='orc'/'blis-orc' (got '{harness_w}')."
+                )
+            for field, default in (("concurrent_sessions", DEFAULT_CONCURRENT_SESSIONS),
+                                    ("total_sessions", DEFAULT_TOTAL_SESSIONS)):
+                val = exp.get(field, default)
+                if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                    errors.append(
+                        f"Experiment #{eid}: '{field}' must be a non-negative integer, got {val!r}"
+                    )
+            cs = exp.get("concurrent_sessions", DEFAULT_CONCURRENT_SESSIONS)
+            if isinstance(cs, int) and not isinstance(cs, bool) and cs == 0:
+                errors.append(
+                    f"Experiment #{eid}: 'concurrent_sessions' must be > 0 for weka-real "
+                    f"(it enables corpus-mode observe)."
+                )
+            if "shuffle_corpus" in exp and not isinstance(exp["shuffle_corpus"], bool):
+                errors.append(
+                    f"Experiment #{eid}: 'shuffle_corpus' must be a boolean"
+                )
+            if "total_kv_blocks" in exp:
+                tkv = exp["total_kv_blocks"]
+                if not isinstance(tkv, int) or isinstance(tkv, bool) or tkv <= 0:
+                    errors.append(
+                        f"Experiment #{eid}: 'total_kv_blocks' must be a positive integer, got {tkv!r}"
+                    )
 
         # arrival_pattern is only required/validated for dynamic (patterns) workloads.
         # For inference_perf workloads it is ignored (load comes from load.stages).
@@ -184,6 +225,26 @@ def validate_all(experiments, clusters, patterns_data, static_workloads=None):
         harness = exp.get("harness", "inference-perf")
         if harness not in valid_harnesses:
             errors.append(f"Experiment #{eid}: unknown harness '{harness}' (valid: {valid_harnesses})")
+
+        # long_prefill_token_threshold (optional): vLLM/BLIS scheduler knob, must be
+        # a non-negative int (both the vLLM arg and BLIS's flag require >= 0).
+        if "long_prefill_token_threshold" in exp:
+            lpt = exp["long_prefill_token_threshold"]
+            if not isinstance(lpt, int) or isinstance(lpt, bool) or lpt < 0:
+                errors.append(
+                    f"Experiment #{eid}: 'long_prefill_token_threshold' must be a non-negative integer, got {lpt!r}"
+                )
+
+        # scheduler (optional): BLIS replay instance scheduler. Sim-side only
+        # (blis replay --scheduler); distinct from "scheduling" (vLLM --scheduling-
+        # policy). Valid BLIS values: fcfs, priority-fcfs, sjf, reverse-priority.
+        if "scheduler" in exp:
+            sched = exp["scheduler"]
+            if sched not in VALID_BLIS_SCHEDULERS:
+                errors.append(
+                    f"Experiment #{eid}: unknown scheduler '{sched}' "
+                    f"(valid BLIS replay schedulers: {sorted(VALID_BLIS_SCHEDULERS)})"
+                )
 
         # Validate saturation_detectors (optional). Mirrors BLIS rules:
         # must be a list of strings; "all" only alone; other names must be valid.
@@ -359,6 +420,65 @@ KV_OFFLOAD_EVICTION_POLICY = "lru"
 # expands to the whole roster and cannot be combined with individual names.
 VALID_SATURATION_DETECTORS = {"composite", "threshold", "backlog-drift"}
 
+# Valid BLIS replay instance schedulers (source: inference-sim sim/scheduler.go
+# NewScheduler; surfaced by `blis replay --scheduler`). SIM-SIDE only -- the real
+# vLLM server only supports fcfs|priority via --scheduling-policy, so schedulers
+# like sjf run as a counterfactual on the observed trace, not on the live server.
+VALID_BLIS_SCHEDULERS = {"fcfs", "priority-fcfs", "sjf", "reverse-priority"}
+
+# ---------------------------------------------------------------------------
+# Weka corpus-mode ORC (SemiAnalysis CC agentic traces)
+# ---------------------------------------------------------------------------
+# A "weka-real" experiment does NOT synthesize a workload. It replays a captured
+# TraceV2 corpus (header.yaml + data.csv, produced by `blis convert weka`) against
+# a live server via `blis observe`'s corpus-mode (--corpus-header/--corpus-data
+# --concurrent-sessions). The corpus is pre-staged on the data PVC out of band;
+# the pipeline only references its path. observe reads the SAME TraceV2 format as
+# replay (cmd/observe_corpus.go -> workload.LoadTraceV2), so the pair the
+# converter emits works unchanged. Subagent groups are NOT modeled (blis convert
+# weka keeps only the main-agent turns).
+WEKA_WORKLOAD = "weka-real"
+
+# Default corpus prefix, RELATIVE to the data workspace (the data-pvc root; the
+# orc-observe task prepends $(workspaces.data.path)). observe reads <prefix>.yaml
+# + <prefix>.csv. Overridable per experiment via "corpus_pvc_path". Using a
+# workspace-relative path avoids hardcoding the pod's mount point (busybox mounts
+# the same PVC at /data; the observe pod mounts it via the Tekton workspace).
+# Points at the pre-staged files under /data/weka-real/full/ on the PVC.
+DEFAULT_CORPUS_PVC_PATH = "weka-real/full/weka"
+
+# Corpus-mode session-pool sizing defaults (blis observe --concurrent-sessions /
+# --total-sessions). total_sessions=0 => replay each corpus session once.
+DEFAULT_CONCURRENT_SESSIONS = 32
+DEFAULT_TOTAL_SESSIONS = 0
+
+
+def is_weka_experiment(exp):
+    """Whether an experiment replays a weka TraceV2 corpus (corpus-mode observe)."""
+    return exp.get("workload") == WEKA_WORKLOAD
+
+
+def resolve_corpus(exp):
+    """Resolve a weka experiment's corpus-mode config into one normalized dict.
+
+    Reads optional fields off the experiment (all with sensible defaults):
+        "corpus_pvc_path": "weka-real/full/weka"  # <prefix> (data-workspace-relative)
+        "concurrent_sessions": 32
+        "total_sessions": 0          # 0 = each corpus session once
+        "shuffle_corpus": false
+
+    Returns keys: corpus_header, corpus_data, concurrent_sessions,
+    total_sessions, shuffle_corpus.
+    """
+    prefix = exp.get("corpus_pvc_path", DEFAULT_CORPUS_PVC_PATH)
+    return {
+        "corpus_header": f"{prefix}.yaml",
+        "corpus_data": f"{prefix}.csv",
+        "concurrent_sessions": int(exp.get("concurrent_sessions", DEFAULT_CONCURRENT_SESSIONS)),
+        "total_sessions": int(exp.get("total_sessions", DEFAULT_TOTAL_SESSIONS)),
+        "shuffle_corpus": bool(exp.get("shuffle_corpus", False)),
+    }
+
 
 def kv_offload_enabled(exp):
     """Whether CPU KV offloading is ON for an experiment.
@@ -386,7 +506,12 @@ def resolve_kv_connector(exp):
             "cpu_bytes_to_use": 10737418240,            # pool size in bytes
             "lazy_offload": false,                       # SimpleCPUOffload only
             "block_size": 16,                            # OffloadingConnector only
-            "eviction_policy": "lru"                     # OffloadingConnector only
+            "eviction_policy": "lru",                    # OffloadingConnector only
+            "spec_name": "TieringOffloadingSpec",        # OffloadingConnector: enables multi-tier
+            "secondary_tiers": [                          # OffloadingConnector + Tiering: GPU->CPU->disk
+                {"type": "fs", "root_dir": "/mnt/kv_cache",
+                 "n_read_threads": 32, "n_write_threads": 16}
+            ]
         }
 
     LEGACY (flat) form still accepted for back-compat with older tables and PR #65:
@@ -394,8 +519,8 @@ def resolve_kv_connector(exp):
         "kv_lazy_offload": bool
 
     Returns a normalized dict with keys: connector, cpu_bytes_to_use,
-    lazy_offload, block_size, eviction_policy. Only the keys relevant to the
-    chosen connector are used downstream.
+    lazy_offload, block_size, eviction_policy, spec_name, secondary_tiers. Only
+    the keys relevant to the chosen connector/spec are used downstream.
     """
     cfg = dict(exp.get("kv_connector_config") or {})
     # Flat-field fallbacks (nested takes precedence).
@@ -408,12 +533,19 @@ def resolve_kv_connector(exp):
     lazy = cfg.get("lazy_offload")
     if lazy is None:
         lazy = exp.get("kv_lazy_offload", False)
+    # spec_name: OffloadingConnector defaults to single-tier CPUOffloadingSpec.
+    # Setting "TieringOffloadingSpec" + secondary_tiers enables GPU->CPU->disk.
+    secondary_tiers = cfg.get("secondary_tiers") or []
+    default_spec = "TieringOffloadingSpec" if secondary_tiers else "CPUOffloadingSpec"
+    spec_name = cfg.get("spec_name", default_spec)
     return {
         "connector": connector,
         "cpu_bytes_to_use": int(cpu_bytes),
         "lazy_offload": bool(lazy),
         "block_size": int(cfg.get("block_size", KV_OFFLOAD_BLOCK_SIZE)),
         "eviction_policy": cfg.get("eviction_policy", KV_OFFLOAD_EVICTION_POLICY),
+        "spec_name": spec_name,
+        "secondary_tiers": secondary_tiers,
     }
 
 
@@ -452,6 +584,12 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
     # Allow experiments.json to override MAX_MODEL_LEN (default from base values if not specified)
     if "max_model_len" in exp:
         v["stack"]["MAX_MODEL_LEN"] = exp["max_model_len"]
+    elif is_weka_experiment(exp):
+        # weka-real: never inherit the base 8192 cap -- the corpus ISL is huge
+        # (p50 ~110K). Default to 0 so the template omits --max-model-len and vLLM
+        # uses the model's native context (e.g. Llama-3.1-70B = 131072). Set an
+        # explicit max_model_len in experiments.json only to cap it deliberately.
+        v["stack"]["MAX_MODEL_LEN"] = 0
     # Allow experiments.json to override MAX_NUM_SEQS (default from base values if not specified)
     if "max_num_seqs" in exp:
         v["stack"]["MAX_NUM_SEQS"] = exp["max_num_seqs"]
@@ -491,6 +629,31 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
     # Observability template only handles observability features, NOT capacity management
     v["stack"]["extra_overrides"] = build_extra_overrides(exp)
 
+    harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
+
+    # weka-real: corpus-mode ORC. No workload synthesis -- observe replays a
+    # pre-staged TraceV2 corpus against the server (--corpus-header/--corpus-data
+    # --concurrent-sessions). Emit a `workload.corpus` block instead of `orcSpec`;
+    # the ORC template selects corpus-mode on its presence. max_model_len already
+    # flowed into stack.MAX_MODEL_LEN above (-> exp-config.yaml, read by local
+    # replay); total_kv_blocks is consumed by blis_orc_scripts/replay.py.
+    if is_weka_experiment(exp):
+        if harness not in ("orc", "blis-orc"):
+            raise ValueError(
+                f"weka-real is corpus-mode ORC and requires harness='orc'/'blis-orc'. "
+                f"Experiment #{exp['id']} has harness='{harness}'"
+            )
+        corpus = resolve_corpus(exp)
+        v["workload"].pop("orcSpec", None)  # corpus-mode has no synthesized spec
+        v["workload"]["corpus"] = corpus
+        # Corpus self-drains on session count; no wall-clock horizon needed. Keep a
+        # generous horizon for downstream tasks that read workload.horizon.
+        v["workload"]["horizon"] = 1500
+        detectors = exp.get("saturation_detectors") or []
+        v["workload"]["saturationDetectors"] = ",".join(detectors)
+        v["workload"]["scrapeKvMetrics"] = "true" if exp.get("scrape_kv_metrics") else "false"
+        return v
+
     # Workload profile - two possible sources:
     #  (a) patterns file  -> statistical BLIS-native cohorts (needs arrival_pattern)
     #  (b) workloads.yaml  -> inference_perf profile, passed through for BLIS to translate
@@ -501,7 +664,6 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
         wl = build_blis_native_orcspec(exp, static_workloads)
     else:
         wl = build_inference_perf_orcspec(exp, static_workloads)
-    harness = exp.get("harness", "inference-perf")  # Default to inference-perf for backward compatibility
 
     # Both sources emit an orcSpec the ORC pipeline understands
     if harness in ["orc", "blis-orc"]:
@@ -518,6 +680,12 @@ def build_values(exp, base_values, clusters, patterns_file, patterns_data=None, 
         # (empty string = off, matching BLIS's own --detectors semantics).
         detectors = exp.get("saturation_detectors") or []
         v["workload"]["saturationDetectors"] = ",".join(detectors)
+
+        # KV-metrics scraping (optional, opt-in). When true, orc-observe passes
+        # --scrape-kv-metrics to record vLLM KV-cache hit-rate / kv_offload_tiering_*
+        # counters in the trace header. Useful for KV-offload experiments (proves
+        # disk-tier read-back); off by default to avoid an extra /metrics scrape.
+        v["workload"]["scrapeKvMetrics"] = "true" if exp.get("scrape_kv_metrics") else "false"
     else:
         raise ValueError(
             f"Dynamically generated workloads use BLIS native format "
@@ -579,12 +747,17 @@ def build_extra_overrides(exp):
                 "lazy_offload": kvc["lazy_offload"],
             }
         else:
+            # OffloadingConnector: single-tier (CPUOffloadingSpec) or multi-tier
+            # (TieringOffloadingSpec + secondary_tiers => GPU->CPU->disk). spec_name
+            # and secondary_tiers come from resolve_kv_connector.
             extra = {
-                "spec_name": "CPUOffloadingSpec",
+                "spec_name": kvc["spec_name"],
                 "cpu_bytes_to_use": kvc["cpu_bytes_to_use"],
                 "block_size": kvc["block_size"],
                 "eviction_policy": kvc["eviction_policy"],
             }
+            if kvc["secondary_tiers"]:
+                extra["secondary_tiers"] = kvc["secondary_tiers"]
         kv_transfer_config = json.dumps(
             {
                 "kv_connector": kvc["connector"],
@@ -621,6 +794,17 @@ def build_extra_overrides(exp):
         overrides.append('decode.containers[name="vllm"].args=--enable-chunked-prefill')
     # If False or not set, omit flag (vLLM defaults to False)
 
+    # Long-prefill token threshold: prefills longer than N tokens are chunked
+    # (vLLM SchedulerConfig knob). First-class field so it plumbs to BOTH the real
+    # server (here) AND the simulator (blis_orc_scripts/replay.py --long-prefill-
+    # token-threshold) with the same value -- keeping observe/replay consistent for
+    # calibration. Especially relevant for the huge-ISL weka corpus. Omitted =>
+    # vLLM default. Must be >= 0 (validated in validate_all).
+    if "long_prefill_token_threshold" in exp:
+        overrides.append(
+            f'decode.containers[name="vllm"].args=--long-prefill-token-threshold={exp["long_prefill_token_threshold"]}'
+        )
+
     # Priority scheduling policy - check scheduling field in experiments.json
     if exp.get("scheduling") == "priority":
         overrides.append('decode.containers[name="vllm"].args=--scheduling-policy=priority')
@@ -656,8 +840,8 @@ metadata:
   name: __PIPELINE_RUN_NAME__
 spec:
   timeouts:
-    pipeline: 6h
-    tasks: 5h30m
+    pipeline: 26h
+    tasks: 25h
   taskRunTemplate:
     serviceAccountName: helm-installer
   workspaces:

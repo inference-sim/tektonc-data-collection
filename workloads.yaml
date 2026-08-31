@@ -333,6 +333,1068 @@ nemotron-smoke:
           params:
             value: 128
 
+agentic-multitier:
+  spec: blis_native
+
+  # Multi-tier KV offload demonstration (GPU -> CPU -> disk) with FETCH/read-back.
+  # 40 "agents" = 40 distinct 6000-tok shared prefixes (system prompt + tool defs).
+  # WRITES: 40-prefix working set (~37 GiB) >> GPU+CPU (~8-9 prefixes @ gpu_mem 0.45 +
+  # 2 GiB CPU) -> continuous GPU->CPU->disk spill (write-through).
+  # READS (the point): multi-turn (6 rounds, 20s think, accumulate, single_session).
+  # During each 20s think-gap ~240 requests run (12/s) touching all 40 agents, so a
+  # paused session's fixed 6000-tok prefix is evicted from the ~8-prefix cache before
+  # its next turn; rounds 1-5 re-attend the SAME prefix -> GPU miss + CPU miss ->
+  # DISK FETCH. ~30k disk reads (6000 sessions x 5 revisits).
+  # PAIR WITH: experiments.json exp6 (gpu_mem 0.45, max_model_len 12288,
+  # TieringOffloadingSpec + fs secondary tier, cpu_bytes_to_use 2 GiB, scrape_kv_metrics).
+  blis:
+    version: "2"
+    seed: 42
+    category: language
+    aggregate_rate: 12.0
+    num_requests: 6000
+    clients:
+      - id: "agent-00"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-00-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-01"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-01-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-02"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-02-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-03"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-03-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-04"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-04-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-05"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-05-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-06"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-06-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-07"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-07-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-08"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-08-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-09"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-09-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-10"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-10-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-11"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-11-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-12"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-12-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-13"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-13-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-14"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-14-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-15"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-15-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-16"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-16-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-17"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-17-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-18"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-18-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-19"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-19-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-20"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-20-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-21"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-21-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-22"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-22-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-23"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-23-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-24"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-24-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-25"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-25-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-26"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-26-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-27"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-27-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-28"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-28-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-29"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-29-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-30"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-30-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-31"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-31-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-32"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-32-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-33"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-33-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-34"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-34-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-35"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-35-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-36"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-36-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-37"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-37-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-38"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-38-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+      - id: "agent-39"
+        slo_class: "standard"
+        rate_fraction: 0.025
+        streaming: true
+        arrival:
+          process: poisson
+        prefix_group: "agent-39-sysprompt"
+        prefix_length: 6000
+        input_distribution:
+          type: constant
+          params:
+            value: 400
+        output_distribution:
+          type: constant
+          params:
+            value: 600
+        reasoning:
+          reason_ratio_distribution:
+            type: constant
+            params:
+              value: 0.0
+          multi_turn:
+            max_rounds: 6
+            think_time_us: 20000000
+            context_growth: "accumulate"
+            single_session: true
+
 # ============================================================================
 # Future BLIS-Native Workload Examples
 # ============================================================================

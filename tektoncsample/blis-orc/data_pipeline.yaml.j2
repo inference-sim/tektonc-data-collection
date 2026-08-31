@@ -158,7 +158,10 @@ spec:
           description: Run BLIS observe phase to collect real request traces.
           taskRef: { name: orc-observe }
           runAfter: [ "deploy-model-{{ stackId }}" ]
-          timeout: "350m"
+          # No 25-min wall-clock cap inside the step (removed): observe runs until
+          # the corpus drains. This task timeout is the outer bound; raised to allow
+          # a full corpus replay (weka corpora can run many hours).
+          timeout: "24h"
           retries: 3
           workspaces:
             - name: data
@@ -167,9 +170,21 @@ spec:
             - { name: model, value: "$(params.model)" }
             - { name: modelLabel, value: "{{ stackModelLabel }}"}
             - { name: results_dir, value: "{{ stackModelLabel }}" }
+            {% if workload.corpus is defined %}
+            # Corpus mode (weka-real): observe replays a pre-staged TraceV2 corpus
+            # against the server instead of synthesizing from a workload spec. The
+            # corpus files are pre-downloaded onto the data PVC out of band.
+            - { name: corpusHeader, value: "{{ workload.corpus.corpus_header }}" }
+            - { name: corpusData, value: "{{ workload.corpus.corpus_data }}" }
+            - { name: concurrentSessions, value: "{{ workload.corpus.concurrent_sessions }}" }
+            - { name: totalSessions, value: "{{ workload.corpus.total_sessions }}" }
+            - { name: shuffleCorpus, value: "{{ 'true' if workload.corpus.shuffle_corpus else 'false' }}" }
+            {% else %}
             - { name: workloadSpec, value: {{ workload.orcSpec }} }
             - { name: horizon, value: "{{ workload.horizon }}" }
+            {% endif %}
             - { name: saturationDetectors, value: "{{ workload.saturationDetectors | default('') }}" }
+            - { name: scrapeKvMetrics, value: "{{ workload.scrapeKvMetrics | default('false') }}" }
 
         - name: delete-model-{{ stackId }}
           description: Delete the model engine immediately after observe to release GPU.
@@ -199,10 +214,10 @@ spec:
             - { name: modelLabel, value: "{{ stackModelLabel }}" }
         {% endif %}
 
-        # NOTE: Replay and calibrate are now done locally using blis-campaign/replay.py and calibrate.py
+        # NOTE: Replay and calibrate are now done locally using blis_orc_scripts/replay.py and calibrate.py
         # Pipeline stops after observe. Download data, then run locally:
-        #   python blis-campaign/replay.py --experiment-ids 68
-        #   python blis-campaign/calibrate.py --experiment-ids 68
+        #   python blis_orc_scripts/replay.py --experiment-ids 68
+        #   python blis_orc_scripts/calibrate.py --experiment-ids 68
 
         {% if upload_target is defined and upload_target %}
         # Upload is disabled since replay/calibrate are done locally

@@ -25,7 +25,8 @@ spec:
       description: Results directory path (observe outputs go to <results_dir>/observe/)
     - name: workloadSpec
       type: string
-      description: BLIS native workload spec YAML (WorkloadSpec format)
+      description: BLIS native workload spec YAML (WorkloadSpec format). Empty in corpus-mode (weka-real), where the corpus replaces the synthesized spec.
+      default: ""
     - name: horizon
       type: string
       description: Time horizon in seconds (bounds workload generation)
@@ -34,6 +35,40 @@ spec:
       type: string
       description: 'Saturation detector(s) for --detectors: composite|threshold|backlog-drift, a comma-list of those, or "all". Empty = detection off.'
       default: ""
+    - name: scrapeKvMetrics
+      type: string
+      description: '"true" to pass --scrape-kv-metrics (record vLLM KV-cache hit-rate / kv_offload_tiering_* counters in the trace header). Off by default; only useful for KV-offload experiments.'
+      default: "false"
+
+    # --- Corpus-mode (weka-real) inputs ---------------------------------------
+    # When concurrentSessions != "0", observe runs in CORPUS mode: it replays a
+    # pre-staged TraceV2 corpus (corpusHeader + corpusData, produced by
+    # `blis convert weka`) against the server via a fixed pool of closed-loop
+    # sessions, instead of synthesizing from workloadSpec. The corpus files are
+    # pre-downloaded onto the data PVC out of band. These params are paths
+    # RELATIVE to the data workspace (the data-pvc root, same volume the busybox
+    # helper mounts at /data); the task prepends $(workspaces.data.path). In
+    # corpus mode workloadSpec is ignored.
+    - name: corpusHeader
+      type: string
+      description: 'Corpus-mode: data-workspace-relative path to the input TraceV2 header YAML (e.g. weka-real/full/weka.yaml). Empty = spec-mode.'
+      default: ""
+    - name: corpusData
+      type: string
+      description: 'Corpus-mode: data-workspace-relative path to the input TraceV2 data CSV (e.g. weka-real/full/weka.csv). Empty = spec-mode.'
+      default: ""
+    - name: concurrentSessions
+      type: string
+      description: 'Corpus-mode: number of concurrent closed-loop sessions to replay (blis observe --concurrent-sessions). "0" = spec-mode (use workloadSpec).'
+      default: "0"
+    - name: totalSessions
+      type: string
+      description: 'Corpus-mode: total sessions to replay (blis observe --total-sessions). "0" = replay each corpus session once.'
+      default: "0"
+    - name: shuffleCorpus
+      type: string
+      description: 'Corpus-mode: "true" to pass --shuffle-corpus (seeded reorder; must match replay for calibration parity).'
+      default: "false"
 
   steps:
     - name: discover-endpoint
@@ -72,21 +107,28 @@ spec:
 
         mkdir -p "${OBSERVE_DIR}"
 
-        echo "📝 Creating BLIS workload spec..."
+        # Corpus mode (weka-real): observe replays a pre-staged TraceV2 corpus,
+        # so there is NO workload spec to materialize. Skip spec creation; only
+        # persist the endpoint for run-observe.
+        if [ -n "$(params.corpusHeader)" ]; then
+          echo "🗂  Corpus mode: skipping workload-spec creation (corpus: $(params.corpusHeader))"
+        else
+          echo "📝 Creating BLIS workload spec..."
 
-        # Install Python and PyYAML for JSON to YAML conversion
-        apk add --no-cache python3 py3-pip
-        pip3 install --break-system-packages pyyaml
+          # Install Python and PyYAML for JSON to YAML conversion
+          apk add --no-cache python3 py3-pip
+          pip3 install --break-system-packages pyyaml
 
-        # Convert JSON workload spec to proper YAML
-        # (Tekton passes it as JSON, but BLIS expects YAML)
-        echo '$(params.workloadSpec)' > /tmp/workload.json
-        python3 -c "import json, yaml; print(yaml.dump(json.load(open('/tmp/workload.json')), default_flow_style=False))" > "${WORKLOAD_SPEC}"
+          # Convert JSON workload spec to proper YAML
+          # (Tekton passes it as JSON, but BLIS expects YAML)
+          echo '$(params.workloadSpec)' > /tmp/workload.json
+          python3 -c "import json, yaml; print(yaml.dump(json.load(open('/tmp/workload.json')), default_flow_style=False))" > "${WORKLOAD_SPEC}"
 
-        echo ">>> Created workload spec:"
-        cat "${WORKLOAD_SPEC}"
+          echo ">>> Created workload spec:"
+          cat "${WORKLOAD_SPEC}"
+        fi
 
-        # Store endpoint for next step
+        # Store endpoint for next step (both modes)
         ENDPOINT=$(cat /tekton/home/endpoint.txt)
         echo -n "${ENDPOINT}" > "${OBSERVE_DIR}/endpoint.txt"
 
@@ -155,12 +197,67 @@ spec:
           SATURATION_FLAGS="--detectors $(params.saturationDetectors) --saturation-report saturation_analysis.json"
         fi
 
-        echo "🔍 BLIS observe command:"
-        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" --workload-spec \"${WORKLOAD_SPEC}\" --trace-header header.yaml --trace-data data.csv --warmup-requests 50 --record-itl --itl-output itl.csv --timeout 660 ${HORIZON_FLAG} ${SATURATION_FLAGS}"
+        # KV-metrics scraping (opt-in per experiment). Records vLLM's KV-cache
+        # hit-rate / kv_offload_tiering_* counters in the trace header. Off unless
+        # the experiment sets scrape_kv_metrics=true (KV-offload experiments).
+        SCRAPE_KV_FLAG=""
+        if [ "$(params.scrapeKvMetrics)" = "true" ]; then
+          SCRAPE_KV_FLAG="--scrape-kv-metrics"
+        fi
+
+        # Build the workload-input flags. Two modes:
+        #  - CORPUS mode (weka-real): concurrentSessions != "0" -> replay a
+        #    pre-staged TraceV2 corpus against the server. Uses --corpus-header/
+        #    --corpus-data --concurrent-sessions [--total-sessions] [--shuffle-corpus].
+        #    The corpus IS the workload, so --workload-spec / --horizon /
+        #    --num-requests / --warmup-requests are rejected by blis observe (they
+        #    are spec-mode knobs); we omit them. Warmup is dropped so the recorded
+        #    request set matches `blis replay` of the same corpus request-for-request
+        #    (the request_id join blis calibrate needs).
+        #  - SPEC mode (default): synthesize from workload.yaml as before.
+        WARMUP_FLAG="--warmup-requests 50"
+        if [ "$(params.concurrentSessions)" != "0" ]; then
+          MODE="corpus"
+          # corpusHeader/corpusData are RELATIVE to the data workspace (the
+          # data-pvc root). Resolve against $(workspaces.data.path) so they point
+          # at the pre-staged corpus regardless of the pod's mount path.
+          CORPUS_HEADER="$(workspaces.data.path)/$(params.corpusHeader)"
+          CORPUS_DATA="$(workspaces.data.path)/$(params.corpusData)"
+          if [ ! -f "${CORPUS_HEADER}" ] || [ ! -f "${CORPUS_DATA}" ]; then
+            echo "❌ Corpus mode: corpus files not found on PVC."
+            echo "   --corpus-header ${CORPUS_HEADER}"
+            echo "   --corpus-data   ${CORPUS_DATA}"
+            echo "   Pre-stage the TraceV2 pair (from 'blis convert weka') onto the data PVC before running."
+            exit 1
+          fi
+          TOTAL_SESSIONS_FLAG=""
+          if [ "$(params.totalSessions)" != "0" ]; then
+            TOTAL_SESSIONS_FLAG="--total-sessions $(params.totalSessions)"
+          fi
+          SHUFFLE_FLAG=""
+          if [ "$(params.shuffleCorpus)" = "true" ]; then
+            SHUFFLE_FLAG="--shuffle-corpus"
+          fi
+          WORKLOAD_FLAGS="--corpus-header ${CORPUS_HEADER} --corpus-data ${CORPUS_DATA} --concurrent-sessions $(params.concurrentSessions) ${TOTAL_SESSIONS_FLAG} ${SHUFFLE_FLAG}"
+          HORIZON_FLAG=""   # corpus-mode rejects --horizon (self-drains on sessions)
+          WARMUP_FLAG=""    # keep every recorded request for the replay join
+        else
+          MODE="spec"
+          WORKLOAD_FLAGS="--workload-spec ${WORKLOAD_SPEC}"
+        fi
+
+        echo "🔍 BLIS observe command (mode=${MODE}):"
+        echo "${BLIS_BINARY} observe --server-url \"${ENDPOINT}\" --model \"${MODEL}\" ${WORKLOAD_FLAGS} --trace-header header.yaml --trace-data data.csv ${WARMUP_FLAG} --record-itl --itl-output itl.csv --timeout 660 ${SCRAPE_KV_FLAG} ${HORIZON_FLAG} ${SATURATION_FLAGS}"
         echo ""
-        echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
+        if [ "${MODE}" = "corpus" ]; then
+          echo "🗂  Corpus mode: pool=$(params.concurrentSessions) total=$(params.totalSessions) shuffle=$(params.shuffleCorpus)"
+          echo "   corpus-header=$(params.corpusHeader)"
+          echo "   corpus-data=$(params.corpusData)"
+        else
+          echo "🔥 Using warmup-requests=50 (first 50 requests excluded from trace)"
+        fi
         echo "⏱️  Using timeout=660 seconds (11 minutes per request)"
-        echo "⏰ Using overall experiment timeout=1500 seconds (25 minutes)"
+        echo "⏰ No overall observe timeout — runs until the corpus drains (bounded only by the Tekton task timeout)"
         if [ -n "${HORIZON_FLAG}" ]; then
           echo "🕐 Using horizon=$(params.horizon) seconds to bound observation duration"
         fi
@@ -169,34 +266,36 @@ spec:
         fi
         echo ""
 
-        # Run BLIS observe with 25-minute overall timeout
-        # Use 'timeout' command with SIGTERM for graceful shutdown
-        # Exit code 124 = timeout reached (BLIS's internal horizon mechanism)
+        # Run BLIS observe with NO overall wall-clock cap — it runs until the
+        # workload finishes (corpus drains / horizon reached). The only outer bound
+        # is the Tekton task-level timeout (see data_pipeline.yaml.j2). This lets a
+        # full corpus replay run to completion (weka corpora can take hours).
         #
         # NOTE: We ignore the exit code and check if data was exported successfully.
-        # BLIS exits with 124 when it reaches its horizon limit, but it still exports
-        # all collected data before exiting. This is a success, not a failure.
+        # BLIS may exit non-zero on its internal horizon limit, but it still exports
+        # all collected data before exiting. That is a success, not a failure.
         #
         # CRITICAL: Disable 'set -e' around BLIS execution so we can capture its exit
         # code without the script terminating immediately. The 'set -eu' at the top
         # would otherwise kill the script before we can check if data was exported.
         set +e  # Disable exit-on-error
-        set -o pipefail  # Ensure we capture timeout's exit code, not tee's
-        timeout -s SIGTERM 1500 ${BLIS_BINARY} observe \
+        set -o pipefail  # Ensure we capture blis's exit code, not tee's
+        ${BLIS_BINARY} observe \
           --server-url "${ENDPOINT}" \
           --model "${MODEL}" \
-          --workload-spec "${WORKLOAD_SPEC}" \
+          ${WORKLOAD_FLAGS} \
           --trace-header "header.yaml" \
           --trace-data "data.csv" \
-          --warmup-requests 50 \
+          ${WARMUP_FLAG} \
           --record-itl \
           --itl-output "itl.csv" \
           --timeout 660 \
+          ${SCRAPE_KV_FLAG} \
           ${HORIZON_FLAG} \
           ${SATURATION_FLAGS} \
           2>&1 | tee observe.log
 
-        RC=${PIPESTATUS[0]}  # Get timeout command's exit code, not tee's
+        RC=${PIPESTATUS[0]}  # Get blis's exit code, not tee's
         set -e  # Re-enable exit-on-error
 
         echo "BLIS observe exited with code: $RC"

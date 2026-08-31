@@ -53,6 +53,11 @@ stack:
               value: "/mnt/exp/.cache/huggingface"
             - name: TRANSFORMERS_CACHE
               value: "/mnt/exp/.cache/huggingface"
+            # Deterministic prefix hashing across the KV-offload fs tier
+            # (required when a filesystem secondary tier is configured;
+            # harmless otherwise). See kv-offload multi-tier setup.
+            - name: PYTHONHASHSEED
+              value: "0"
           mountModelVolume: true
           image: "vllm/vllm-openai:v0.26.0"
           modelCommand: vllmServe
@@ -86,11 +91,26 @@ stack:
           volumeMounts:
           - name: data
             mountPath: /mnt/exp
+          # KV-offload secondary (disk) tier root_dir — node-local scratch, so
+          # the fs tier's block files don't hit the networked PVC. Only used when
+          # an experiment configures a TieringOffloadingSpec fs secondary tier.
+          - name: kv-cache
+            mountPath: /mnt/kv_cache
+          # Shared-memory region for the CPU offload primary tier.
+          - name: shm
+            mountPath: /dev/shm
 
         volumes:
         - name: data
           persistentVolumeClaim:
             claimName: data-pvc
+        - name: kv-cache
+          emptyDir:
+            sizeLimit: 50Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
 
 orc:
   # Latency model for replay phase (trained-physics, linear, etc.)
@@ -117,6 +137,22 @@ workload:
         question_len: 447
         output_len: 248
         enable_multi_turn_chat: true
+
+  # --- Corpus mode (weka-real) ------------------------------------------------
+  # When `workload.corpus` is present (set by generate.py for a "weka-real"
+  # experiment), the ORC template drives `blis observe` in CORPUS mode instead of
+  # synthesizing from `orcSpec`: it replays a pre-staged TraceV2 corpus (produced
+  # by `blis convert weka`) against the live server as a fixed pool of closed-loop
+  # sessions. The corpus files are pre-downloaded onto the data PVC out of band;
+  # corpus_header/corpus_data are absolute PVC paths the observe pod can read.
+  # `orcSpec` is ignored when this block is present. Example:
+  #
+  # corpus:
+  #   corpus_header: /mnt/data/weka-real/weka.yaml
+  #   corpus_data:   /mnt/data/weka-real/weka.csv
+  #   concurrent_sessions: 32   # blis observe --concurrent-sessions
+  #   total_sessions: 0         # --total-sessions (0 = each corpus session once)
+  #   shuffle_corpus: false     # --shuffle-corpus (match replay for parity)
 
 upload_target:
   type: s3

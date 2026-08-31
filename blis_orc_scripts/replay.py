@@ -289,6 +289,14 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         block_size = exp_config.get("block_size", block_size)
         kv_offloading_gb = exp_config.get("kv_offloading_size", 0)
 
+    # experiment.json is the source of truth for max_model_len when set (it drives
+    # the real server config via stack.MAX_MODEL_LEN -> exp-config.yaml anyway).
+    # Prefer it so replay matches even if exp-config.yaml is missing/stale -- for
+    # weka-real the huge-ISL corpus REQUIRES a large max_model_len or every request
+    # drops unservable, so this must not silently fall back to 0 (unlimited).
+    if exp.get("max_model_len") is not None:
+        max_model_len = exp["max_model_len"]
+
     # Check for large prefixes and warn if KV thrashing is likely
     # NOTE: We trust exp-config.yaml values (which come from the real server)
     # rather than overriding them with heuristics. The real server successfully
@@ -346,6 +354,27 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
         "--log", "info",
     ]
 
+    # Session mode is driven by the DOWNLOADED trace header, not the experiment
+    # kind. We replay observe's OUTPUT (observe/header.yaml, mode "real"), NOT the
+    # original weka corpus. observe records per-round inputs as ABSOLUTE counts and
+    # never sets session_context_growth, so a real observe trace replays correctly
+    # in the default "fixed" mode (each recorded request at its recorded arrival) --
+    # the same as every other observe->replay experiment. Only a trace whose header
+    # says session_context_growth=accumulate (delta-encoded, e.g. the raw corpus
+    # from `blis convert weka`) needs closed-loop; BLIS hard-fails fixed-mode on
+    # such a trace. So switch on the header value rather than assuming: correct for
+    # observe outputs, and still right if someone points replay at a raw corpus.
+    # (The observe-side --concurrent-sessions/--total-sessions/--shuffle-corpus
+    # subset+order are already baked into observe's output rows; replay just
+    # consumes them, so those flags are NOT passed here.)
+    try:
+        header = yaml.safe_load((data_dir / "header.yaml").read_text()) or {}
+    except FileNotFoundError:
+        header = {}
+    if header.get("session_context_growth") == "accumulate":
+        cmd.extend(["--session-mode", "closed-loop"])
+        print("   Session mode: closed-loop (trace header session_context_growth=accumulate)")
+
     # GPU KV tier: use the size the REAL vllm serve engine allocated (from the
     # downloaded serve log) instead of BLIS's own auto-calculation. BLIS's weight
     # estimator mis-sizes quantized / hybrid checkpoints and can abort KV
@@ -358,14 +387,27 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     # NOT reliably in the serve log (vLLM logs it only at DEBUG); it is derived
     # from the configured cpu_bytes_to_use instead. The two are distinct flags to
     # BLIS and are kept independent -- the serve-log value is GPU-tier only.
-    gpu_kv_blocks, kv_tokens, kv_log = kv_blocks_from_serve_log(data_dir, block_size)
-    if gpu_kv_blocks:
-        cmd.extend(["--total-kv-blocks", str(gpu_kv_blocks)])
-        print(f"   GPU KV blocks: {gpu_kv_blocks} (from vllm serve log: "
-              f"{kv_tokens:,} tokens ÷ block_size {block_size})")
+    # Precedence for --total-kv-blocks:
+    #   1. experiment.json "total_kv_blocks" (explicit sweep knob) -- wins.
+    #   2. vLLM serve-log derived value (the size the real engine allocated).
+    #   3. neither -> let BLIS auto-calculate.
+    # For weka-real (huge-ISL agentic corpus) we deliberately SWEEP total_kv_blocks
+    # rather than inherit whatever the real server happened to allocate, so an
+    # explicit experiment.json value is the source of truth.
+    explicit_kv_blocks = exp.get("total_kv_blocks")
+    if explicit_kv_blocks:
+        cmd.extend(["--total-kv-blocks", str(int(explicit_kv_blocks))])
+        print(f"   GPU KV blocks: {int(explicit_kv_blocks)} (from experiment.json total_kv_blocks; "
+              f"overrides serve-log/auto-calc)")
     else:
-        print("   GPU KV blocks: no vllm.log found; letting BLIS auto-calculate "
-              "(may fail for quantized/hybrid models)")
+        gpu_kv_blocks, kv_tokens, kv_log = kv_blocks_from_serve_log(data_dir, block_size)
+        if gpu_kv_blocks:
+            cmd.extend(["--total-kv-blocks", str(gpu_kv_blocks)])
+            print(f"   GPU KV blocks: {gpu_kv_blocks} (from vllm serve log: "
+                  f"{kv_tokens:,} tokens ÷ block_size {block_size})")
+        else:
+            print("   GPU KV blocks: no vllm.log found; letting BLIS auto-calculate "
+                  "(may fail for quantized/hybrid models)")
 
     # Add routing scorer for dense models with dp > 1
     if dp > 1 and is_dense_model(short_model_name, models_config):
@@ -375,6 +417,29 @@ def run_replay(blis_binary, exp_dir, data_dir, model_config_folder, models_confi
     # Add max-model-len if specified (non-zero)
     if max_model_len > 0:
         cmd.extend(["--max-model-len", str(max_model_len)])
+
+    # Long-prefill token threshold (BLIS SchedulerConfig knob): prefills longer than
+    # N tokens are chunked. First-class experiment.json field, plumbed to BOTH the
+    # real server (generate.py -> vLLM --long-prefill-token-threshold) AND here, so
+    # observe and replay chunk long prefills identically -- essential for calibrating
+    # the huge-ISL weka corpus. Omitted => BLIS default (0).
+    lpt = exp.get("long_prefill_token_threshold")
+    if lpt is not None:
+        cmd.extend(["--long-prefill-token-threshold", str(int(lpt))])
+        print(f"   Long-prefill token threshold: {int(lpt)} (from experiment.json)")
+
+    # Instance scheduler (BLIS --scheduler: fcfs|priority-fcfs|sjf|reverse-priority).
+    # This is a SIM-SIDE (replay) knob only -- vLLM's --scheduling-policy supports
+    # just fcfs|priority, so schedulers like sjf cannot run on the real server. When
+    # the experiment names one that vLLM can't do (e.g. sjf), the replay is a
+    # COUNTERFACTUAL over the observed request stream ("what would SJF do?"), not a
+    # strict sim-vs-real match. Read from experiment.json "scheduler"; omitted =>
+    # BLIS default fcfs. Distinct from "scheduling" (the vLLM --scheduling-policy
+    # field consumed by generate.py).
+    sched = exp.get("scheduler")
+    if sched:
+        cmd.extend(["--scheduler", str(sched)])
+        print(f"   Instance scheduler: {sched} (from experiment.json; sim-side only)")
 
     # CPU KV offload tier — use BLIS's modern --kv-offload-config path (#1583/#1587),
     # NOT the legacy --kv-cpu-blocks flag. Rationale:
