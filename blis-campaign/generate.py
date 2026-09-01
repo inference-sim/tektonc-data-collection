@@ -787,6 +787,16 @@ def build_extra_overrides(exp):
     if "block_size" in exp:
         overrides.append(f'decode.containers[name="vllm"].args=--block-size={exp["block_size"]}')
 
+    # Decode context parallelism (--decode-context-parallel-size, "DCP"). Unlike
+    # tensor/data parallelism (which route through decode.parallelism.* and are
+    # turned into vLLM flags by the modelservice chart), the chart has NO
+    # context-parallel knob -- so this is emitted as a direct vLLM arg, the same
+    # way --gpu-memory-utilization etc. are. Only passed when set.
+    if "decode_context_parallel_size" in exp:
+        overrides.append(
+            f'decode.containers[name="vllm"].args=--decode-context-parallel-size={exp["decode_context_parallel_size"]}'
+        )
+
     # Prefix caching - only pass flag if explicitly set in experiments.json
     if "enable_prefix_caching" in exp:
         if exp["enable_prefix_caching"]:
