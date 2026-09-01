@@ -704,8 +704,14 @@ def build_extra_overrides(exp):
     """
     overrides = []
 
-    # vLLM image version (if explicitly specified in experiments.json)
-    if "vllm_version" in exp:
+    # vLLM image (if explicitly specified in experiments.json).
+    #  - vllm_image: full image reference used verbatim (e.g. a custom tag like
+    #    "vllm/vllm-openai:kimi-k3" or a private registry path). Takes precedence.
+    #  - vllm_version: semantic version; expanded to vllm/vllm-openai:v{version}
+    #    (the historical behavior; the "v" prefix is added here).
+    if exp.get("vllm_image"):
+        overrides.append(f'decode.containers[name="vllm"].image={exp["vllm_image"]}')
+    elif "vllm_version" in exp:
         vllm_version = exp["vllm_version"]
         overrides.append(f'decode.containers[name="vllm"].image=vllm/vllm-openai:v{vllm_version}')
 
@@ -825,6 +831,22 @@ def build_extra_overrides(exp):
     # --quantization via precision, etc.) in their structured fields, not here.
     for arg in exp.get("extra_vllm_args", []):
         overrides.append(f'decode.containers[name="vllm"].args={arg}')
+
+    # Generic passthrough for model-specific container ENV VARS not covered by
+    # the structured fields above (e.g. distributed/runtime knobs like
+    # GLOO_SOCKET_IFNAME, PYTORCH_CUDA_ALLOC_CONF). Each key/value becomes a Helm
+    # override on the vllm container env, using the same override shape the ORC
+    # template already uses (decode.containers[name="vllm"].env[name=X].value=Y).
+    # Accepts either a dict {"NAME": "value"} or a list of {"name","value"}.
+    extra_env = exp.get("extra_env", {})
+    if isinstance(extra_env, dict):
+        env_items = extra_env.items()
+    else:
+        env_items = [(e["name"], e["value"]) for e in extra_env]
+    for name, value in env_items:
+        overrides.append(
+            f'decode.containers[name="vllm"].env[name="{name}"].value={value}'
+        )
 
     return overrides
 

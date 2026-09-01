@@ -295,5 +295,49 @@
       "all"
     ],
     "notes": "Weka-real ORC corpus-mode, EXACT blis-search config (Llama-3.1-70B-Instruct TP4). vLLM knobs (real server, mapped from blis-search): --tensor-parallel-size=4, --max-model-len=128000, --max-num-seqs=64, --max-num-batched-tokens=16384 (mbt <- max_scheduled_tokens), --block-size=16, --long-prefill-token-threshold=0 (long_prefill=0 => long-prefill split disabled), --gpu-memory-utilization=0.9, --scheduling-policy=fcfs. Corpus-mode observe: --concurrent-sessions 1 (SERIAL sessions, one at a time), --total-sessions 10, --shuffle-corpus, --detectors all. scheduler=fcfs valid on BOTH sides (vLLM policy AND BLIS replay --scheduler). trace_header=tools/blis-search/workloads/weka.yaml + trace_data=...weka.csv are the source-config corpus refs; on-cluster observe reads the pre-staged PVC pair via corpus_pvc_path=weka-real/full/weka (same committed weka.{yaml,csv}). EXCLUDED as non-vLLM/non-sim: pd_decider=never, replicas=1, gpus_used=4 (derived tp*replicas), snapshot_refresh_interval=0, routing_policy=round-robin, admission_policy=always-admit, scorer_profile=null (llm-d/BLIS cluster-routing knobs). Vs exp 12 (same TP4/block16/max_model_len=128000/mbt=16384/max_num_seqs=64/fcfs): exp 13 has concurrent_sessions=1 (not 8), gpu_mem=0.9 (not 0.95), long_prefill=0 (not 8192)."
+  },
+  {
+    "id": 14,
+    "model": "moonshotai/Kimi-K3",
+    "workload": "general",
+    "hw": "H200",
+    "tp": 8,
+    "dp": 1,
+    "precision": "BF16",
+    "gpu_mem": 0.97,
+    "mbt": 4096,
+    "max_num_seqs": 124,
+    "max_model_len": 262144,
+    "enable_prefix_caching": true,
+    "scheduling": "fcfs",
+    "harness": "orc",
+    "vllm_image": "vllm/vllm-openai:kimi-k3",
+    "extra_env": {
+      "GLOO_SOCKET_IFNAME": "eth0",
+      "VLLM_USE_V2_MODEL_RUNNER": "1",
+      "VLLM_USE_RUST_FRONTEND": "1",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "VLLM_ENGINE_READY_TIMEOUT_S": "3600",
+      "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": "1"
+    },
+    "extra_vllm_args": [
+      "--trust-remote-code",
+      "--load-format=fastsafetensors",
+      "--enable-expert-parallel",
+      "--moe-backend=marlin",
+      "--attention-backend=FLASHMLA",
+      "--all2all-backend=deepep_high_throughput",
+      "--kv-cache-dtype=fp8",
+      "--decode-context-parallel-size=8",
+      "--dcp-comm-backend=a2a",
+      "--prefix-match-unit=128",
+      "--async-scheduling",
+      "--language-model-only",
+      "--enable-auto-tool-choice",
+      "--tool-call-parser=kimi_k3",
+      "--reasoning-parser=kimi_k3",
+      "--api-server-count=8"
+    ],
+    "notes": "Kimi-K3 MoE, general workload, ORC, on scc-gpu H200. Mapped from a `vllm serve moonshotai/Kimi-K3` recipe. STRUCTURED fields: tp=8 (--tensor-parallel-size 8), max_model_len=262144 (256K), max_num_seqs=124, mbt=4096 (--max-num-batched-tokens), gpu_mem=0.97, enable_prefix_caching. PASSTHROUGH (extra_vllm_args, verbatim): --trust-remote-code, --load-format=fastsafetensors, --enable-expert-parallel, --moe-backend=marlin (Hopper has no native FP4; A/B vs humming), --attention-backend=FLASHMLA, --all2all-backend=deepep_high_throughput, --kv-cache-dtype=fp8, --decode-context-parallel-size=8, --dcp-comm-backend=a2a, --prefix-match-unit=128, --async-scheduling, --language-model-only, --enable-auto-tool-choice, --tool-call-parser=kimi_k3, --reasoning-parser=kimi_k3, --api-server-count=8. extra_env: GLOO_SOCKET_IFNAME=eth0, PYTORCH_CUDA_ALLOC_CONF, VLLM_ENGINE_READY_TIMEOUT_S=3600, plus 3 unverified VLLM_* vars. NOT REPRODUCED (structural pipeline gaps, TODO): (1) MULTI-NODE DATA PARALLEL -- recipe uses --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-address $NODE0_IP --data-parallel-rpc-port 13345; the pipeline's single `dp` knob maps to BOTH data & dataLocal (single-node only) and has no coordinator address/port and multinode:false, so dp is set to 1 here and multi-node DP is deferred to a future pipeline feature. EXPERT PARALLEL: --enable-expert-parallel is carried EXPLICITLY in extra_vllm_args (not auto-derived): generate.py auto-emits it only when dp>1 AND model in MOE_MODELS, which is false at dp=1. When multi-node lands (dp>1), do NOT add Kimi-K3 to MOE_MODELS while this explicit arg remains, or --enable-expert-parallel would be emitted TWICE. Keep the explicit arg as the single source of truth across the dp=1->dp>1 transition. (2) --attention-config '{\"use_prefill_query_quantization\":true,\"mla_prefill_backend\":\"TRTLLM_RAGGED\"}' OMITTED -- its JSON value contains commas/colons that the Helm --set override parser would shred; needs a special builder like kv-transfer-config. (3) NAMESPACE -- scc-gpu is namespace spartha-shared, but clusters.yaml has one global namespace (diya) applied to all exps; exp-14's generated PipelineRun will say namespace=diya and must be overridden to spartha-shared at run time. UNVERIFIED: 'moonshotai/Kimi-K3' model/repo (Moonshot's released model is Kimi K2), the vllm/vllm-openai:kimi-k3 image tag, and the 3 VLLM_* env vars + --moe-backend=marlin/--tool-call-parser=kimi_k3/--reasoning-parser=kimi_k3/--prefix-match-unit/--dcp-comm-backend recipe flags."
   }
 ]

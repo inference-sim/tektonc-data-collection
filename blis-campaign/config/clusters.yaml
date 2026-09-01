@@ -14,3 +14,13 @@ L40S:
   context: "diya/api-fmaas-platform-eval-fmaas-res-ibm-com:6443/dipanwita.guhathakurta3@ibm.com"
   gpu_label_key: "nvidia.com/gpu.product"
   gpu_label_value: "NVIDIA-L40S"
+
+# scc-gpu-pok cluster. NOTE: this cluster's namespace is "spartha-shared", NOT
+# the global "diya" above -- clusters.yaml only supports one global namespace,
+# so exp-14 PipelineRuns generate with namespace=diya and must be overridden to
+# spartha-shared at run time (kubectl -n / edit the PipelineRun). Dedicated GPU
+# nodes are labelled scc-h200worker*.
+H200:
+  context: "spartha-shared/api-scc-gpu-pok-ibm-com:6443/9J6847897"
+  gpu_label_key: "nvidia.com/gpu.product"
+  gpu_label_value: "NVIDIA-H200"
