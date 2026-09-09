@@ -44,7 +44,9 @@ spec:
       description: >-
         Comma-separated list of Kubernetes resource kinds to collect
         manifests for. Kinds not registered on the cluster or with zero
-        instances in the namespace are silently skipped.
+        instances in the namespace are silently skipped. Objects created
+        by Tekton itself are excluded regardless of kind -- see the
+        SELECTOR comment in the collect-resources step (sim2real#893).
 
   steps:
     - name: barrier
@@ -130,8 +132,35 @@ spec:
 
         KINDS="$(params.resourceKinds)"
 
+        # Exclude the measurement apparatus from the measured record. Without
+        # a selector this enumeration snapshots *everything* in the namespace,
+        # including the Tekton task pods running this very pipeline — 10 per
+        # cell, near-identical across cells apart from names and timestamps,
+        # recording nothing about the experiment (sim2real#893).
+        #
+        # Two independent requirements, because either alone can miss:
+        #   app.kubernetes.io/managed-by!=tekton-pipelines
+        #     Tekton's own label. The value is the cluster default, which is
+        #     overridable via `default-managed-by-label-value` in the
+        #     config-defaults ConfigMap — so on a cluster that overrode it,
+        #     this requirement alone would silently stop matching.
+        #   !tekton.dev/taskRun
+        #     Set by Tekton on every TaskRun pod and not configurable, so it
+        #     holds regardless of that override. Real workload pods are created
+        #     by Deployments and never carry it.
+        #
+        # Both use the label-absent-also-matches semantics of `key!=value` and
+        # `!key`, so objects with no labels at all are still collected.
+        #
+        # Deliberately NOT excluded: the harness-support objects
+        # (service-llm-d-benchmark-harness, pod-access-to-harness-data-workload-pvc)
+        # carry neither label and are kept. They describe the traffic-generating
+        # apparatus, and any name-keyed rule that dropped them would break the
+        # moment something else was created in the namespace.
+        SELECTOR='app.kubernetes.io/managed-by!=tekton-pipelines,!tekton.dev/taskRun'
+
         for kind in $(echo "${KINDS}" | tr ',' ' '); do
-          ITEMS=$(kubectl get "${kind}" -n "${NAMESPACE}" \
+          ITEMS=$(kubectl get "${kind}" -n "${NAMESPACE}" -l "${SELECTOR}" \
             --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
 
           if [ -z "${ITEMS}" ]; then
