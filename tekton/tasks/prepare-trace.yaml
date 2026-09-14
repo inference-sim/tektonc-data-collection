@@ -8,13 +8,17 @@ spec:
     Prepare a recorded TraceV2 corpus on the data PVC for trace-input observe
     (inference-sim/tektonc-data-collection#62). Short-circuits when traceSpec is
     empty (generative workload) or when the target TraceV2 is already cached on
-    the PVC. Otherwise runs the corpus->TraceV2 chain: download corpus parquet
-    shards from the public HF dataset (if absent) -> build OTel JSONL (inline
-    port of build_otel_corpus.py: usable-span + min_rounds filter, deterministic
-    SHA1 train/test split; no branching filter, see #63) -> blis convert otel.
-    Every field the steps need arrives as a SEPARATE SCALAR param (traceSource,
-    traceShards, traceMinRounds, traceSplit, traceContextGrowth) so no
-    in-container YAML parsing of the compact traceSpec is required. One task,
+    the PVC. Otherwise runs the corpus->TraceV2 chain: DISCOVER and download the
+    corpus parquet files from the HF dataset via huggingface_hub (layout-agnostic
+    — both sharded-split and split-as-directory work; #67) into a corpus dir
+    keyed by <repo>@<resolved-sha> so two datasets or revisions never share a
+    cache -> build OTel JSONL (inline port of build_otel_corpus.py: usable-span +
+    min_rounds filter, deterministic SHA1 train/test split; no branching filter,
+    see #63; streamed with column projection so peak memory is bounded by batch
+    size rather than shard size) -> blis convert otel. Every field the steps need
+    arrives as a SEPARATE SCALAR param (traceSource, traceRevision, traceShards,
+    traceMinRounds, traceSplit, traceContextGrowth) so no in-container YAML
+    parsing of the compact traceSpec is required. One task,
     guarded steps; every step no-ops when the guard marker is present, so a
     generative run's pod starts and exits in seconds.
 
@@ -228,13 +232,26 @@ spec:
         export DEDUP_BY_CONVERSATION="$(params.traceDedupByConversation)"
         export SHUFFLE_SEED="$(params.traceShuffleSeed)"
         python3 - <<'PYEOF'
-        import glob, hashlib, json, os, random, sys
+        import glob, hashlib, json, os, random, resource, sys
         import pyarrow.parquet as pq
 
-        CORPUS  = "/workspace/data/corpus"
+        # The corpus dir is resolved by download-corpus (keyed <repo>@<sha>) and
+        # handed over via this marker — do NOT rebuild the path here, or the two
+        # steps can disagree about which dataset/revision is being converted.
+        try:
+            with open("/workspace/corpus_dir") as _fh:
+                CORPUS = _fh.read().strip()
+        except OSError as exc:
+            sys.exit("build-otel: cannot read /workspace/corpus_dir (%s) — "
+                     "download-corpus must run first" % exc)
+        if not CORPUS:
+            sys.exit("build-otel: /workspace/corpus_dir is empty")
         OUT_DIR = "/workspace/data/otel"
         OUT     = os.path.join(OUT_DIR, "corpus.jsonl")
         TEST_PCT = 30  # campaign convention (build_otel_corpus.py --test-pct default)
+        # Batch size for the streaming read. Small because a single v2 row can
+        # decode to ~1.5 MB; 32 keeps a batch well under 50 MB.
+        BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 32)
 
         min_rounds = int(os.environ.get("MIN_ROUNDS") or 2)
         split = (os.environ.get("SPLIT") or "test").lower()
@@ -261,7 +278,18 @@ spec:
             return h < TEST_PCT  # "test" (default)
 
         os.makedirs(OUT_DIR, exist_ok=True)
-        files = sorted(glob.glob(os.path.join(CORPUS, "*.parquet")))
+        # RECURSIVE: hf_hub_download preserves repo structure, so a
+        # split-as-directory dataset lands at <CORPUS>/data/train/0000.parquet.
+        # A non-recursive glob finds nothing there and the step would "succeed"
+        # on an empty corpus. huggingface_hub keeps its own bookkeeping under
+        # <CORPUS>/.cache, so exclude that rather than treat it as corpus data.
+        files = sorted(
+            f for f in glob.glob(os.path.join(CORPUS, "**", "*.parquet"),
+                                 recursive=True)
+            if "/.cache/" not in f
+        )
+        if not files:
+            sys.exit("build-otel: no .parquet files under %s" % CORPUS)
         scanned = kept = dropped = 0
         # Collect selected sessions as (session_id, rec_spans). We do NOT write in
         # file order: the parquet is sorted by session_id, so a conversation's
@@ -269,7 +297,15 @@ spec:
         # only a few conversations. We dedup/shuffle below before writing.
         records = []
         for f in files:
-            for r in pq.read_table(f).to_pylist():
+            # Stream in batches with column projection. read_table().to_pylist()
+            # materialized an ENTIRE shard as Python objects — fine at v1's
+            # ~71 MB/shard, fatal at v2's ~1.6 GB/shard. The projection also
+            # drops v2's 18 unused top-level columns, notably the large
+            # gen_ai.{input,output}.messages payloads.
+            pf = pq.ParquetFile(f)
+            for batch in pf.iter_batches(batch_size=BATCH_SIZE,
+                                         columns=["session_id", "spans"]):
+              for r in batch.to_pylist():
                 scanned += 1
                 sid = r["session_id"]
                 spans = usable_spans(list(r["spans"]))
@@ -329,6 +365,13 @@ spec:
               % (scanned, min_rounds, kept, min_rounds, dropped, split, selected,
                  conversations, dedup, len(records), os.environ.get("SHUFFLE_SEED") or 42))
         print("build-otel: wrote %s" % OUT)
+        # ru_maxrss is kibibytes on Linux (where this step runs) and bytes on
+        # macOS. Reported so #67's bounded-memory criterion can be CHECKED from
+        # the step log; no resources.limits is imposed here, since guessing a
+        # limit would OOMKill legitimate runs rather than reveal anything.
+        print("build-otel: peak_rss_mb=%.1f files=%d batch_size=%d"
+              % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+                 len(files), BATCH_SIZE))
         if not records:
             sys.exit("build-otel: no sessions selected for split %r — nothing to convert" % split)
         PYEOF
