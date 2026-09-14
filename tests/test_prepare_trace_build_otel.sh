@@ -48,8 +48,26 @@ echo "${STEP}" | grep -q 'iter_batches' \
   || fail "build-otel does not use iter_batches"
 
 echo "${STEP}" | grep -q 'columns=' \
-  && pass "build-otel projects columns (drops v2's 18 unused ones)" \
+  && pass "build-otel projects columns" \
   || fail "build-otel does not project columns"
+
+# Projection MUST be by parquet LEAF path. Selecting the top-level "spans"
+# column looks like a projection but still pulls every nested payload
+# (gen_ai.input.messages et al. live inside spans[].attributes): 3069 MB vs
+# 63 MB peak on the largest real Exgentic v2 shard, for identical output.
+echo "${STEP_CODE}" | grep -q 'spans.list.element.attributes.gen_ai.usage.input_tokens' \
+  && pass "projection selects nested leaf columns" \
+  || fail "projection is not by leaf path — nested payloads would still be read"
+
+echo "${STEP_CODE}" | grep -q 'columns=\["session_id", "spans"\]' \
+  && fail "projection selects the whole spans struct (pulls every nested payload)" \
+  || pass "projection does not select the whole spans struct"
+
+# A silent widening of the selection is invisible in the output, so the step
+# guards against it at runtime.
+echo "${STEP_CODE}" | grep -q '_PAYLOAD_KEYS' \
+  && pass "step guards at runtime against the projection silently widening" \
+  || fail "no runtime guard that the leaf projection took effect"
 
 echo "${STEP}" | grep -q 'corpus_dir' \
   && pass "build-otel reads the corpus dir from the marker" \
@@ -114,21 +132,35 @@ rel = ("data/train-00000-of-00001.parquet" if layout == "flat"
 dest = os.path.join(corpus, rel)
 os.makedirs(os.path.dirname(dest), exist_ok=True)
 
+# Mirrors the REAL v2 schema in the one respect that matters for memory: the
+# bulky payloads live NESTED inside spans[].attributes, not at top level. A
+# fixture that put them at top level would be satisfied by projecting the
+# "spans" column wholesale — which on real data still drags every payload in
+# (3069 MB vs 63 MB peak on the largest Exgentic v2 shard). Keeping them nested
+# is what makes the leaf-projection assertion below meaningful.
 attrs = pa.struct([
     ("gen_ai.request.model", pa.string()),
     ("gen_ai.usage.input_tokens", pa.int64()),
     ("gen_ai.usage.output_tokens", pa.int64()),
+    ("gen_ai.input.messages", pa.string()),      # bulky, must be projected out
+    ("gen_ai.output.messages", pa.string()),     # bulky, must be projected out
+    ("gen_ai.system_instructions", pa.string()),
+    ("gen_ai.tool.definitions", pa.string()),
 ])
 span = pa.struct([
     ("span_id", pa.string()), ("name", pa.string()),
     ("start_time", pa.string()),
+    ("end_time", pa.string()),                   # unused leaf, must not be read
     ("status", pa.struct([("code", pa.int64())])),
     ("attributes", attrs),
 ])
 schema = pa.schema([
     ("session_id", pa.string()), ("spans", pa.list_(span)),
-    ("unused_blob", pa.string()),   # stands in for v2's 18 unused columns
+    ("unused_blob", pa.string()),   # stands in for v2's 18 unused top-level cols
 ])
+
+
+BLOB = "p" * 20000   # per-span payload; dwarfs the fields actually read
 
 
 def mk(sid, n, tokens=(10, 5)):
@@ -137,11 +169,16 @@ def mk(sid, n, tokens=(10, 5)):
         "spans": [{
             "span_id": "s%d" % i, "name": "chat",
             "start_time": "2026-01-01T00:00:%02dZ" % i,
+            "end_time": "2026-01-01T00:01:%02dZ" % i,
             "status": {"code": 1},
             "attributes": {
                 "gen_ai.request.model": "m",
                 "gen_ai.usage.input_tokens": tokens[0],
                 "gen_ai.usage.output_tokens": tokens[1],
+                "gen_ai.input.messages": BLOB,
+                "gen_ai.output.messages": BLOB,
+                "gen_ai.system_instructions": BLOB,
+                "gen_ai.tool.definitions": BLOB,
             },
         } for i in range(n)],
         "unused_blob": "x" * 64,
@@ -196,9 +233,18 @@ if [ -f "${TMP}/jsonl_flat" ] && [ -f "${TMP}/jsonl_nested" ]; then
 fi
 
 if [ -f "${TMP}/out_nested.txt" ]; then
-  grep -q 'peak_rss_mb=' "${TMP}/out_nested.txt" \
-    && pass "build-otel logs peak RSS for the run" \
-    || fail "build-otel did not log peak RSS"
+  # Assert the VALUE is plausible, not merely that the label is present.
+  # ru_maxrss is KiB on Linux but BYTES on macOS; an unnormalized divisor
+  # reports a 1024x-inflated figure, and a presence-only check let exactly
+  # that through. This tiny corpus cannot legitimately exceed ~2 GB.
+  RSS_MB="$(sed -n 's/.*peak_rss_mb=\([0-9.]*\).*/\1/p' "${TMP}/out_nested.txt" | head -1)"
+  if [ -z "${RSS_MB}" ]; then
+    fail "build-otel did not log peak RSS"
+  else
+    python3 -c "import sys; v=float('${RSS_MB}'); sys.exit(0 if 0 < v < 2048 else 1)" \
+      && pass "build-otel logs a plausible peak RSS (${RSS_MB} MB)" \
+      || fail "peak_rss_mb=${RSS_MB} is not a plausible MB value — check the ru_maxrss unit normalization"
+  fi
 fi
 
 # An absent marker must fail loudly: build-otel converting a stale hardcoded

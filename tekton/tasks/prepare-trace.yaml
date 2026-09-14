@@ -226,7 +226,11 @@ spec:
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        pip install --quiet pyarrow
+        # Pinned floor: the streaming read projects nested parquet LEAF columns
+        # (spans.list.element.<...>), which is what keeps peak memory bounded on
+        # a v2-sized shard. Unpinned, a pyarrow that rejects or ignores leaf
+        # paths would either fail or silently regress memory ~50x.
+        pip install --quiet 'pyarrow>=14'
         export MIN_ROUNDS="$(params.traceMinRounds)"
         export SPLIT="$(params.traceSplit)"
         export DEDUP_BY_CONVERSATION="$(params.traceDedupByConversation)"
@@ -252,6 +256,34 @@ spec:
         # Batch size for the streaming read. Small because a single v2 row can
         # decode to ~1.5 MB; 32 keeps a batch well under 50 MB.
         BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 32)
+        # Project the exact parquet LEAF columns this program reads. Projecting
+        # the top-level "spans" column is NOT enough: the bulky payloads
+        # (gen_ai.input.messages, gen_ai.output.messages, system_instructions,
+        # tool.definitions, events) live INSIDE spans[].attributes, so selecting
+        # "spans" drags every one of them in. Measured on the largest real
+        # Exgentic v2 shard: 3069 MB peak with ["session_id", "spans"] vs 63 MB
+        # with these leaves, for byte-identical output.
+        # status.code is included even though the emitted status is hardcoded
+        # below, so the projected span keeps the shape the rest of this program
+        # documents. A leaf named here but absent from the file makes pyarrow
+        # raise, which is the loud failure we want.
+        LEAF_COLUMNS = [
+            "session_id",
+            "spans.list.element.span_id",
+            "spans.list.element.name",
+            "spans.list.element.start_time",
+            "spans.list.element.status.code",
+            "spans.list.element.attributes.gen_ai.request.model",
+            "spans.list.element.attributes.gen_ai.usage.input_tokens",
+            "spans.list.element.attributes.gen_ai.usage.output_tokens",
+        ]
+        # Payload keys that must NOT survive the projection. Checked once on the
+        # first span seen: if a future pyarrow silently widens the selection back
+        # to the whole struct, peak memory regresses ~50x, and that is invisible
+        # in the output. Fail loudly instead.
+        _PAYLOAD_KEYS = ("gen_ai.input.messages", "gen_ai.output.messages",
+                         "gen_ai.system_instructions", "gen_ai.tool.definitions")
+        _projection_checked = False
 
         min_rounds = int(os.environ.get("MIN_ROUNDS") or 2)
         split = (os.environ.get("SPLIT") or "test").lower()
@@ -297,18 +329,26 @@ spec:
         # only a few conversations. We dedup/shuffle below before writing.
         records = []
         for f in files:
-            # Stream in batches with column projection. read_table().to_pylist()
-            # materialized an ENTIRE shard as Python objects — fine at v1's
-            # ~71 MB/shard, fatal at v2's ~1.6 GB/shard. The projection also
-            # drops v2's 18 unused top-level columns, notably the large
-            # gen_ai.{input,output}.messages payloads.
+            # Stream in batches with LEAF column projection (see LEAF_COLUMNS).
+            # read_table().to_pylist() materialized an ENTIRE shard as Python
+            # objects — fine at v1's ~71 MB/shard, fatal at v2's ~1.6 GB/shard.
             pf = pq.ParquetFile(f)
             for batch in pf.iter_batches(batch_size=BATCH_SIZE,
-                                         columns=["session_id", "spans"]):
+                                         columns=LEAF_COLUMNS):
               for r in batch.to_pylist():
                 scanned += 1
                 sid = r["session_id"]
-                spans = usable_spans(list(r["spans"]))
+                raw_spans = list(r["spans"] or [])
+                if not _projection_checked and raw_spans:
+                    _attrs = raw_spans[0].get("attributes") or {}
+                    _leaked = [k for k in _PAYLOAD_KEYS if k in _attrs]
+                    if _leaked:
+                        sys.exit("build-otel: leaf projection did not take effect "
+                                 "— %s still present in spans[].attributes; peak "
+                                 "memory would regress ~50x. Check the pyarrow "
+                                 "version and LEAF_COLUMNS." % ", ".join(_leaked))
+                    _projection_checked = True
+                spans = usable_spans(raw_spans)
                 if len(spans) < min_rounds:
                     dropped += 1
                     continue
@@ -365,13 +405,16 @@ spec:
               % (scanned, min_rounds, kept, min_rounds, dropped, split, selected,
                  conversations, dedup, len(records), os.environ.get("SHUFFLE_SEED") or 42))
         print("build-otel: wrote %s" % OUT)
-        # ru_maxrss is kibibytes on Linux (where this step runs) and bytes on
-        # macOS. Reported so #67's bounded-memory criterion can be CHECKED from
-        # the step log; no resources.limits is imposed here, since guessing a
-        # limit would OOMKill legitimate runs rather than reveal anything.
+        # Reported so #67's bounded-memory criterion can be CHECKED from the step
+        # log; no resources.limits is imposed here, since guessing a limit would
+        # OOMKill legitimate runs rather than reveal anything.
+        # ru_maxrss units differ by platform: KIBIBYTES on Linux (where this step
+        # runs) but BYTES on macOS. Normalize, so the number is also correct when
+        # this program is run locally — e.g. by tests/test_prepare_trace_*.sh.
+        _rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        _rss_mb = _rss / 1048576.0 if sys.platform == "darwin" else _rss / 1024.0
         print("build-otel: peak_rss_mb=%.1f files=%d batch_size=%d"
-              % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
-                 len(files), BATCH_SIZE))
+              % (_rss_mb, len(files), BATCH_SIZE))
         if not records:
             sys.exit("build-otel: no sessions selected for split %r — nothing to convert" % split)
         PYEOF
