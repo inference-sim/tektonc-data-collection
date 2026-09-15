@@ -143,6 +143,10 @@ spec:
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
+        # Floor is for local_dir= writing REAL files rather than cache symlinks
+        # (huggingface_hub 0.23+); 0.34 is simply a recent, well-tested release.
+        # Nothing here shells out to the `hf` CLI — the step uses the Python API
+        # (HfApi.dataset_info / list_repo_files / hf_hub_download) throughout.
         pip install --quiet 'huggingface_hub>=0.34'
         export REPO="$(params.traceSource)"
         export REV="$(params.traceRevision)"

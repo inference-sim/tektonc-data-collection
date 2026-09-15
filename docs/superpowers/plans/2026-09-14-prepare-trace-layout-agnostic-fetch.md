@@ -18,7 +18,7 @@
 - **`traceRevision` is added but DORMANT.** `sim2real`'s `pipeline/lib/tekton.py` does not emit it, so it is always `""` (= repo default branch) until a paired sim2real edit lands. The PR body must say so explicitly so revision pinning is not read as delivered.
 - **No backward compatibility is owed for corpora, results, or the `trace:` descriptor** (no trace run has ever executed with sim2real, so nothing persisted depends on current behavior). Compatibility IS owed for the Pipeline↔Task param contract, per the first constraint.
 - **Python version floor:** `python:3.11-slim` for both Python-bearing steps.
-- **Pin the new dependency:** `huggingface_hub>=0.34` — the `hf` CLI entrypoint and the `HfApi.dataset_info(...).sha` field used here require it; older releases expose `huggingface-cli` instead. Install via `pip install --quiet 'huggingface_hub>=0.34'`.
+- **Pin the new dependency:** `huggingface_hub>=0.34`. The real requirement is `local_dir=` writing real files rather than cache symlinks (0.23+); 0.34 is just a recent, well-tested floor. The step never shells out to the `hf` CLI — it uses the Python API (`HfApi.dataset_info` / `list_repo_files` / `hf_hub_download`) throughout. Install via `pip install --quiet 'huggingface_hub>=0.34'`.
 - **Tests must run with no cluster and no network.** Behavioral tests inject a fake `huggingface_hub` module via `PYTHONPATH`. Tests requiring `pyarrow` print `SKIP` and do not fail when it is absent.
 
 ---
@@ -160,7 +160,7 @@ case "${IMAGE}" in
 esac
 
 echo "${STEP}" | grep -q 'huggingface_hub>=0.34' \
-  && pass "huggingface_hub is pinned >=0.34 (the 'hf' entrypoint floor)" \
+  && pass "huggingface_hub is pinned (local_dir real-file semantics)" \
   || fail "huggingface_hub is not pinned to >=0.34"
 
 echo "${STEP}" | grep -q 'params.traceRevision' \

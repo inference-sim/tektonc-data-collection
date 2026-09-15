@@ -56,8 +56,10 @@ case "${IMAGE}" in
   *) fail "download-corpus image is '${IMAGE}'; needs python+pip to run hf download" ;;
 esac
 
+# Pinned because local_dir= must write real files, not cache symlinks. The step
+# uses the Python API only, so this is NOT an `hf` CLI floor.
 echo "${STEP}" | grep -q 'huggingface_hub>=0.34' \
-  && pass "huggingface_hub is pinned >=0.34 (the 'hf' entrypoint floor)" \
+  && pass "huggingface_hub is pinned (local_dir real-file semantics)" \
   || fail "huggingface_hub is not pinned to >=0.34"
 
 echo "${STEP}" | grep -q 'params.traceRevision' \
