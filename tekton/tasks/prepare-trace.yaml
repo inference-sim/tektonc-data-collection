@@ -30,7 +30,10 @@ spec:
     it to the converter, which the convert step does. This task cannot detect the
     difference between an operator asking for a shuffle and sim2real emitting its
     default, since both arrive as a non-empty param — so the rejection has to
-    live at assemble time (sim2real #901's "applied or rejected" invariant). Not
+    live at assemble time — sim2real #901 states the "applied or rejected"
+    invariant, but the rule itself belongs to sim2real #905, which is where
+    traceFormat becomes legal and therefore where a weka-conditional rejection
+    first becomes reachable at all. Not
     fixable here: it needs either weka-side flags in blis or a filter step of its
     own, both outside #68.
 
@@ -133,12 +136,16 @@ spec:
         weka-jsonl; `blis convert weka` has no split flag and does no internal
         equivalent, so on that path the WHOLE corpus is used regardless of this
         value. sim2real must reject the field for weka-jsonl rather than accept
-        it silently (#901's invariant) — see the header note.
+        it silently — #901's invariant, enforced in #905. See the header note.
     - name: traceContextGrowth
       type: string
       default: ""
       description: >-
-        context_growth mode passed to `blis convert otel` (default accumulate).
+        Prefix model passed to the converter as --context-growth: "accumulate"
+        (default) or "independent". Applies on BOTH paths — `convert otel` and
+        `convert weka` each take the flag, with the same default — so unlike
+        traceSplit/traceDedupByConversation/traceShuffleSeed this field does not
+        go inert for weka. The convert step passes it explicitly either way.
     - name: traceDedupByConversation
       type: string
       default: "1"
@@ -588,17 +595,27 @@ spec:
               exit 1; }
             CORPUS="$(cat /workspace/corpus_dir)"
             [ -n "${CORPUS}" ] || { echo "ERROR: /workspace/corpus_dir is empty" >&2; exit 1; }
-            # Checked separately from the count below: plain POSIX sh has no
-            # pipefail, so `find ... | wc -l` exits 0 even when find itself
-            # failed. A bad marker path or an unmounted PVC would otherwise
-            # count zero files and report "no .jsonl found", pointing the
-            # operator at the dataset instead of at the real fault.
+            # A bad marker path or an unmounted PVC gets its own message rather
+            # than being reported as "no .jsonl found", which would blame the
+            # dataset for a wiring fault.
             [ -d "${CORPUS}" ] || {
               echo "ERROR: corpus dir ${CORPUS} does not exist or is not a directory" >&2
               exit 1; }
+            # find's status is captured DIRECTLY, not through a pipe: plain POSIX
+            # sh has no pipefail, so `find ... | wc -l` yields tr's status (always
+            # 0) and never find's. A -d check alone is not enough — find can fail
+            # PARTWAY through (an unreadable subdirectory under the keyed corpus
+            # dir) while still printing what it reached, so a partial listing that
+            # happens to total exactly one file would otherwise sail into the
+            # converter with no indication anything went wrong.
+            FOUND="$(find "${CORPUS}" -name '*.jsonl' -type f)" || {
+              echo "ERROR: find failed while scanning ${CORPUS} for .jsonl files" >&2
+              exit 1; }
             # Discover the JSONL rather than assume a name; the file sits at
             # whatever path the dataset uses inside the keyed corpus dir.
-            COUNT="$(find "${CORPUS}" -name '*.jsonl' -type f | wc -l | tr -d ' ')"
+            # grep -c . counts non-empty lines, so an empty FOUND counts 0 rather
+            # than the 1 that `printf | wc -l` would report.
+            COUNT="$(printf '%s\n' "${FOUND}" | grep -c . || true)"
             if [ "${COUNT}" -eq 0 ]; then
               echo "ERROR: no .jsonl found under ${CORPUS}" >&2
               exit 1
@@ -607,10 +624,12 @@ spec:
               # JSONL (its directory mode is *.json, not *.jsonl), so any choice
               # here would silently convert a subset of the corpus.
               echo "ERROR: ${COUNT} .jsonl files under ${CORPUS}; expected exactly one" >&2
-              find "${CORPUS}" -name '*.jsonl' -type f >&2
+              printf '%s\n' "${FOUND}" >&2
               exit 1
             fi
-            INPUT="$(find "${CORPUS}" -name '*.jsonl' -type f)"
+            # COUNT is exactly 1 here, so FOUND is a single line. Reused rather
+            # than re-running find, which would be two more unguarded calls.
+            INPUT="${FOUND}"
             # build-otel is skipped on this path, so it is not enforcing
             # min_rounds — thread it to the converter or the descriptor field
             # goes inert for weka while still being part of the cache key.

@@ -172,6 +172,38 @@ else
          cat "${TMP}/guard.out"; }
 fi
 
+# The format check must sit AHEAD of the cache probe. The two branches are
+# otherwise never combined: every case above runs with no cached pair present,
+# so a guard that validated the format only after the cache check would pass all
+# of them while letting a typo be masked by a cache hit — which is the specific
+# thing the ordering exists to prevent.
+mkdir -p "${TMP}/workspace/data/traces"
+: > "${TMP}/workspace/data/traces/x.yaml"
+: > "${TMP}/workspace/data/traces/x.csv"
+if run_guard "weka-parquet"; then
+  fail "a cache hit masked the unknown format — format check runs too late"
+else
+  grep -q "unknown traceFormat" "${TMP}/guard.out" \
+    && pass "unknown format still rejected when the corpus is already cached" \
+    || { fail "cached+unknown-format failed for the wrong reason"
+         cat "${TMP}/guard.out"; }
+fi
+# A cache hit with a VALID format must still short-circuit the task, so the
+# assertion above cannot be passing because the cache probe stopped working.
+if run_guard "otel-parquet"; then
+  [ -f "${TMP}/workspace/skip" ] \
+    && pass "cache hit with a valid format still skips the task" \
+    || fail "cache probe stopped short-circuiting"
+else
+  fail "guard errored on a cache hit with a valid format"; cat "${TMP}/guard.out"
+fi
+rm -f "${TMP}/workspace/data/traces/x.yaml" "${TMP}/workspace/data/traces/x.csv"
+# The cache-hit case above left /workspace/skip behind, which every later step
+# honours by design. Clear it so Parts 2b-2d exercise real code paths — a leaked
+# skip marker would make them no-op, and a no-op step can pass an assertion for
+# the wrong reason.
+rm -f "${TMP}/workspace/skip"
+
 # ────────────────────────────────────────────────────────────
 # Part 2b — behavioral: format-driven discovery in download-corpus
 # ────────────────────────────────────────────────────────────
@@ -295,6 +327,10 @@ render "${CONV}" > "${TMP}/convert.sh"
 # run_conv <format> <maxThinkTime> <minRounds> -> argv in ${TMP}/argv.log
 run_conv() {
   : > "${TMP}/argv.log"
+  # Belt-and-braces: a leaked /workspace/skip from an earlier part would make the
+  # step exit before any dispatch, and every argv assertion below would then be
+  # checking an empty log rather than a real invocation.
+  rm -f "${TMP}/workspace/skip"
   rm -f "${TMP}/workspace/data/traces/out.yaml" "${TMP}/workspace/data/traces/out.csv"
   ARGV_LOG="${TMP}/argv.log" \
   P_traceFormat="$1" P_traceMaxThinkTime="$2" P_traceMinRounds="$3" \
@@ -384,6 +420,51 @@ else
 fi
 rm -f "${CORPUS}/extra.jsonl"
 
+# find's own exit status must abort the step. Plain POSIX sh has no pipefail, so
+# the earlier `find | wc -l` form returned tr's status and a find that failed
+# PARTWAY (unreadable subdirectory) yielded a partial listing that looked like a
+# clean result. A `[ -d ]` check does not cover it — the directory exists in this
+# very scenario. Exercised with a fake find that prints one path and exits 1,
+# which is the shape of a partial-traversal failure; verified by mutation that
+# removing the `|| exit` makes this case pass wrongly.
+printf '%s' "${CORPUS}" > "${TMP}/workspace/corpus_dir"
+mkdir -p "${TMP}/bin"
+cat > "${TMP}/bin/find" <<'SH'
+#!/bin/sh
+# One "discovered" file, then a traversal failure.
+echo "${CORPUS_STUB}/partial.jsonl"
+echo "find: permission denied" >&2
+exit 1
+SH
+chmod +x "${TMP}/bin/find"
+# Setup must be verified, not assumed: if this fake is missing the PATH override
+# is inert, the REAL find runs, it succeeds, and the assertion below reports a
+# code defect that does not exist. (That is exactly what happened while writing
+# this — the bin dir did not exist yet, the redirect failed silently, and the
+# case looked like a genuine failure to abort.)
+[ -x "${TMP}/bin/find" ] || { fail "could not install the fake find"; }
+: > "${TMP}/argv.log"
+rm -f "${TMP}/workspace/skip"
+if ARGV_LOG="${TMP}/argv.log" PATH="${TMP}/bin:${PATH}" CORPUS_STUB="${CORPUS}" \
+   P_traceFormat="weka-jsonl" P_traceMaxThinkTime="" P_traceMinRounds="2" \
+   P_traceContextGrowth="accumulate" P_tracePath="traces/out" \
+     sh "${TMP}/convert.sh" > "${TMP}/conv.out" 2>&1
+then
+  fail "a failing find was treated as a clean single-file result"
+else
+  if grep -q 'find failed while scanning' "${TMP}/conv.out"; then
+    if [ -s "${TMP}/argv.log" ]; then
+      fail "aborted with the right message but still invoked blis"
+    else
+      pass "a failing find aborts before the converter, naming the real fault"
+    fi
+  else
+    fail "failing find did not produce the find-specific message"
+    cat "${TMP}/conv.out"
+  fi
+fi
+rm -f "${TMP}/bin/find"
+
 # A missing marker is a wiring bug, not something to paper over.
 rm -f "${TMP}/workspace/corpus_dir"
 if run_conv "weka-jsonl" "" "2"; then
@@ -425,7 +506,7 @@ render "${BO}" > "${TMP}/build_otel.sh"
 # run_bo <marker-present: yes|no> -> exit status; reached commands in ${TMP}/pip.log
 run_bo() {
   : > "${TMP}/pip.log"
-  rm -f "${TMP}/workspace/skip_build_otel"
+  rm -f "${TMP}/workspace/skip" "${TMP}/workspace/skip_build_otel"
   [ "$1" = "yes" ] && touch "${TMP}/workspace/skip_build_otel"
   PIP_LOG="${TMP}/pip.log" PATH="${TMP}/bin:${PATH}" \
   P_traceMinRounds="2" P_traceSplit="test" P_traceDedupByConversation="1" \
