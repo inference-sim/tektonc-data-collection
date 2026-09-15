@@ -618,8 +618,9 @@ spec:
               echo "ERROR: corpus dir ${CORPUS} does not exist or is not a directory" >&2
               exit 1; }
             # find's status is captured DIRECTLY, not through a pipe: plain POSIX
-            # sh has no pipefail, so `find ... | wc -l` yields tr's status (always
-            # 0) and never find's. A -d check alone is not enough — find can fail
+            # sh has no pipefail, so a pipeline yields only its LAST command's
+            # status — `wc` here, `tr` in the original `| wc -l | tr -d ' '` form,
+            # either way never find's. A -d check alone is not enough — find can fail
             # PARTWAY through (an unreadable subdirectory under the keyed corpus
             # dir) while still printing what it reached, so a partial listing that
             # happens to total exactly one file would otherwise sail into the

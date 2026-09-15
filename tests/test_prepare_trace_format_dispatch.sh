@@ -451,7 +451,8 @@ fi
 rm -f "${CORPUS}/extra.jsonl"
 
 # find's own exit status must abort the step. Plain POSIX sh has no pipefail, so
-# the earlier `find | wc -l` form returned tr's status and a find that failed
+# the earlier `find | wc -l | tr -d ' '` form returned only its last command's
+# status, never find's, and a find that failed
 # PARTWAY (unreadable subdirectory) yielded a partial listing that looked like a
 # clean result. A `[ -d ]` check does not cover it — the directory exists in this
 # very scenario. Exercised with a fake find that prints one path and exits 1,
