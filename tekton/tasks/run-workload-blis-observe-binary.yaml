@@ -36,10 +36,12 @@ spec:
         Two paths below are owned by this task and are part of the contract —
         the renderer must match them:
           * the `data` workspace mounts at /workspace/data, so every
-            data-PVC-relative path carries that prefix: the TraceV2 outputs
-            (--trace-header, --trace-data, --saturation-report) under
-            /workspace/data/<resultsDir>/, and the corpus pair
-            (--corpus-header, --corpus-data).
+            data-PVC-relative path carries that prefix. The TraceV2 outputs
+            (--trace-header, --trace-data, --saturation-report) sit under
+            /workspace/data/<resultsDir>/. The corpus pair (--corpus-header,
+            --corpus-data) takes the same /workspace/data prefix but is NOT
+            under <resultsDir> — it is keyed by the path prepare-trace wrote
+            and is shared across cells. There is no corpus/resultsDir coupling.
           * write-workload-spec writes the spec to /workspace/workload.yaml, so
             a generative cell renders --workload-spec /workspace/workload.yaml.
 
@@ -55,7 +57,14 @@ spec:
         delegated, so it holds for every producer.
 
         Corpus-mode and spec-mode flags are mutually exclusive; the renderer
-        enforces that — this task does not check it.
+        enforces that, and this task does not re-check it. The delegation is
+        backstopped by blis itself: validateObserveCorpusFlags
+        (cmd/observe_corpus.go) rejects the conflict before any workload is
+        built, Fatalf-ing with "--workload-spec is invalid with
+        --concurrent-sessions (spec-mode vs corpus-mode)". So a renderer
+        regression that emitted both fails loudly rather than silently
+        replaying the wrong workload — verified against the pinned revision,
+        not assumed.
     - name: workloadSpec
       type: string
       description: >-
@@ -107,6 +116,18 @@ spec:
         # emitted, and their mutual exclusion is enforced there rather than by a
         # shell conditional here.
         OBSERVE_ARGS="$(params.observeArgs)"
+        # Tekton's "required" means supplied, not non-empty, so both "" and a
+        # whitespace-only value still arrive here. blis would fatal on its own,
+        # but it would name one of its own flags rather than the actual cause,
+        # which is that the renderer emitted no workload source. Strip whitespace
+        # before testing: a bare [ -n ] accepts "   ".
+        # Written as `|| { ... }` rather than if/else deliberately -- the branch
+        # this task no longer has was an if/else, and the test asserts that none
+        # was reintroduced.
+        [ -n "$(printf '%s' "${OBSERVE_ARGS}" | tr -d '[:space:]')" ] || {
+          echo "run-observe: observeArgs is empty - renderer emitted no workload source" >&2
+          exit 1
+        }
         echo "run-observe: observe ${OBSERVE_ARGS} --server-url $(params.endpoint)"
         # An unquoted expansion globs as well as splits, so a rendered value
         # containing * ? or [ would silently become a different argv -- and only

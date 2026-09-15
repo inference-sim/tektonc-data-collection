@@ -9,8 +9,8 @@
 #     point of this file: it pins word boundaries, which is the whole contract.
 #     A trace-shaped and a synthetic-shaped observeArgs go through the SAME code
 #     path, which is what "no kind branch" means operationally.
-#   - Part 3: AC-4 — workloadSpec empty still writes /workspace/workload.yaml
-#     empty, and run-observe never reads it.
+#   - Part 3: this issue's AC-4 — workloadSpec empty still writes
+#     /workspace/workload.yaml empty, and run-observe never reads it.
 #
 # Not covered, by design: a `"` or `$` inside observeArgs. Tekton substitutes
 # params textually, so such a value would break out of the OBSERVE_ARGS
@@ -81,14 +81,29 @@ for P in model maxConcurrency timeout warmupRequests prewarmDuration \
   fi
 done
 
-# The branch itself. Corpus/spec selection is the renderer's job now.
-echo "${RUN}" | grep -q 'if ' \
-  && fail "run-observe still has a conditional — the kind branch should be gone" \
-  || pass "run-observe has no conditional"
+# Everything below asserts what the step DOES, so strip comment lines first.
+# Grepping the raw script would match a flag merely named in prose -- the same
+# trap test_prepare_trace_format_dispatch.sh calls out ("anchor on the COMMAND,
+# not on prose"), and one this file hit once the guard's comment mentioned blis
+# flags by name.
+RUN_CODE="$(printf '%s\n' "${RUN}" | grep -v '^[[:space:]]*#')"
+
+# The kind branch itself. Corpus/spec selection is the renderer's job now.
+# Asserted as the absence of if/else rather than of the word "if": the guard
+# above is a legitimate conditional, so a blanket "no if" check would either
+# fail on it or have to be weakened into meaninglessness. What must not come
+# back is a two-armed branch selecting a workload source, plus the WL_ARGS
+# accumulator it built into.
+echo "${RUN_CODE}" | grep -q '^[[:space:]]*else' \
+  && fail "run-observe has an else branch — the kind branch should be gone" \
+  || pass "run-observe has no else branch"
+echo "${RUN_CODE}" | grep -q 'WL_ARGS' \
+  && fail "run-observe still builds a WL_ARGS accumulator" \
+  || pass "run-observe has no WL_ARGS accumulator"
 
 for FLAG in --corpus-header --corpus-data --concurrent-sessions --workload-spec \
             --post-hoc-detector --max-concurrency; do
-  if echo "${RUN}" | grep -q -- "${FLAG}"; then
+  if echo "${RUN_CODE}" | grep -q -- "${FLAG}"; then
     fail "run-observe still builds ${FLAG} — should come in via observeArgs"
   else
     pass "run-observe does not build ${FLAG}"
@@ -101,13 +116,19 @@ echo "${RUN}" | grep -q -- '--server-url' \
   || fail "run-observe lost --server-url"
 
 # Unquoted expansion is load-bearing: quoting it would pass the whole argv as a
-# single argument and blis would reject it.
-echo "${RUN}" | grep -q '\${OBSERVE_ARGS}' \
-  && pass "run-observe expands OBSERVE_ARGS" \
-  || fail "run-observe never expands OBSERVE_ARGS"
-echo "${RUN}" | grep -q '"\${OBSERVE_ARGS}"' \
-  && fail "OBSERVE_ARGS is quoted — argv would be passed as one argument" \
-  || pass "OBSERVE_ARGS is unquoted (word-splitting preserved)"
+# single argument and blis would reject it. Scope the quoting check to the
+# INVOCATION line -- the emptiness guard quotes OBSERVE_ARGS on purpose (it wants
+# one word there), and a whole-script grep cannot tell the two uses apart.
+RUN_INVOKE="$(printf '%s\n' "${RUN_CODE}" | grep '^[[:space:]]*"\${BLIS}" observe')"
+[ -n "${RUN_INVOKE}" ] \
+  && pass "found the blis invocation line" \
+  || fail "cannot find the blis invocation line — later checks would be vacuous"
+echo "${RUN_INVOKE}" | grep -q '\${OBSERVE_ARGS}' \
+  && pass "the invocation expands OBSERVE_ARGS" \
+  || fail "the invocation never expands OBSERVE_ARGS"
+echo "${RUN_INVOKE}" | grep -q '"\${OBSERVE_ARGS}"' \
+  && fail "OBSERVE_ARGS is quoted at the invocation — argv would be one argument" \
+  || pass "OBSERVE_ARGS is unquoted at the invocation (word-splitting preserved)"
 
 # An unquoted expansion globs as well as splits. `set -f` must come BEFORE the
 # invocation, or a rendered * ? or [ matches files in the step's cwd instead of
@@ -171,14 +192,23 @@ assert_argv() {
 # --- 2a: a corpus-mode (trace) cell ---
 # NOTE ON --detectors: the run-observe step this diff replaces hardcoded
 # `--post-hoc-detector composite`, and the structural check above asserts that
-# spelling is gone. These fixtures deliberately say `--detectors` instead,
-# because --post-hoc-detector DOES NOT EXIST at the blis revision sim2real pins.
-# inference-sim renamed it in 18c2c926 (#1516) -- the flag is registered as
-# "detectors" (cmd/saturation.go) and put on observe by registerDetectorFlags
-# (cmd/observe_cmd.go); "composite" is still a valid detector name. sim2real's
-# pin bump (#904) moved past that rename, so the deleted line would have made
-# `blis observe` exit on `unknown flag`. The renderer (sim2real#900) emits
-# --detectors. Do not "restore" --post-hoc-detector here to match the old task.
+# spelling is gone. These fixtures deliberately say `--detectors` instead. Do
+# NOT "restore" --post-hoc-detector here to match the old task.
+#
+# Why, and how to re-check it -- none of this is verifiable from inside this
+# repo, so verify it rather than trusting this comment. In an inference-sim
+# checkout at the revision install-blis builds (sim2real passes it as
+# blis_git_commit; sim2real's inference-sim submodule pointer is the same SHA):
+#
+#     git grep -n "post-hoc" -- '*.go'      # no flag definition, only prose
+#     git grep -n '"detectors"' -- '*.go'   # cmd/saturation.go registers it
+#     git grep -n registerDetectorFlags     # cmd/observe_cmd.go puts it on observe
+#
+# At the SHA current when this test was written, --post-hoc-detector did not
+# exist and Cobra errors on unknown flags, so the deleted line would have made
+# `blis observe` exit before doing any work. If a future pin predates that
+# rename, the greps above will show it and this fixture is what needs updating.
+# The renderer (sim2real#900) is the component that chooses the spelling.
 TRACE_ARGS="--model Qwen/Qwen2.5-7B-Instruct --max-concurrency 10000 --timeout 1800 --prewarm-duration 60s --warmup-requests 50 --detectors composite --corpus-header /workspace/data/traces/abc123.yaml --corpus-data /workspace/data/traces/abc123.csv --concurrent-sessions 8 --total-sessions 64 --trace-header /workspace/data/${RESULTS}/trace_header.yaml --trace-data /workspace/data/${RESULTS}/trace_data.csv --saturation-report /workspace/data/${RESULTS}/saturation.json"
 
 cat > "${TMP}/want_trace.txt" <<EOF
@@ -220,8 +250,10 @@ else
   fail "corpus-mode run-observe exited non-zero"; cat "${TMP}/run.out"
 fi
 
-# Non-vacuousness: if the fake were never reached every diff above would be
-# comparing against an empty log and would "pass" only by accident.
+# Non-vacuousness. Note the diff above would already catch an unreached fake --
+# it compares against a NON-empty expected file, so an empty log fails loudly.
+# This guards the narrower case the diff cannot distinguish: a future edit that
+# makes the expected file empty too, leaving nothing actually asserted.
 [ -s "${TMP}/argv.log" ] \
   && pass "fake blis was actually invoked (assertions are not vacuous)" \
   || fail "fake blis never ran — check the harness"
@@ -263,7 +295,8 @@ else
 fi
 
 # --- 2c: --server-url is appended, and appended LAST ---
-# The renderer must not emit it (sim2real#900 AC-4); the task must always add it.
+# The renderer must not emit it (that is sim2real#900's own fourth criterion,
+# a different issue in a different repo); the task must always add it.
 TAIL="$(tail -2 "${TMP}/argv.log" | tr '\n' ' ')"
 case "${TAIL}" in
   "--server-url http://gw.ns.svc:8000/v1 ")
@@ -295,6 +328,31 @@ EOF
               "${TMP}/want_extra.txt"
 else
   fail "run-observe with a multi-word tail exited non-zero"; cat "${TMP}/run.out"
+fi
+
+# --- 2d2: an empty observeArgs fails in the task, naming the real cause ---
+# Tekton's "required" only means supplied, so "" still reaches the step. blis
+# would fatal on its own, but on a blis flag name rather than on the fact that
+# the renderer emitted nothing. Assert the task refuses first: non-zero, blis
+# never invoked, and the message names observeArgs.
+if run_observe ""; then
+  fail "empty observeArgs was accepted — the task should refuse before invoking blis"
+else
+  pass "empty observeArgs exits non-zero"
+  [ -s "${TMP}/argv.log" ] \
+    && fail "blis was invoked despite an empty observeArgs" \
+    || pass "blis was never invoked for an empty observeArgs"
+  grep -q 'observeArgs is empty' "${TMP}/run.out" \
+    && pass "the failure message names observeArgs as the cause" \
+    || { fail "failure message does not name observeArgs"; cat "${TMP}/run.out"; }
+fi
+
+# A whitespace-only value is the same defect wearing a disguise: [ -n ] alone
+# would accept it, so this pins that the guard is not merely a length check.
+if run_observe "   "; then
+  fail "whitespace-only observeArgs was accepted"
+else
+  pass "whitespace-only observeArgs exits non-zero"
 fi
 
 # --- 2e: a glob character reaches blis verbatim, not expanded ---
@@ -344,7 +402,8 @@ EXPANDED="$(cd "${GLOBDIR}" && sh -c 'A="--workload-spec spec_*.yaml"; set -- ${
   || fail "harness glob fixture does not expand (${EXPANDED} words) — test is vacuous"
 
 # ────────────────────────────────────────────────────────────
-# Part 3 — AC-4: empty workloadSpec still writes an (empty) workload.yaml
+# Part 3 — this issue's (tektonc#70) AC-4: empty workloadSpec still writes an
+# (empty) workload.yaml
 # ────────────────────────────────────────────────────────────
 # write-workload-spec's heredoc delimiter is quoted, so an ${P_*} env ref would
 # NOT expand inside it. Substitute textually instead — which is exactly what
