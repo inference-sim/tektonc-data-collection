@@ -8,13 +8,17 @@ spec:
     Prepare a recorded TraceV2 corpus on the data PVC for trace-input observe
     (inference-sim/tektonc-data-collection#62). Short-circuits when traceSpec is
     empty (generative workload) or when the target TraceV2 is already cached on
-    the PVC. Otherwise runs the corpus->TraceV2 chain: download corpus parquet
-    shards from the public HF dataset (if absent) -> build OTel JSONL (inline
-    port of build_otel_corpus.py: usable-span + min_rounds filter, deterministic
-    SHA1 train/test split; no branching filter, see #63) -> blis convert otel.
-    Every field the steps need arrives as a SEPARATE SCALAR param (traceSource,
-    traceShards, traceMinRounds, traceSplit, traceContextGrowth) so no
-    in-container YAML parsing of the compact traceSpec is required. One task,
+    the PVC. Otherwise runs the corpus->TraceV2 chain: DISCOVER and download the
+    corpus parquet files from the HF dataset via huggingface_hub (layout-agnostic
+    — both sharded-split and split-as-directory work; #67) into a corpus dir
+    keyed by <repo>@<resolved-sha> so two datasets or revisions never share a
+    cache -> build OTel JSONL (inline port of build_otel_corpus.py: usable-span +
+    min_rounds filter, deterministic SHA1 train/test split; no branching filter,
+    see #63; streamed with column projection so peak memory is bounded by batch
+    size rather than shard size) -> blis convert otel. Every field the steps need
+    arrives as a SEPARATE SCALAR param (traceSource, traceRevision, traceShards,
+    traceMinRounds, traceSplit, traceContextGrowth) so no in-container YAML
+    parsing of the compact traceSpec is required. One task,
     guarded steps; every step no-ops when the guard marker is present, so a
     generative run's pod starts and exits in seconds.
 
@@ -42,7 +46,27 @@ spec:
     - name: traceShards
       type: string
       default: ""
-      description: 'Number of parquet shards to download (default 39 when empty).'
+      description: >-
+        DEPRECATED cap on the number of parquet files to fetch: after the
+        dataset's files are DISCOVERED, the sorted list is truncated to the
+        first N. Empty (the default) fetches all discovered files. Retained
+        because sim2real's pipeline.yaml passes it; a shard *prefix* is a
+        benchmark-biased subsample, not a random one (for
+        Exgentic/agent-llm-traces: shards 0-1 appworld, 13 swebench, 20
+        swebench+tau2_airline, 26 tau2_retail, 38 tau2_telecom), so prefer
+        deliberate selection once the descriptor grows include patterns.
+    - name: traceRevision
+      type: string
+      default: ""
+      description: >-
+        Optional git revision (branch, tag, or commit SHA) of the HF dataset to
+        fetch. Empty (the default) means the repo's default branch. The step
+        RESOLVES this to a commit SHA and keys the on-PVC corpus directory by
+        it, so a moving ref that advances upstream lands in a fresh directory
+        instead of mixing with the previously downloaded files.
+        NOTE: sim2real does not emit this param yet, so today it is always ""
+        — the plumbing is here, but pinning is not reachable from a descriptor
+        until the paired sim2real change lands.
     - name: traceMinRounds
       type: string
       default: ""
@@ -101,44 +125,98 @@ spec:
         fi
         echo "prepare-trace: building TraceV2 at $(params.tracePath)"
 
-    # ---- step 1: download corpus parquet shards if absent ----
-    # Public HF dataset (no auth): the shards live at the resolve/main URL under
-    # data/train-<NNNNN>-of-<TOTAL>.parquet. Repo + shard count arrive as scalar
-    # params — no YAML parsing. Idempotent: skips when the expected shard count
-    # is already present on the PVC.
+    # ---- step 1: discover + download the corpus parquet files if absent ----
+    # Layout-agnostic (#67): the file list is DISCOVERED from the HF repo rather
+    # than synthesized from a shard-count format, so both of HF's standard
+    # layouts work — sharded-split (data/train-00000-of-00039.parquet) and
+    # split-as-directory (data/train/0000.parquet).
+    #
+    # The corpus directory is keyed by <repo>@<resolved-sha>, which is what makes
+    # revision pinning meaningful and what stops two datasets from colliding:
+    # the previous fixed /workspace/data/corpus plus a count-based guard let a
+    # 9-file v2 descriptor see v1's 39 files, skip the download, and silently
+    # convert v1 data. Idempotency is now per FILE against the discovered list,
+    # which is sound however the shard counts differ.
     - name: download-corpus
-      image: curlimages/curl:8.11.0
+      image: python:3.11-slim
       script: |
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        REPO="$(params.traceSource)"
-        REPO=${REPO#hf:}                # strip hf: prefix -> <org>/<name>
-        SHARDS="$(params.traceShards)"
-        : "${SHARDS:=39}"
-        CORPUS=/workspace/data/corpus
-        mkdir -p "${CORPUS}"
-        TOTAL=$(printf '%05d' "${SHARDS}")
-        have=$(ls -1 "${CORPUS}"/*.parquet 2>/dev/null | wc -l | tr -d ' ')
-        if [ "${have}" -ge "${SHARDS}" ]; then
-          echo "download-corpus: ${have} parquet file(s) already at ${CORPUS} — skipping"
-          exit 0
-        fi
-        i=0
-        while [ "$i" -lt "${SHARDS}" ]; do
-          FN="train-$(printf '%05d' "$i")-of-${TOTAL}.parquet"
-          DEST="${CORPUS}/${FN}"
-          if [ -f "${DEST}" ]; then
-            echo "have ${FN}"
-          else
-            URL="https://huggingface.co/datasets/${REPO}/resolve/main/data/${FN}"
-            echo "downloading ${URL}"
-            curl -fsSL "${URL}" -o "${DEST}.tmp"
-            mv "${DEST}.tmp" "${DEST}"
-          fi
-          i=$((i + 1))
-        done
-        echo "download-corpus: ${SHARDS} shard(s) present in ${CORPUS}"
+        # Floor is for local_dir= writing REAL files rather than cache symlinks
+        # (huggingface_hub 0.23+); 0.34 is simply a recent, well-tested release.
+        # Nothing here shells out to the `hf` CLI — the step uses the Python API
+        # (HfApi.dataset_info / list_repo_files / hf_hub_download) throughout.
+        pip install --quiet 'huggingface_hub>=0.34'
+        export REPO="$(params.traceSource)"
+        export REV="$(params.traceRevision)"
+        export SHARDS="$(params.traceShards)"
+        python3 - <<'PYEOF'
+        import os
+        import re
+        import sys
+
+        from huggingface_hub import HfApi, hf_hub_download
+
+        repo = (os.environ.get("REPO") or "").strip()
+        repo = repo[3:] if repo.startswith("hf:") else repo   # strip hf: prefix
+        if not repo:
+            sys.exit("download-corpus: traceSource is empty — nothing to fetch")
+        rev = (os.environ.get("REV") or "").strip() or None
+        shards_raw = (os.environ.get("SHARDS") or "").strip()
+        shards = int(shards_raw) if shards_raw else 0        # 0 / empty => all
+
+        api = HfApi()
+        # Resolve the ref to a commit SHA so a moving ref (e.g. "main") that
+        # advances upstream lands in a NEW corpus dir instead of mixing files.
+        info = api.dataset_info(repo, revision=rev)
+        sha = info.sha
+        if not sha:
+            sys.exit("download-corpus: could not resolve a commit sha for "
+                     "%s@%s" % (repo, rev or "<default>"))
+
+        # Discover, don't synthesize. Sorted so the deprecated shard cap is
+        # deterministic.
+        files = sorted(
+            f for f in api.list_repo_files(repo, repo_type="dataset", revision=sha)
+            if f.endswith(".parquet")
+        )
+        if not files:
+            sys.exit("download-corpus: no .parquet files found in %s@%s"
+                     % (repo, sha))
+        discovered = len(files)
+        if shards > 0:
+            files = files[:shards]
+
+        # <repo>@<sha>, with the repo's "/" and anything else awkward flattened.
+        slug = re.sub(r"[^A-Za-z0-9._-]", "_", repo)
+        corpus = "/workspace/data/corpus/%s@%s" % (slug, sha)
+        os.makedirs(corpus, exist_ok=True)
+
+        # Per-file idempotency against the discovered list. The old guard
+        # compared a bare COUNT against the requested shard count, which is
+        # unsound in both directions once shard counts vary between datasets.
+        missing = [f for f in files
+                   if not os.path.exists(os.path.join(corpus, f))]
+        print("download-corpus: %s@%s discovered=%d selected=%d present=%d "
+              "missing=%d shard_cap=%s"
+              % (repo, sha, discovered, len(files), len(files) - len(missing),
+                 len(missing), shards or "none"))
+        for f in missing:
+            print("downloading %s" % f)
+            # local_dir= writes REAL files (not cache symlinks) and PRESERVES
+            # repo structure, so a split-as-directory dataset lands at
+            # <corpus>/data/train/0000.parquet — build-otel globs recursively.
+            hf_hub_download(repo, filename=f, repo_type="dataset",
+                            revision=sha, local_dir=corpus)
+
+        # Publish the resolved dir for build-otel (same cross-step marker
+        # mechanism as /workspace/skip). build-otel must not rebuild this path.
+        with open("/workspace/corpus_dir", "w") as fh:
+            fh.write(corpus)
+        print("download-corpus: %d parquet file(s) ready in %s"
+              % (len(files), corpus))
+        PYEOF
 
     # ---- step 2: parquet -> OTel JSONL (inline port of build_otel_corpus.py) ----
     # No branching filter — Exgentic has no branch structure; see
@@ -152,19 +230,64 @@ spec:
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
-        pip install --quiet pyarrow
+        # Pinned floor: the streaming read projects nested parquet LEAF columns
+        # (spans.list.element.<...>), which is what keeps peak memory bounded on
+        # a v2-sized shard. Unpinned, a pyarrow that rejects or ignores leaf
+        # paths would either fail or silently regress memory ~50x.
+        pip install --quiet 'pyarrow>=14'
         export MIN_ROUNDS="$(params.traceMinRounds)"
         export SPLIT="$(params.traceSplit)"
         export DEDUP_BY_CONVERSATION="$(params.traceDedupByConversation)"
         export SHUFFLE_SEED="$(params.traceShuffleSeed)"
         python3 - <<'PYEOF'
-        import glob, hashlib, json, os, random, sys
+        import glob, hashlib, json, os, random, resource, sys
         import pyarrow.parquet as pq
 
-        CORPUS  = "/workspace/data/corpus"
+        # The corpus dir is resolved by download-corpus (keyed <repo>@<sha>) and
+        # handed over via this marker — do NOT rebuild the path here, or the two
+        # steps can disagree about which dataset/revision is being converted.
+        try:
+            with open("/workspace/corpus_dir") as _fh:
+                CORPUS = _fh.read().strip()
+        except OSError as exc:
+            sys.exit("build-otel: cannot read /workspace/corpus_dir (%s) — "
+                     "download-corpus must run first" % exc)
+        if not CORPUS:
+            sys.exit("build-otel: /workspace/corpus_dir is empty")
         OUT_DIR = "/workspace/data/otel"
         OUT     = os.path.join(OUT_DIR, "corpus.jsonl")
         TEST_PCT = 30  # campaign convention (build_otel_corpus.py --test-pct default)
+        # Batch size for the streaming read. Small because a single v2 row can
+        # decode to ~1.5 MB; 32 keeps a batch well under 50 MB.
+        BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 32)
+        # Project the exact parquet LEAF columns this program reads. Projecting
+        # the top-level "spans" column is NOT enough: the bulky payloads
+        # (gen_ai.input.messages, gen_ai.output.messages, system_instructions,
+        # tool.definitions, events) live INSIDE spans[].attributes, so selecting
+        # "spans" drags every one of them in. Measured on the largest real
+        # Exgentic v2 shard: 3069 MB peak with ["session_id", "spans"] vs 63 MB
+        # with these leaves, for byte-identical output.
+        # status.code is included even though the emitted status is hardcoded
+        # below, so the projected span keeps the shape the rest of this program
+        # documents. A leaf named here but absent from the file makes pyarrow
+        # raise, which is the loud failure we want.
+        LEAF_COLUMNS = [
+            "session_id",
+            "spans.list.element.span_id",
+            "spans.list.element.name",
+            "spans.list.element.start_time",
+            "spans.list.element.status.code",
+            "spans.list.element.attributes.gen_ai.request.model",
+            "spans.list.element.attributes.gen_ai.usage.input_tokens",
+            "spans.list.element.attributes.gen_ai.usage.output_tokens",
+        ]
+        # Payload keys that must NOT survive the projection. Checked once on the
+        # first span seen: if a future pyarrow silently widens the selection back
+        # to the whole struct, peak memory regresses ~50x, and that is invisible
+        # in the output. Fail loudly instead.
+        _PAYLOAD_KEYS = ("gen_ai.input.messages", "gen_ai.output.messages",
+                         "gen_ai.system_instructions", "gen_ai.tool.definitions")
+        _projection_checked = False
 
         min_rounds = int(os.environ.get("MIN_ROUNDS") or 2)
         split = (os.environ.get("SPLIT") or "test").lower()
@@ -191,7 +314,18 @@ spec:
             return h < TEST_PCT  # "test" (default)
 
         os.makedirs(OUT_DIR, exist_ok=True)
-        files = sorted(glob.glob(os.path.join(CORPUS, "*.parquet")))
+        # RECURSIVE: hf_hub_download preserves repo structure, so a
+        # split-as-directory dataset lands at <CORPUS>/data/train/0000.parquet.
+        # A non-recursive glob finds nothing there and the step would "succeed"
+        # on an empty corpus. huggingface_hub keeps its own bookkeeping under
+        # <CORPUS>/.cache, so exclude that rather than treat it as corpus data.
+        files = sorted(
+            f for f in glob.glob(os.path.join(CORPUS, "**", "*.parquet"),
+                                 recursive=True)
+            if "/.cache/" not in f
+        )
+        if not files:
+            sys.exit("build-otel: no .parquet files under %s" % CORPUS)
         scanned = kept = dropped = 0
         # Collect selected sessions as (session_id, rec_spans). We do NOT write in
         # file order: the parquet is sorted by session_id, so a conversation's
@@ -199,10 +333,26 @@ spec:
         # only a few conversations. We dedup/shuffle below before writing.
         records = []
         for f in files:
-            for r in pq.read_table(f).to_pylist():
+            # Stream in batches with LEAF column projection (see LEAF_COLUMNS).
+            # read_table().to_pylist() materialized an ENTIRE shard as Python
+            # objects — fine at v1's ~71 MB/shard, fatal at v2's ~1.6 GB/shard.
+            pf = pq.ParquetFile(f)
+            for batch in pf.iter_batches(batch_size=BATCH_SIZE,
+                                         columns=LEAF_COLUMNS):
+              for r in batch.to_pylist():
                 scanned += 1
                 sid = r["session_id"]
-                spans = usable_spans(list(r["spans"]))
+                raw_spans = list(r["spans"] or [])
+                if not _projection_checked and raw_spans:
+                    _attrs = raw_spans[0].get("attributes") or {}
+                    _leaked = [k for k in _PAYLOAD_KEYS if k in _attrs]
+                    if _leaked:
+                        sys.exit("build-otel: leaf projection did not take effect "
+                                 "— %s still present in spans[].attributes; peak "
+                                 "memory would regress ~50x. Check the pyarrow "
+                                 "version and LEAF_COLUMNS." % ", ".join(_leaked))
+                    _projection_checked = True
+                spans = usable_spans(raw_spans)
                 if len(spans) < min_rounds:
                     dropped += 1
                     continue
@@ -259,6 +409,16 @@ spec:
               % (scanned, min_rounds, kept, min_rounds, dropped, split, selected,
                  conversations, dedup, len(records), os.environ.get("SHUFFLE_SEED") or 42))
         print("build-otel: wrote %s" % OUT)
+        # Reported so #67's bounded-memory criterion can be CHECKED from the step
+        # log; no resources.limits is imposed here, since guessing a limit would
+        # OOMKill legitimate runs rather than reveal anything.
+        # ru_maxrss units differ by platform: KIBIBYTES on Linux (where this step
+        # runs) but BYTES on macOS. Normalize, so the number is also correct when
+        # this program is run locally — e.g. by tests/test_prepare_trace_*.sh.
+        _rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        _rss_mb = _rss / 1048576.0 if sys.platform == "darwin" else _rss / 1024.0
+        print("build-otel: peak_rss_mb=%.1f files=%d batch_size=%d"
+              % (_rss_mb, len(files), BATCH_SIZE))
         if not records:
             sys.exit("build-otel: no sessions selected for split %r — nothing to convert" % split)
         PYEOF
