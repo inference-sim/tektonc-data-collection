@@ -247,9 +247,10 @@ case "${TAIL}" in
     pass "--server-url <endpoint> is the final argument pair" ;;
   *) fail "argv does not end with --server-url <endpoint>: ${TAIL}" ;;
 esac
-grep -c -- '--server-url' "${TMP}/argv.log" | grep -qx 1 \
+SU_COUNT="$(grep -c -- '--server-url' "${TMP}/argv.log")"
+[ "${SU_COUNT}" -eq 1 ] \
   && pass "--server-url appears exactly once" \
-  || fail "--server-url appears more than once"
+  || fail "--server-url appears ${SU_COUNT} times, expected 1"
 
 # --- 2d: a multi-word extraArgs tail survives as separate words ---
 # extraArgs is rendered last inside observeArgs and is intentionally many words;
