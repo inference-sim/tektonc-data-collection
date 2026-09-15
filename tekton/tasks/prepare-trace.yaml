@@ -102,9 +102,10 @@ spec:
         today's behaviour exactly.
         NOTE: sim2real does not emit this param yet, so today it is always
         "otel-parquet" — same dormancy as traceRevision above. Reaching a Weka
-        corpus from a descriptor needs the paired sim2real change (#901), which
-        also owns folding `format` into the corpus cache key and rejecting an
-        unknown value at assemble time.
+        corpus from a descriptor needs sim2real #905, which is what emits this
+        param; #901 defines the descriptor schema and the content-addressed cache
+        key it is folded into, and states the "applied or rejected" invariant.
+        Rejecting an unknown value at assemble time lands with the emit, in #905.
     - name: traceMaxThinkTime
       type: string
       default: ""
@@ -212,6 +213,21 @@ spec:
           touch /workspace/skip_build_otel
         fi
         echo "prepare-trace: format=${FORMAT}"
+        # Say out loud which descriptor fields this format ignores. Deliberately
+        # UNCONDITIONAL: the params always arrive non-empty (traceSplit "test",
+        # traceDedupByConversation "1", traceShuffleSeed "42" are sim2real's
+        # defaults), so the step cannot tell a deliberate value from a default and
+        # must not pretend to. Stating the fact claims nothing about intent, and
+        # without it a weka run's log looks completely normal while three hashed
+        # fields did nothing — see the KNOWN GAP note in the task description.
+        if [ "${FORMAT}" = "weka-jsonl" ]; then
+          echo "prepare-trace: NOTE weka-jsonl ignores traceSplit," \
+               "traceDedupByConversation and traceShuffleSeed — build-otel applies" \
+               "those and is skipped on this path, and blis convert weka has no" \
+               "equivalent. The corpus is unsplit, undeduplicated and in on-disk" \
+               "order, so an observe pool taking the first N sessions draws a" \
+               "correlated sample. See #68." >&2
+        fi
         if [ -f "/workspace/data/$(params.tracePath).yaml" ] && \
            [ -f "/workspace/data/$(params.tracePath).csv" ]; then
           echo "prepare-trace: TraceV2 already cached at $(params.tracePath) — skipping"

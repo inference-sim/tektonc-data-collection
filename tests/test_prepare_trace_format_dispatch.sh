@@ -334,7 +334,7 @@ run_conv() {
   rm -f "${TMP}/workspace/data/traces/out.yaml" "${TMP}/workspace/data/traces/out.csv"
   ARGV_LOG="${TMP}/argv.log" \
   P_traceFormat="$1" P_traceMaxThinkTime="$2" P_traceMinRounds="$3" \
-  P_traceContextGrowth="accumulate" P_tracePath="traces/out" \
+  P_traceContextGrowth="${4:-accumulate}" P_tracePath="traces/out" \
     sh "${TMP}/convert.sh" > "${TMP}/conv.out" 2>&1
 }
 
@@ -350,6 +350,10 @@ if run_conv "otel-parquet" "" "2"; then
     *"--input ${TMP}/workspace/data/otel/corpus.jsonl"*)
       pass "otel-parquet input is build-otel's corpus.jsonl" ;;
     *) fail "otel-parquet input wrong: ${ARGV}" ;;
+  esac
+  case "${ARGV}" in
+    *"--context-growth accumulate"*) pass "otel-parquet passes --context-growth" ;;
+    *) fail "otel-parquet dropped --context-growth: ${ARGV}" ;;
   esac
   case "${ARGV}" in
     *--min-rounds*) fail "otel-parquet passes --min-rounds (double-filters)" ;;
@@ -385,9 +389,35 @@ if run_conv "weka-jsonl" "" "3"; then
     *"--min-rounds 3"*) pass "weka-jsonl threads --min-rounds from the descriptor" ;;
     *) fail "weka-jsonl did not thread --min-rounds: ${ARGV}" ;;
   esac
+  case "${ARGV}" in
+    *"--context-growth accumulate"*) pass "weka-jsonl passes --context-growth" ;;
+    *) fail "weka-jsonl dropped --context-growth: ${ARGV}" ;;
+  esac
 else
   fail "weka-jsonl convert failed"; cat "${TMP}/conv.out"
 fi
+
+# A non-default value on BOTH paths, so the two assertions above cannot be
+# satisfied by a hardcoded "accumulate" that ignores the param. context_growth is
+# the highest-leverage field in the descriptor — it decides the prefix model, so a
+# silently-ignored value changes what is being measured, not just a filter.
+if run_conv "weka-jsonl" "" "2" "independent"; then
+  grep -q -- '--context-growth independent' "${TMP}/argv.log" \
+    && pass "weka-jsonl threads a non-default --context-growth" \
+    || { fail "weka ignored the context-growth param"; cat "${TMP}/argv.log"; }
+else
+  fail "weka-jsonl convert with independent context-growth failed"; cat "${TMP}/conv.out"
+fi
+CORPUS_SAVED="${CORPUS}"
+rm -f "${TMP}/workspace/corpus_dir"
+if run_conv "otel-parquet" "" "2" "independent"; then
+  grep -q -- '--context-growth independent' "${TMP}/argv.log" \
+    && pass "otel-parquet threads a non-default --context-growth" \
+    || { fail "otel ignored the context-growth param"; cat "${TMP}/argv.log"; }
+else
+  fail "otel-parquet convert with independent context-growth failed"; cat "${TMP}/conv.out"
+fi
+printf '%s' "${CORPUS_SAVED}" > "${TMP}/workspace/corpus_dir"
 
 # An explicit max-think-time must reach BOTH converters — that is what lets the
 # assembler stop the two defaults from diverging.
@@ -464,6 +494,30 @@ else
   fi
 fi
 rm -f "${TMP}/bin/find"
+
+# A marker pointing at a directory that isn't there — the shape of a stale marker
+# from a previous run, or a PVC that didn't mount. Must name the directory rather
+# than blame the dataset for having no .jsonl.
+printf '%s' "${TMP}/workspace/data/corpus/gone@sha" > "${TMP}/workspace/corpus_dir"
+if run_conv "weka-jsonl" "" "2"; then
+  fail "a corpus_dir pointing at a missing directory was accepted"
+else
+  grep -q 'does not exist or is not a directory' "${TMP}/conv.out" \
+    && pass "stale corpus_dir naming a missing directory fails on that fact" \
+    || { fail "missing-corpus-dir message blames the wrong thing"; cat "${TMP}/conv.out"; }
+fi
+
+# An empty but valid corpus dir is the legitimate zero case, and must be distinct
+# from the traversal-failure and multi-file cases around it.
+mkdir -p "${TMP}/workspace/data/corpus/empty@sha"
+printf '%s' "${TMP}/workspace/data/corpus/empty@sha" > "${TMP}/workspace/corpus_dir"
+if run_conv "weka-jsonl" "" "2"; then
+  fail "an empty corpus dir was converted anyway"
+else
+  grep -q 'no .jsonl found under' "${TMP}/conv.out" \
+    && pass "empty corpus dir reports zero .jsonl distinctly" \
+    || { fail "empty-corpus message unclear"; cat "${TMP}/conv.out"; }
+fi
 
 # A missing marker is a wiring bug, not something to paper over.
 rm -f "${TMP}/workspace/corpus_dir"
