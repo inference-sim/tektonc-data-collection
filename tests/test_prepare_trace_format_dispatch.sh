@@ -104,6 +104,12 @@ echo "${GUARD}" | grep -q 'skip_build_otel' \
   && pass "guard publishes the skip_build_otel marker" \
   || fail "guard does not set skip_build_otel"
 
+# NOTE: the greps above are necessary but NOT sufficient, and on their own they
+# are defeated by a one-token mutation — dropping the `exit 0` from build-otel's
+# skip block leaves every structural assertion passing while the weka path breaks
+# (it would install pyarrow, then die on "no .parquet files under ..."). The
+# executable check in Part 2d is what actually pins the short-circuit.
+
 # ────────────────────────────────────────────────────────────
 # Part 2a — behavioral: the guard's format validation
 # ────────────────────────────────────────────────────────────
@@ -386,6 +392,65 @@ else
   grep -q 'corpus_dir missing' "${TMP}/conv.out" \
     && pass "missing corpus_dir marker fails with a clear message" \
     || { fail "missing-marker message unclear"; cat "${TMP}/conv.out"; }
+fi
+
+# ────────────────────────────────────────────────────────────
+# Part 2d — behavioral: build-otel's skip actually SHORT-CIRCUITS
+#
+# The structural greps in Part 1 cannot see whether the block exits. Removing
+# just the `exit 0` keeps them all green while breaking the whole weka chain, so
+# this part RUNS the step's shell wrapper with a fake `pip` on PATH and asserts
+# pip is never reached. The negative case (marker absent => pip IS reached) is
+# what makes the positive assertion meaningful rather than vacuous: without it, a
+# step that failed for some unrelated reason before pip would also "pass".
+# ────────────────────────────────────────────────────────────
+mkdir -p "${TMP}/bin"
+cat > "${TMP}/bin/pip" <<'SH'
+#!/bin/sh
+echo "pip called: $@" >> "${PIP_LOG}"
+exit 0
+SH
+chmod +x "${TMP}/bin/pip"
+# python3 must also be stubbed: past the pip line the step runs its real embedded
+# program, whose failure would otherwise mask which line we actually reached.
+cat > "${TMP}/bin/python3" <<'SH'
+#!/bin/sh
+echo "python3 called" >> "${PIP_LOG}"
+exit 0
+SH
+chmod +x "${TMP}/bin/python3"
+
+render "${BO}" > "${TMP}/build_otel.sh"
+
+# run_bo <marker-present: yes|no> -> exit status; reached commands in ${TMP}/pip.log
+run_bo() {
+  : > "${TMP}/pip.log"
+  rm -f "${TMP}/workspace/skip_build_otel"
+  [ "$1" = "yes" ] && touch "${TMP}/workspace/skip_build_otel"
+  PIP_LOG="${TMP}/pip.log" PATH="${TMP}/bin:${PATH}" \
+  P_traceMinRounds="2" P_traceSplit="test" P_traceDedupByConversation="1" \
+  P_traceShuffleSeed="42" \
+    sh "${TMP}/build_otel.sh" > "${TMP}/bo.out" 2>&1
+}
+
+if run_bo "yes"; then
+  if [ -s "${TMP}/pip.log" ]; then
+    fail "build-otel did not short-circuit: reached $(cat "${TMP}/pip.log" | head -1)"
+  else
+    pass "build-otel with skip_build_otel exits 0 without reaching pip"
+  fi
+else
+  fail "build-otel exited non-zero on the skip path"; cat "${TMP}/bo.out"
+fi
+
+# Counter-case: without the marker the step MUST get as far as pip. This is what
+# proves the assertion above is testing the short-circuit and not an early crash.
+run_bo "no"
+if grep -q 'pip called' "${TMP}/pip.log"; then
+  pass "build-otel without the marker does reach pip (assertion is not vacuous)"
+else
+  fail "build-otel never reached pip even without the marker — check the harness"
+  cat "${TMP}/bo.out"
 fi
 
 echo

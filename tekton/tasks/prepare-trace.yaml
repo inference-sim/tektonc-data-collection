@@ -22,6 +22,18 @@ spec:
       weka-jsonl: .jsonl -> blis convert weka (build-otel is SKIPPED — JSONL is
         already blis's native Weka shape)
 
+    KNOWN GAP on the weka-jsonl path: build-otel is what applies traceSplit,
+    traceDedupByConversation and traceShuffleSeed, and it is skipped for
+    weka-jsonl. `blis convert weka` has no flag for any of the three and does no
+    internal equivalent (verified at pin 602ae462), so those three fields have NO
+    EFFECT on a weka corpus. Only traceMinRounds could be rescued, by threading
+    it to the converter, which the convert step does. This task cannot detect the
+    difference between an operator asking for a shuffle and sim2real emitting its
+    default, since both arrive as a non-empty param — so the rejection has to
+    live at assemble time (sim2real #901's "applied or rejected" invariant). Not
+    fixable here: it needs either weka-side flags in blis or a filter step of its
+    own, both outside #68.
+
     Every field the steps need arrives as a SEPARATE SCALAR param (traceFormat,
     traceSource, traceRevision, traceShards, traceMinRounds, traceSplit,
     traceContextGrowth, traceMaxThinkTime) so no in-container YAML
@@ -117,6 +129,11 @@ spec:
       default: ""
       description: >-
         Deterministic SHA1 split to select: test | train | all (default test).
+        OTEL-PARQUET ONLY. build-otel applies this, and build-otel is skipped for
+        weka-jsonl; `blis convert weka` has no split flag and does no internal
+        equivalent, so on that path the WHOLE corpus is used regardless of this
+        value. sim2real must reject the field for weka-jsonl rather than accept
+        it silently (#901's invariant) — see the header note.
     - name: traceContextGrowth
       type: string
       default: ""
@@ -130,6 +147,8 @@ spec:
         (the 12-hex prefix of session_id before '_'), so the corpus is one
         independent multi-turn session per conversation rather than many
         correlated sub-sessions of the same conversation. "0"/""/"false" = keep all.
+        OTEL-PARQUET ONLY — see traceSplit; no weka equivalent exists, so a weka
+        corpus keeps every session.
     - name: traceShuffleSeed
       type: string
       default: "42"
@@ -137,6 +156,11 @@ spec:
         Seed for the deterministic shuffle of the selected sessions. Breaks the
         conversation-contiguous file order so `blis observe`'s first-N pool spans
         many conversations. Same seed => identical corpus across arms/reruns.
+        OTEL-PARQUET ONLY — see traceSplit. This is the most consequential of the
+        three: unshuffled, a weka corpus stays in its on-disk order, so an
+        observe pool that takes the first N sessions draws a correlated sample
+        rather than one spanning the corpus. That is a measurement-validity
+        problem, not a cosmetic gap.
 
   workspaces:
     - name: data
@@ -174,8 +198,9 @@ spec:
         esac
         # build-otel is an OTel-only step: for weka-jsonl the downloaded JSONL is
         # already blis's native Weka shape and goes straight to the converter.
-        # Published as its own marker rather than re-deriving the format in the
-        # step, so the format is interpreted in exactly one place.
+        # Published as its own marker so build-otel does not need to re-derive
+        # the format. (download-corpus and convert do each interpret traceFormat
+        # themselves — they need the extension and the subcommand respectively.)
         if [ "${FORMAT}" != "otel-parquet" ]; then
           touch /workspace/skip_build_otel
         fi
@@ -563,6 +588,14 @@ spec:
               exit 1; }
             CORPUS="$(cat /workspace/corpus_dir)"
             [ -n "${CORPUS}" ] || { echo "ERROR: /workspace/corpus_dir is empty" >&2; exit 1; }
+            # Checked separately from the count below: plain POSIX sh has no
+            # pipefail, so `find ... | wc -l` exits 0 even when find itself
+            # failed. A bad marker path or an unmounted PVC would otherwise
+            # count zero files and report "no .jsonl found", pointing the
+            # operator at the dataset instead of at the real fault.
+            [ -d "${CORPUS}" ] || {
+              echo "ERROR: corpus dir ${CORPUS} does not exist or is not a directory" >&2
+              exit 1; }
             # Discover the JSONL rather than assume a name; the file sits at
             # whatever path the dataset uses inside the keyed corpus dir.
             COUNT="$(find "${CORPUS}" -name '*.jsonl' -type f | wc -l | tr -d ' ')"
