@@ -109,6 +109,19 @@ echo "${RUN}" | grep -q '"\${OBSERVE_ARGS}"' \
   && fail "OBSERVE_ARGS is quoted — argv would be passed as one argument" \
   || pass "OBSERVE_ARGS is unquoted (word-splitting preserved)"
 
+# An unquoted expansion globs as well as splits. `set -f` must come BEFORE the
+# invocation, or a rendered * ? or [ matches files in the step's cwd instead of
+# reaching blis. Anchored on the command at line start so a mention of "set -f"
+# in a comment cannot satisfy it, and compared by position so moving the
+# invocation above it fails.
+RUN_SETF_LINE="$(printf '%s\n' "${RUN}" | grep -n '^[[:space:]]*set -f[[:space:]]*$' | head -1 | cut -d: -f1)"
+RUN_INVOKE_LINE="$(printf '%s\n' "${RUN}" | grep -n '^[[:space:]]*"\${BLIS}" observe' | head -1 | cut -d: -f1)"
+if [ -n "${RUN_SETF_LINE}" ] && [ -n "${RUN_INVOKE_LINE}" ] \
+   && [ "${RUN_SETF_LINE}" -lt "${RUN_INVOKE_LINE}" ]
+then pass "run-observe sets -f before expanding OBSERVE_ARGS (no globbing)"
+else fail "run-observe does not disable globbing before the invocation (set -f=${RUN_SETF_LINE:-none} invoke=${RUN_INVOKE_LINE:-none})"
+fi
+
 # ────────────────────────────────────────────────────────────
 # Part 2 — behavioral: the argv the step actually builds
 # ────────────────────────────────────────────────────────────
@@ -156,6 +169,16 @@ assert_argv() {
 }
 
 # --- 2a: a corpus-mode (trace) cell ---
+# NOTE ON --detectors: the run-observe step this diff replaces hardcoded
+# `--post-hoc-detector composite`, and the structural check above asserts that
+# spelling is gone. These fixtures deliberately say `--detectors` instead,
+# because --post-hoc-detector DOES NOT EXIST at the blis revision sim2real pins.
+# inference-sim renamed it in 18c2c926 (#1516) -- the flag is registered as
+# "detectors" (cmd/saturation.go) and put on observe by registerDetectorFlags
+# (cmd/observe_cmd.go); "composite" is still a valid detector name. sim2real's
+# pin bump (#904) moved past that rename, so the deleted line would have made
+# `blis observe` exit on `unknown flag`. The renderer (sim2real#900) emits
+# --detectors. Do not "restore" --post-hoc-detector here to match the old task.
 TRACE_ARGS="--model Qwen/Qwen2.5-7B-Instruct --max-concurrency 10000 --timeout 1800 --prewarm-duration 60s --warmup-requests 50 --detectors composite --corpus-header /workspace/data/traces/abc123.yaml --corpus-data /workspace/data/traces/abc123.csv --concurrent-sessions 8 --total-sessions 64 --trace-header /workspace/data/${RESULTS}/trace_header.yaml --trace-data /workspace/data/${RESULTS}/trace_data.csv --saturation-report /workspace/data/${RESULTS}/saturation.json"
 
 cat > "${TMP}/want_trace.txt" <<EOF
@@ -273,6 +296,52 @@ EOF
 else
   fail "run-observe with a multi-word tail exited non-zero"; cat "${TMP}/run.out"
 fi
+
+# --- 2e: a glob character reaches blis verbatim, not expanded ---
+# The structural check above pins `set -f`'s position; this proves it works.
+# Run with a cwd that CONTAINS matches, because a no-match glob passes through
+# unchanged even without set -f — testing in an empty directory would pass
+# either way and prove nothing.
+GLOBDIR="${TMP}/globcwd"
+mkdir -p "${GLOBDIR}"
+: > "${GLOBDIR}/spec_a.yaml"
+: > "${GLOBDIR}/spec_b.yaml"
+
+: > "${TMP}/argv.log"
+( cd "${GLOBDIR}" \
+  && ARGV_LOG="${TMP}/argv.log" \
+     P_observeArgs="--model m --workload-spec spec_*.yaml" \
+     P_endpoint="http://gw.ns.svc:8000/v1" P_resultsDir="${RESULTS}" \
+     sh "${TMP}/run.sh" > "${TMP}/glob.out" 2>&1 )
+GLOB_RC=$?
+
+if [ "${GLOB_RC}" -eq 0 ]; then
+  cat > "${TMP}/want_glob.txt" <<EOF
+observe
+--model
+m
+--workload-spec
+spec_*.yaml
+--server-url
+http://gw.ns.svc:8000/v1
+EOF
+  assert_argv "glob char reaches blis verbatim (set -f suppresses expansion)" \
+              "${TMP}/want_glob.txt"
+  # Name the actual failure mode if it ever regresses.
+  if grep -qx 'spec_a.yaml' "${TMP}/argv.log"; then
+    fail "the glob expanded against the step's cwd — set -f is not in effect"
+  fi
+else
+  fail "run-observe with a glob in observeArgs exited non-zero"
+  cat "${TMP}/glob.out"
+fi
+
+# Counter-check that the fixture is capable of expanding, so the assertion above
+# is testing set -f rather than a directory that simply had no matches.
+EXPANDED="$(cd "${GLOBDIR}" && sh -c 'A="--workload-spec spec_*.yaml"; set -- ${A}; echo $#')"
+[ "${EXPANDED}" -eq 3 ] \
+  && pass "harness confirms the glob WOULD expand without set -f (3 words)" \
+  || fail "harness glob fixture does not expand (${EXPANDED} words) — test is vacuous"
 
 # ────────────────────────────────────────────────────────────
 # Part 3 — AC-4: empty workloadSpec still writes an (empty) workload.yaml

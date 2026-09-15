@@ -44,9 +44,18 @@ spec:
             a generative cell renders --workload-spec /workspace/workload.yaml.
 
         The value is word-split on IFS, so no single flag value may contain a
-        space and the string must contain no shell metacharacters (quote, $,
-        backtick, ;, |, &). Corpus-mode and spec-mode flags are mutually
-        exclusive; the renderer enforces that — this task does not check it.
+        space, and the string must contain no shell metacharacters (quote, $,
+        backtick, ;, |, &, >, <, backslash, newline) — Tekton substitutes params
+        textually, so those break out of the OBSERVE_ARGS assignment before the
+        step can defend against them, and only the renderer can reject them.
+
+        Glob characters (*, ? and [) are a separate case: run-observe sets -f
+        before expanding, so they reach blis verbatim instead of matching files
+        in the step's working directory. That hazard is closed here rather than
+        delegated, so it holds for every producer.
+
+        Corpus-mode and spec-mode flags are mutually exclusive; the renderer
+        enforces that — this task does not check it.
     - name: workloadSpec
       type: string
       description: >-
@@ -99,9 +108,15 @@ spec:
         # shell conditional here.
         OBSERVE_ARGS="$(params.observeArgs)"
         echo "run-observe: observe ${OBSERVE_ARGS} --server-url $(params.endpoint)"
-        # shellcheck disable=SC2086
+        # An unquoted expansion globs as well as splits, so a rendered value
+        # containing * ? or [ would silently become a different argv -- and only
+        # when a matching file happens to exist, which is the worst failure
+        # shape. set -f disables pathname expansion while leaving word-splitting
+        # intact, which is exactly what a pre-rendered argv wants.
+        set -f
         # OBSERVE_ARGS is a pre-rendered argv; splitting it into separate
         # arguments is the intended behavior, so it must stay unquoted.
+        # shellcheck disable=SC2086
         "${BLIS}" observe ${OBSERVE_ARGS} --server-url $(params.endpoint)
         echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
         ls /workspace/data/$(params.resultsDir)
