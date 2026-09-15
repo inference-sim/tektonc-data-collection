@@ -9,54 +9,76 @@ spec:
     blis binary (built by install-blis). Writes TraceV2 output
     (trace_header.yaml + trace_data.csv) to the data PVC.
 
+    The observe command line arrives pre-rendered in observeArgs; this task
+    appends --server-url and runs it. It does not know the workload kind —
+    corpus-mode replay and generative spec-mode differ only in which flags the
+    renderer emitted, so adding a traffic kind needs no change here.
+
   params:
     - name: endpoint
       type: string
-      description: "Inference endpoint URL"
-    - name: model
+      description: >-
+        Inference endpoint URL. Appended to the observe command as --server-url
+        by this task: it is a runtime task result (the standup task's endpoint
+        result), so the renderer that produces observeArgs cannot know it.
+    - name: observeArgs
       type: string
-      description: "Model name for API requests"
+      description: >-
+        Pre-rendered `blis observe` argv — every flag except --server-url.
+        Produced by sim2real's assemble (pipeline/lib/tekton.py, see
+        inference-sim/sim2real#900), so the effective command is readable from
+        the generated PipelineRun without opening this file or blis's source.
+
+        No default, deliberately: a Pipeline not yet updated to pass it fails at
+        PipelineRun creation with a Tekton param error, instead of reaching blis
+        with no workload source and failing deeper.
+
+        Two paths below are owned by this task and are part of the contract —
+        the renderer must match them:
+          * the `data` workspace mounts at /workspace/data, so every
+            data-PVC-relative path carries that prefix. The TraceV2 outputs
+            (--trace-header, --trace-data, --saturation-report) sit under
+            /workspace/data/<resultsDir>/. The corpus pair (--corpus-header,
+            --corpus-data) takes the same /workspace/data prefix but is NOT
+            under <resultsDir> — it is keyed by the path prepare-trace wrote
+            and is shared across cells. There is no corpus/resultsDir coupling.
+          * write-workload-spec writes the spec to /workspace/workload.yaml, so
+            a generative cell renders --workload-spec /workspace/workload.yaml.
+
+        The value is word-split on IFS, so no single flag value may contain a
+        space, and the string must contain no shell metacharacters (quote, $,
+        backtick, ;, |, &, >, <, backslash, newline) — Tekton substitutes params
+        textually, so those break out of the OBSERVE_ARGS assignment before the
+        step can defend against them, and only the renderer can reject them.
+
+        Glob characters (*, ? and [) are a separate case: run-observe sets -f
+        before expanding, so they reach blis verbatim instead of matching files
+        in the step's working directory. That hazard is closed here rather than
+        delegated, so it holds for every producer.
+
+        Corpus-mode and spec-mode flags are mutually exclusive; the renderer
+        enforces that, and this task does not re-check it. The delegation is
+        backstopped by blis itself: validateObserveCorpusFlags
+        (cmd/observe_corpus.go) rejects the conflict before any workload is
+        built, Fatalf-ing with "--workload-spec is invalid with
+        --concurrent-sessions (spec-mode vs corpus-mode)". So a renderer
+        regression that emitted both fails loudly rather than silently
+        replaying the wrong workload — verified against the pinned revision,
+        not assumed.
     - name: workloadSpec
       type: string
-      description: "Inline YAML content of the workload spec file"
+      description: >-
+        Inline YAML content of the workload spec file — file content, not a
+        flag. write-workload-spec writes it to /workspace/workload.yaml. Empty
+        for corpus-mode cells, where the file is written empty and never read.
     - name: resultsDir
       type: string
-      description: "Path under /workspace/data to write TraceV2 output"
-    - name: maxConcurrency
-      type: string
-      default: "10000"
-      description: "Maximum concurrent requests blis will drive"
-    - name: timeout
-      type: string
-      default: "1800"
-      description: "Workload run timeout in seconds"
-    - name: warmupRequests
-      type: string
-      default: "50"
-      description: "Number of warmup requests before measurement begins"
-    - name: prewarmDuration
-      type: string
-      default: "60s"
-      description: "Duration of system priming phase before real workload (e.g., 60s). 0s disables."
-    - name: extraArgs
-      type: string
-      default: ""
-      description: "Additional CLI flags appended to the blis observe command (one-off experimentation)"
-    - name: tracePath
-      type: string
-      default: ""
       description: >-
-        Trace-input mode: relative path under /workspace/data to a recorded TraceV2
-        (prepare-trace writes <tracePath>.yaml + <tracePath>.csv). When non-empty,
-        observe replays the trace closed-loop instead of using workloadSpec.
-    - name: concurrentSessions
-      type: string
-      default: ""
-      description: "Trace-input mode: number of concurrent sessions in the fixed pool (blis observe --concurrent-sessions)"
-    - name: totalSessions
-      type: string
-      default: ""
-      description: "Trace-input mode: total sessions to replay, corpus duplicated to fill (blis observe --total-sessions)"
+        Path under /workspace/data for this cell's output. Used here for the
+        chmod and the epp_log_since marker in write-workload-spec, and for the
+        trailing listing in run-observe. It no longer builds any part of the
+        observe command — the renderer embeds the same path in observeArgs'
+        output flags.
 
   workspaces:
     - name: data
@@ -89,34 +111,33 @@ spec:
         #!/bin/sh
         set -e
         BLIS="$(workspaces.source.path)/blis/blis"
-        # Workload source: corpus-mode (closed-loop replay of a recorded TraceV2
-        # corpus) when tracePath is set, else the synthesized workload spec.
-        # These are mutually exclusive; sourcing flags never come through
-        # extraArgs. Corpus-mode is selected by --concurrent-sessions > 0.
-        TRACE_PATH="$(params.tracePath)"
-        if [ -n "${TRACE_PATH}" ]; then
-          WL_ARGS="--corpus-header /workspace/data/${TRACE_PATH}.yaml \
-            --corpus-data /workspace/data/${TRACE_PATH}.csv \
-            --concurrent-sessions $(params.concurrentSessions) \
-            --total-sessions $(params.totalSessions)"
-          echo "run-observe: corpus-mode (tracePath=${TRACE_PATH})"
-        else
-          WL_ARGS="--workload-spec /workspace/workload.yaml"
-          echo "run-observe: generative workload-spec mode"
-        fi
+        # observeArgs carries the whole command line. No branch on workload kind:
+        # corpus-mode vs spec-mode is already decided by which flags the renderer
+        # emitted, and their mutual exclusion is enforced there rather than by a
+        # shell conditional here.
+        OBSERVE_ARGS="$(params.observeArgs)"
+        # Tekton's "required" means supplied, not non-empty, so both "" and a
+        # whitespace-only value still arrive here. blis would fatal on its own,
+        # but it would name one of its own flags rather than the actual cause,
+        # which is that the renderer emitted no workload source. Strip whitespace
+        # before testing: a bare [ -n ] accepts "   ".
+        # Written as `|| { ... }` rather than if/else deliberately -- the branch
+        # this task no longer has was an if/else, and the test asserts that none
+        # was reintroduced.
+        [ -n "$(printf '%s' "${OBSERVE_ARGS}" | tr -d '[:space:]')" ] || {
+          echo "run-observe: observeArgs is empty - renderer emitted no workload source" >&2
+          exit 1
+        }
+        echo "run-observe: observe ${OBSERVE_ARGS} --server-url $(params.endpoint)"
+        # An unquoted expansion globs as well as splits, so a rendered value
+        # containing * ? or [ would silently become a different argv -- and only
+        # when a matching file happens to exist, which is the worst failure
+        # shape. set -f disables pathname expansion while leaving word-splitting
+        # intact, which is exactly what a pre-rendered argv wants.
+        set -f
+        # OBSERVE_ARGS is a pre-rendered argv; splitting it into separate
+        # arguments is the intended behavior, so it must stay unquoted.
         # shellcheck disable=SC2086
-        "${BLIS}" observe \
-          --max-concurrency $(params.maxConcurrency) \
-          --timeout $(params.timeout) \
-          --prewarm-duration $(params.prewarmDuration) \
-          --warmup-requests $(params.warmupRequests) \
-          --post-hoc-detector composite \
-          --server-url $(params.endpoint) \
-          --model $(params.model) \
-          ${WL_ARGS} \
-          --trace-header /workspace/data/$(params.resultsDir)/trace_header.yaml \
-          --trace-data /workspace/data/$(params.resultsDir)/trace_data.csv \
-          --saturation-report /workspace/data/$(params.resultsDir)/saturation.json \
-          $(params.extraArgs)
+        "${BLIS}" observe ${OBSERVE_ARGS} --server-url $(params.endpoint)
         echo "blis observe complete. Output in /workspace/data/$(params.resultsDir)"
         ls /workspace/data/$(params.resultsDir)
