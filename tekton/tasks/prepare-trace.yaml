@@ -8,16 +8,38 @@ spec:
     Prepare a recorded TraceV2 corpus on the data PVC for trace-input observe
     (inference-sim/tektonc-data-collection#62). Short-circuits when traceSpec is
     empty (generative workload) or when the target TraceV2 is already cached on
-    the PVC. Otherwise runs the corpus->TraceV2 chain: DISCOVER and download the
-    corpus parquet files from the HF dataset via huggingface_hub (layout-agnostic
-    — both sharded-split and split-as-directory work; #67) into a corpus dir
-    keyed by <repo>@<resolved-sha> so two datasets or revisions never share a
-    cache -> build OTel JSONL (inline port of build_otel_corpus.py: usable-span +
-    min_rounds filter, deterministic SHA1 train/test split; no branching filter,
-    see #63; streamed with column projection so peak memory is bounded by batch
-    size rather than shard size) -> blis convert otel. Every field the steps need
-    arrives as a SEPARATE SCALAR param (traceSource, traceRevision, traceShards,
-    traceMinRounds, traceSplit, traceContextGrowth) so no in-container YAML
+    the PVC. Otherwise runs the corpus->TraceV2 chain, which the traceFormat
+    param SELECTS (#68) — both branches DISCOVER and download from the HF dataset
+    via huggingface_hub (layout-agnostic — both sharded-split and
+    split-as-directory work; #67) into a corpus dir keyed by
+    <repo>@<resolved-sha> so two datasets or revisions never share a cache, then:
+
+      otel-parquet (default): .parquet -> build OTel JSONL (inline port of
+        build_otel_corpus.py: usable-span + min_rounds filter, deterministic SHA1
+        train/test split; no branching filter, see #63; streamed with column
+        projection so peak memory is bounded by batch size rather than shard
+        size) -> blis convert otel
+      weka-jsonl: .jsonl -> blis convert weka (build-otel is SKIPPED — JSONL is
+        already blis's native Weka shape)
+
+    KNOWN GAP on the weka-jsonl path: build-otel is what applies traceSplit,
+    traceDedupByConversation and traceShuffleSeed, and it is skipped for
+    weka-jsonl. `blis convert weka` has no flag for any of the three and does no
+    internal equivalent (verified at pin 602ae462), so those three fields have NO
+    EFFECT on a weka corpus. Only traceMinRounds could be rescued, by threading
+    it to the converter, which the convert step does. This task cannot detect the
+    difference between an operator asking for a shuffle and sim2real emitting its
+    default, since both arrive as a non-empty param — so the rejection has to
+    live at assemble time — sim2real #901 states the "applied or rejected"
+    invariant, but the rule itself belongs to sim2real #905, which is where
+    traceFormat becomes legal and therefore where a weka-conditional rejection
+    first becomes reachable at all. Not
+    fixable here: it needs either weka-side flags in blis or a filter step of its
+    own, both outside #68.
+
+    Every field the steps need arrives as a SEPARATE SCALAR param (traceFormat,
+    traceSource, traceRevision, traceShards, traceMinRounds, traceSplit,
+    traceContextGrowth, traceMaxThinkTime) so no in-container YAML
     parsing of the compact traceSpec is required. One task,
     guarded steps; every step no-ops when the guard marker is present, so a
     generative run's pod starts and exits in seconds.
@@ -67,21 +89,64 @@ spec:
         NOTE: sim2real does not emit this param yet, so today it is always ""
         — the plumbing is here, but pinning is not reachable from a descriptor
         until the paired sim2real change lands.
+    - name: traceFormat
+      type: string
+      default: "otel-parquet"
+      description: >-
+        Upstream corpus format, which selects the whole chain (#68):
+        "otel-parquet" discovers .parquet files, runs build-otel, and converts
+        with `blis convert otel`; "weka-jsonl" discovers .jsonl files, SKIPS
+        build-otel (JSONL is blis's native Weka shape), and converts with
+        `blis convert weka`. An unrecognised value fails in the guard step.
+        Defaults to otel-parquet so a descriptor that predates this param keeps
+        today's behaviour exactly.
+        NOTE: sim2real does not emit this param yet, so today it is always
+        "otel-parquet" — same dormancy as traceRevision above. Reaching a Weka
+        corpus from a descriptor needs sim2real #905, which is what emits this
+        param; #901 defines the descriptor schema and the content-addressed cache
+        key it is folded into, and states the "applied or rejected" invariant.
+        Rejecting an unknown value at assemble time lands with the emit, in #905.
+    - name: traceMaxThinkTime
+      type: string
+      default: ""
+      description: >-
+        Cap on the per-round client think gap, passed to the converter as
+        --max-think-time (e.g. "15s", "0" for no cap). Empty (the default)
+        OMITS the flag, so each converter applies its own default — which
+        DIFFER, and in opposite directions: `convert otel` caps at 15s while
+        `convert weka` does not cap at all (0). Omitting rather than picking one
+        is deliberate: any single default here would silently change one of the
+        two paths. Per #68 the assembler is what must emit an explicit value on
+        every path so no converter default ever applies; until sim2real does
+        (#901), leaving this empty preserves each path's current behaviour.
     - name: traceMinRounds
       type: string
       default: ""
       description: >-
         Minimum usable spans per session to keep it (default 2 when empty).
+        On the otel-parquet path build-otel enforces this. On the weka-jsonl
+        path build-otel is skipped, so it is threaded to `blis convert weka`
+        as --min-rounds instead — the field stays live on both paths rather
+        than silently going inert for weka.
     - name: traceSplit
       type: string
       default: ""
       description: >-
         Deterministic SHA1 split to select: test | train | all (default test).
+        OTEL-PARQUET ONLY. build-otel applies this, and build-otel is skipped for
+        weka-jsonl; `blis convert weka` has no split flag and does no internal
+        equivalent, so on that path the WHOLE corpus is used regardless of this
+        value. sim2real must reject the field for weka-jsonl rather than accept
+        it silently — #901's invariant, enforced in #905. See the header note.
     - name: traceContextGrowth
       type: string
       default: ""
       description: >-
-        context_growth mode passed to `blis convert otel` (default accumulate).
+        Prefix model passed to the converter as --context-growth: "accumulate"
+        (default) or "independent". Applies on BOTH paths — `convert otel` and
+        `convert weka` each take the flag, with the same default — so unlike
+        traceSplit/traceDedupByConversation/traceShuffleSeed this field does not
+        go inert for weka. The convert step passes it explicitly either way.
     - name: traceDedupByConversation
       type: string
       default: "1"
@@ -90,6 +155,8 @@ spec:
         (the 12-hex prefix of session_id before '_'), so the corpus is one
         independent multi-turn session per conversation rather than many
         correlated sub-sessions of the same conversation. "0"/""/"false" = keep all.
+        OTEL-PARQUET ONLY — see traceSplit; no weka equivalent exists, so a weka
+        corpus keeps every session.
     - name: traceShuffleSeed
       type: string
       default: "42"
@@ -97,6 +164,11 @@ spec:
         Seed for the deterministic shuffle of the selected sessions. Breaks the
         conversation-contiguous file order so `blis observe`'s first-N pool spans
         many conversations. Same seed => identical corpus across arms/reruns.
+        OTEL-PARQUET ONLY — see traceSplit. This is the most consequential of the
+        three: unshuffled, a weka corpus stays in its on-disk order, so an
+        observe pool that takes the first N sessions draws a correlated sample
+        rather than one spanning the corpus. That is a measurement-validity
+        problem, not a cosmetic gap.
 
   workspaces:
     - name: data
@@ -112,10 +184,49 @@ spec:
         #!/bin/sh
         set -e
         rm -f /workspace/skip
+        rm -f /workspace/skip_build_otel
         if [ -z "$(params.traceSpec)" ]; then
           echo "prepare-trace: no traceSpec (generative workload) — skipping"
           touch /workspace/skip
           exit 0
+        fi
+        # Validate the format before anything reads the PVC. This is an in-pod
+        # BACKSTOP, not the real gate: #68 puts the authoritative check at
+        # assemble time in sim2real, which can reject the descriptor before a
+        # slot is ever consumed. Checked ahead of the cache probe so a typo
+        # fails loudly rather than silently reusing a corpus built from a
+        # different chain.
+        FORMAT="$(params.traceFormat)"
+        : "${FORMAT:=otel-parquet}"
+        case "${FORMAT}" in
+          otel-parquet|weka-jsonl) ;;
+          *) echo "prepare-trace: unknown traceFormat '${FORMAT}' —" \
+                  "expected otel-parquet or weka-jsonl" >&2
+             exit 1 ;;
+        esac
+        # build-otel is an OTel-only step: for weka-jsonl the downloaded JSONL is
+        # already blis's native Weka shape and goes straight to the converter.
+        # Published as its own marker so build-otel does not need to re-derive
+        # the format. (download-corpus and convert do each interpret traceFormat
+        # themselves — they need the extension and the subcommand respectively.)
+        if [ "${FORMAT}" != "otel-parquet" ]; then
+          touch /workspace/skip_build_otel
+        fi
+        echo "prepare-trace: format=${FORMAT}"
+        # Say out loud which descriptor fields this format ignores. Deliberately
+        # UNCONDITIONAL: the params always arrive non-empty (traceSplit "test",
+        # traceDedupByConversation "1", traceShuffleSeed "42" are sim2real's
+        # defaults), so the step cannot tell a deliberate value from a default and
+        # must not pretend to. Stating the fact claims nothing about intent, and
+        # without it a weka run's log looks completely normal while three hashed
+        # fields did nothing — see the KNOWN GAP note in the task description.
+        if [ "${FORMAT}" = "weka-jsonl" ]; then
+          echo "prepare-trace: NOTE weka-jsonl ignores traceSplit," \
+               "traceDedupByConversation and traceShuffleSeed — build-otel applies" \
+               "those and is skipped on this path, and blis convert weka has no" \
+               "equivalent. The corpus is unsplit, undeduplicated and in on-disk" \
+               "order, so an observe pool taking the first N sessions draws a" \
+               "correlated sample. See #68." >&2
         fi
         if [ -f "/workspace/data/$(params.tracePath).yaml" ] && \
            [ -f "/workspace/data/$(params.tracePath).csv" ]; then
@@ -125,11 +236,16 @@ spec:
         fi
         echo "prepare-trace: building TraceV2 at $(params.tracePath)"
 
-    # ---- step 1: discover + download the corpus parquet files if absent ----
+    # ---- step 1: discover + download the corpus files if absent ----
     # Layout-agnostic (#67): the file list is DISCOVERED from the HF repo rather
     # than synthesized from a shard-count format, so both of HF's standard
     # layouts work — sharded-split (data/train-00000-of-00039.parquet) and
     # split-as-directory (data/train/0000.parquet).
+    #
+    # Which EXTENSION is discovered is format-driven (#68): .parquet for
+    # otel-parquet, .jsonl for weka-jsonl. Everything else about the step —
+    # revision resolution, the <repo>@<sha> corpus key, per-file idempotency —
+    # is format-independent.
     #
     # The corpus directory is keyed by <repo>@<resolved-sha>, which is what makes
     # revision pinning meaningful and what stops two datasets from colliding:
@@ -151,6 +267,7 @@ spec:
         export REPO="$(params.traceSource)"
         export REV="$(params.traceRevision)"
         export SHARDS="$(params.traceShards)"
+        export FORMAT="$(params.traceFormat)"
         python3 - <<'PYEOF'
         import os
         import re
@@ -166,6 +283,20 @@ spec:
         shards_raw = (os.environ.get("SHARDS") or "").strip()
         shards = int(shards_raw) if shards_raw else 0        # 0 / empty => all
 
+        # The discovery filter is format-driven (#68). Before this, the filter was
+        # a hardcoded ".parquet", so a weka-jsonl descriptor died right here with
+        # "no .parquet files found" — ahead of every other step the format
+        # dispatch touches. The guard step has already rejected any value not in
+        # this table, so a KeyError here would mean the two have drifted apart.
+        EXTENSIONS = {"otel-parquet": ".parquet", "weka-jsonl": ".jsonl"}
+        fmt = (os.environ.get("FORMAT") or "").strip() or "otel-parquet"
+        try:
+            ext = EXTENSIONS[fmt]
+        except KeyError:
+            sys.exit("download-corpus: unknown format %r (expected one of %s) — "
+                     "guard step should have caught this"
+                     % (fmt, ", ".join(sorted(EXTENSIONS))))
+
         api = HfApi()
         # Resolve the ref to a commit SHA so a moving ref (e.g. "main") that
         # advances upstream lands in a NEW corpus dir instead of mixing files.
@@ -179,11 +310,11 @@ spec:
         # deterministic.
         files = sorted(
             f for f in api.list_repo_files(repo, repo_type="dataset", revision=sha)
-            if f.endswith(".parquet")
+            if f.endswith(ext)
         )
         if not files:
-            sys.exit("download-corpus: no .parquet files found in %s@%s"
-                     % (repo, sha))
+            sys.exit("download-corpus: no %s files found in %s@%s (format=%s)"
+                     % (ext, repo, sha, fmt))
         discovered = len(files)
         if shards > 0:
             files = files[:shards]
@@ -214,8 +345,8 @@ spec:
         # mechanism as /workspace/skip). build-otel must not rebuild this path.
         with open("/workspace/corpus_dir", "w") as fh:
             fh.write(corpus)
-        print("download-corpus: %d parquet file(s) ready in %s"
-              % (len(files), corpus))
+        print("download-corpus: %d %s file(s) ready in %s"
+              % (len(files), ext, corpus))
         PYEOF
 
     # ---- step 2: parquet -> OTel JSONL (inline port of build_otel_corpus.py) ----
@@ -230,6 +361,12 @@ spec:
         #!/bin/sh
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
+        # OTel-only step (#68). weka-jsonl feeds the downloaded JSONL straight to
+        # `blis convert weka`, so the parquet -> OTel-JSONL hop does not apply.
+        # Exiting before `pip install pyarrow` also keeps the weka path from
+        # paying for a dependency it never uses.
+        [ -f /workspace/skip_build_otel ] && {
+          echo "build-otel: not an otel-parquet corpus — skipping"; exit 0; }
         # Pinned floor: the streaming read projects nested parquet LEAF columns
         # (spans.list.element.<...>), which is what keeps peak memory bounded on
         # a v2-sized shard. Unpinned, a pyarrow that rejects or ignores leaf
@@ -424,7 +561,15 @@ spec:
         PYEOF
         echo "OTel JSONL written to /workspace/data/otel/corpus.jsonl"
 
-    # ---- step 3: OTel JSONL -> TraceV2 (blis convert otel) ----
+    # ---- step 3: corpus -> TraceV2 (blis convert otel | weka) ----
+    # Dispatched on traceFormat (#68). Both subcommands write the same TraceV2
+    # pair, so only the input discovery and the flag set differ:
+    #   otel-parquet -> build-otel's fixed corpus.jsonl, `convert otel`
+    #   weka-jsonl   -> the .jsonl inside the <repo>@<sha> corpus dir, `convert weka`
+    #
+    # The weka input is NOT a fixed path: it lives under the revision-keyed dir
+    # #67 introduced, whose name is only knowable from the /workspace/corpus_dir
+    # marker. So this step now consumes that marker rather than hardcoding a name.
     - name: convert
       image: debian:bookworm-slim
       script: |
@@ -432,17 +577,95 @@ spec:
         set -e
         [ -f /workspace/skip ] && { echo "skip"; exit 0; }
         BLIS="$(workspaces.source.path)/blis/blis"
+        FORMAT="$(params.traceFormat)"
+        : "${FORMAT:=otel-parquet}"
         CG="$(params.traceContextGrowth)"
         : "${CG:=accumulate}"
+        MTT="$(params.traceMaxThinkTime)"
         OUT="/workspace/data/$(params.tracePath)"
-        mkdir -p "$(dirname "${OUT}")"   # blis convert otel does not create the --trace-output parent dir
-        "${BLIS}" convert otel \
-          --input /workspace/data/otel/corpus.jsonl \
-          --context-growth "${CG}" \
-          --trace-output "${OUT}"
+        mkdir -p "$(dirname "${OUT}")"   # blis convert does not create the --trace-output parent dir
+
+        # --max-think-time is passed ONLY when the descriptor set it. The two
+        # converters default it in opposite directions (otel caps at 15s, weka
+        # does not cap), so substituting any value here would silently change one
+        # of the two paths. Empty => omit => each keeps its documented default.
+        if [ -n "${MTT}" ]; then
+          set -- --max-think-time "${MTT}"
+        else
+          set --
+        fi
+
+        case "${FORMAT}" in
+          otel-parquet)
+            # build-otel already applied MIN_ROUNDS while selecting sessions, so
+            # --min-rounds is deliberately NOT passed here — adding it would
+            # filter twice and change today's output.
+            "${BLIS}" convert otel \
+              --input /workspace/data/otel/corpus.jsonl \
+              --context-growth "${CG}" \
+              --trace-output "${OUT}" "$@"
+            ;;
+          weka-jsonl)
+            [ -f /workspace/corpus_dir ] || {
+              echo "ERROR: /workspace/corpus_dir missing — download-corpus did not run" >&2
+              exit 1; }
+            CORPUS="$(cat /workspace/corpus_dir)"
+            [ -n "${CORPUS}" ] || { echo "ERROR: /workspace/corpus_dir is empty" >&2; exit 1; }
+            # A bad marker path or an unmounted PVC gets its own message rather
+            # than being reported as "no .jsonl found", which would blame the
+            # dataset for a wiring fault.
+            [ -d "${CORPUS}" ] || {
+              echo "ERROR: corpus dir ${CORPUS} does not exist or is not a directory" >&2
+              exit 1; }
+            # find's status is captured DIRECTLY, not through a pipe: plain POSIX
+            # sh has no pipefail, so a pipeline yields only its LAST command's
+            # status — `wc` here, `tr` in the original `| wc -l | tr -d ' '` form,
+            # either way never find's. A -d check alone is not enough — find can fail
+            # PARTWAY through (an unreadable subdirectory under the keyed corpus
+            # dir) while still printing what it reached, so a partial listing that
+            # happens to total exactly one file would otherwise sail into the
+            # converter with no indication anything went wrong.
+            FOUND="$(find "${CORPUS}" -name '*.jsonl' -type f)" || {
+              echo "ERROR: find failed while scanning ${CORPUS} for .jsonl files" >&2
+              exit 1; }
+            # Discover the JSONL rather than assume a name; the file sits at
+            # whatever path the dataset uses inside the keyed corpus dir.
+            # grep -c . counts non-empty lines, so an empty FOUND counts 0 rather
+            # than the 1 that `printf | wc -l` would report.
+            COUNT="$(printf '%s\n' "${FOUND}" | grep -c . || true)"
+            if [ "${COUNT}" -eq 0 ]; then
+              echo "ERROR: no .jsonl found under ${CORPUS}" >&2
+              exit 1
+            elif [ "${COUNT}" -gt 1 ]; then
+              # Refuse rather than pick one: `blis convert weka` takes a single
+              # JSONL (its directory mode is *.json, not *.jsonl), so any choice
+              # here would silently convert a subset of the corpus.
+              echo "ERROR: ${COUNT} .jsonl files under ${CORPUS}; expected exactly one" >&2
+              printf '%s\n' "${FOUND}" >&2
+              exit 1
+            fi
+            # COUNT is exactly 1 here, so FOUND is a single line. Reused rather
+            # than re-running find, which would be two more unguarded calls.
+            INPUT="${FOUND}"
+            # build-otel is skipped on this path, so it is not enforcing
+            # min_rounds — thread it to the converter or the descriptor field
+            # goes inert for weka while still being part of the cache key.
+            MR="$(params.traceMinRounds)"
+            : "${MR:=2}"
+            "${BLIS}" convert weka \
+              --input "${INPUT}" \
+              --context-growth "${CG}" \
+              --min-rounds "${MR}" \
+              --trace-output "${OUT}" "$@"
+            ;;
+          *)
+            echo "ERROR: unknown traceFormat '${FORMAT}'" >&2
+            exit 1
+            ;;
+        esac
         if [ ! -f "${OUT}.yaml" ] || [ ! -f "${OUT}.csv" ]; then
           echo "ERROR: expected ${OUT}.yaml and ${OUT}.csv after conversion" >&2
           exit 1
         fi
-        echo "TraceV2 written: ${OUT}.{yaml,csv}"
+        echo "TraceV2 written: ${OUT}.{yaml,csv} (format=${FORMAT})"
         ls -la "${OUT}.yaml" "${OUT}.csv"
