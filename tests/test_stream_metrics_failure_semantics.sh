@@ -145,11 +145,87 @@ touch "${DEFER_DIR}/metrics_stream_done"
 wait "${DEFER_PID}"; defer_rc=$?
 assert_eq "${defer_rc}" "1" "hard-fail exits 1 once the sentinel arrives"
 
-# ── the task must not contain the pre-#73 silent aborts ─────────────────
-# Guards the whole point of the issue: every abort must go through give_up.
-# `grep -c` prints 0 and exits 1 on no match, so `|| echo 0` would print twice.
-BARE=$(grep -c 'echo "WARNING' "${TASK_YAML}" || true)
-assert_eq "${BARE}" "0" "no bare 'WARNING ... exit 0' aborts remain in the task"
+# ── every abort in the scraper step must route through give_up ────────────
+# The pre-#73 code aborted with four inline `exit 0`s. Assert that the scraper
+# step now contains NO `exit 0` outside give_up itself, which is the invariant
+# that keeps failures recorded. Scoped to that step, because provide-kubectl
+# legitimately ends in `exit 0` (see below).
+# Comment lines are stripped first: the script legitimately *describes* the old
+# `exit 0` behaviour in a comment, and matching that would be a false positive.
+SCRAPER="${TMPDIR_TEST}/scraper_region.txt"
+sed -n '/^    - name: stream-metrics$/,$p' "${TASK_YAML}" \
+  | sed '/^        give_up() {/,/^        }/d' \
+  | grep -vE '^\s*#' > "${SCRAPER}"
+STRAY=$(grep -c 'exit 0' "${SCRAPER}" || true)
+assert_eq "${STRAY}" "0" "scraper step has no 'exit 0' outside give_up (comments excluded)"
+
+# ── provide-kubectl must NOT be able to fail the TaskRun ─────────────────
+# give_up and its deferred wait live in the scraper step, so a non-zero exit
+# from the staging step bypasses all of it: Tekton stops scheduling
+# collect-results and nothing is recorded, because RESULTS_DIR/metrics does not
+# exist yet. Staging is therefore best-effort and adjudicated later.
+STAGER="${TMPDIR_TEST}/stager_region.txt"
+sed -n '/^    - name: provide-kubectl$/,/^    - name: stream-metrics$/p' \
+  "${TASK_YAML}" > "${STAGER}"
+if grep -qE '^\s+set -e|^\s+set -eu|^\s+set -ue' "${STAGER}"; then
+  fail_msg "provide-kubectl uses 'set -e' — a staging failure would fail the TaskRun and bypass give_up"
+else
+  echo "PASS: provide-kubectl does not use 'set -e'"
+fi
+if grep -qE '^\s+exit 0\s*$' "${STAGER}"; then
+  echo "PASS: provide-kubectl ends with an explicit exit 0"
+else
+  fail_msg "provide-kubectl has no explicit 'exit 0' — a failing last command would fail the TaskRun"
+fi
+
+# ── phase 6: zero scrapes fails, non-zero scrapes writes the ok marker ───
+# Issue #73 asks for a marker distinguishing "collected" from "gave up". Only
+# the "gave up" half was covered above; this covers "collected", and the gate
+# that decides between them.
+PHASE6="${TMPDIR_TEST}/phase6.sh"
+sed -n '/# Phase 6 — final report + status marker/,$p' "${TASK_YAML}" \
+  | sed 's/^        //' \
+  | sed 's/\$(params\.resultsDir)/TESTRUN/g' > "${PHASE6}"
+
+if ! grep -q 'n_raw=' "${PHASE6}"; then
+  echo "FAIL: could not extract phase 6 from ${TASK_YAML} — did the banner change?"
+  PASS=false
+else
+  run_phase6() {
+    _raw_count="$1"
+    _dir="${TMPDIR_TEST}/p6_$2"
+    mkdir -p "${_dir}/metrics/raw" "${_dir}/metrics/processed"
+    i=0
+    while [ "${i}" -lt "${_raw_count}" ]; do
+      touch "${_dir}/metrics/raw/pod${i}_123_metrics.log"
+      i=$((i + 1))
+    done
+    touch "${_dir}/metrics/processed/metrics_summary.json"
+    cat > "${TMPDIR_TEST}/h6_$2.sh" <<H6
+REQUIRE_METRICS="true"
+RESULTS_DIR="${_dir}"
+STATUS_FILE="${_dir}/metrics/collection_status"
+SENTINEL="${_dir}/metrics_stream_done"
+LOG="${_dir}/metrics/metrics_collection.log"
+touch "\${SENTINEL}"
+. "${FUNCS}"
+. "${PHASE6}"
+H6
+    bash "${TMPDIR_TEST}/h6_$2.sh" > "${_dir}/stdout" 2>&1
+    echo $?
+  }
+
+  rc=$(run_phase6 0 zero)
+  assert_eq "${rc}" "1" "phase 6 fails when 0 raw scrapes were produced"
+  assert_contains "${TMPDIR_TEST}/p6_zero/metrics/collection_status" "^failed scrape" \
+    "phase 6 records 'failed scrape' when nothing was collected"
+
+  rc=$(run_phase6 3 three)
+  assert_eq "${rc}" "0" "phase 6 succeeds when raw scrapes exist"
+  assert_contains "${TMPDIR_TEST}/p6_three/metrics/collection_status" \
+    "^ok raw=3 processed=1$" \
+    "phase 6 records 'ok raw=3 processed=1' on success"
+fi
 
 if grep -q "dl.k8s.io/release/.*kubectl" "${TASK_YAML}"; then
   fail_msg "task still downloads kubectl from dl.k8s.io"

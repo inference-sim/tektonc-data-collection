@@ -41,7 +41,9 @@ spec:
     warning and exiting 0. Either way the outcome is recorded in
     ``metrics/collection_status`` — ``ok raw=<n> processed=<n>`` or
     ``failed <phase>: <detail>`` — so a consumer never has to infer from
-    an exit code whether metrics exist.
+    an exit code whether metrics exist. That holds whenever the PVC is
+    writable; if it is not, the task says so in its log (the only durable
+    channel left) and still fails.
 
     The failure is DEFERRED to the end of the run rather than raised where
     it is detected. This task runs in parallel with the workload, and
@@ -75,8 +77,11 @@ spec:
     3. Network egress from the workload pod to raw.githubusercontent.com
        for the harness-script fetch. Airgapped clusters need a mirror.
        There is no longer any egress to dl.k8s.io — kubectl comes from the
-       image — so raw.githubusercontent.com is the only external host on
-       this path, and it is only ever asked for two small text files.
+       image — and raw.githubusercontent.com is now only ever asked for two
+       small text files rather than a 60 MB binary. It is NOT the only
+       external dependency, though: ``apt-get install curl`` still needs a
+       Debian mirror on every run, so an airgapped cluster needs that
+       mirrored too.
 
   workspaces:
     - name: data
@@ -155,10 +160,25 @@ spec:
           mountPath: /opt/tool-bin
       script: |
         #!/bin/sh
-        set -eu
-        cp /usr/local/bin/kubectl /opt/tool-bin/kubectl
-        chmod 0755 /opt/tool-bin/kubectl
-        echo "staged kubectl from image into /opt/tool-bin/kubectl"
+        # Deliberately NOT `set -e`. This step must never fail the TaskRun:
+        # give_up() and its deferred wait live in the next step's script, so a
+        # non-zero exit here bypasses all of it — Tekton would stop scheduling
+        # collect-results, costing the whole run's data, and nothing would be
+        # recorded on the PVC because RESULTS_DIR/metrics is not created until
+        # the next step. That is worse than the bug this task is fixing.
+        #
+        # So staging is best-effort here and ADJUDICATED in the next step, which
+        # can write a status marker and defer the failure properly. Anything
+        # that goes wrong is reported to the log and left for that check.
+        if cp /usr/local/bin/kubectl /opt/tool-bin/kubectl 2>&1 \
+           && chmod 0755 /opt/tool-bin/kubectl 2>&1; then
+          echo "staged kubectl from image into /opt/tool-bin/kubectl"
+        else
+          echo "WARNING: could not stage kubectl into /opt/tool-bin —" \
+               "the stream-metrics step will record this and fail the task" \
+               "after the run, rather than failing the pod here"
+        fi
+        exit 0
 
     - name: stream-metrics
       image: python:3.12-slim-bookworm
@@ -183,7 +203,23 @@ spec:
         # exist before the first thing that can fail — the old script created
         # it in phase 2, after every install step, which is precisely why a
         # phase-0 failure could leave no trace on the PVC at all.
-        mkdir -p "${RESULTS_DIR}/metrics"
+        #
+        # Checked rather than assumed: if the PVC is unwritable then every
+        # status write below is a no-op, and the task would otherwise claim a
+        # guarantee ("either way collection_status is written") that it cannot
+        # keep — reproducing #73's "nothing recorded that anything went wrong"
+        # for a different root cause. The log is the only durable channel left
+        # in that case, so say so there, loudly, and carry on: phase 6 will
+        # still fail the task through give_up once the run ends. Exiting here
+        # would stop collect-results being scheduled.
+        if ! mkdir -p "${RESULTS_DIR}/metrics" 2>&1 \
+           || ! touch "${RESULTS_DIR}/metrics/.writable" 2>&1; then
+          echo "WARNING: ${RESULTS_DIR}/metrics is not writable — no" \
+               "collection_status can be recorded for this run; this log is the" \
+               "only record. Check the data-pvc mount."
+        else
+          rm -f "${RESULTS_DIR}/metrics/.writable"
+        fi
 
         # ────────────────────────────────────────────────────────────
         # Failure handling (issue #73)
@@ -352,7 +388,7 @@ spec:
 
         if [ "${n_raw}" -eq 0 ]; then
           give_up "scrape" \
-            "scraper ran but produced 0 raw scrapes — see ${LOG} and metrics/collection_debug.log"
+            "scraper ran but produced 0 raw scrapes — see ${LOG} and metrics/raw/collection_debug.log"
         fi
 
         # Processed JSONs are reported but NOT required: `process` aggregating
