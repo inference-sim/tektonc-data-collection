@@ -13,7 +13,11 @@ spec:
 
     collect_metrics.sh + process_metrics.py are pulled from raw
     GitHub at a task-param SHA — no image customization, no
-    workspace mount. The scraper reads its EPP bearer token from
+    workspace mount. kubectl is NOT fetched: it is copied out of
+    alpine/kubectl:1.34.1 by the provide-kubectl step into a
+    pod-scoped emptyDir, because collect_metrics.sh needs kubectl and
+    python3 in the same container and no single image in use here has
+    both (issue #73). The scraper reads its EPP bearer token from
     the ``inference-gateway-sa-metrics-reader-secret`` Secret which
     ``cluster.py provision`` / ``cluster.py slot add`` creates
     per-namespace (annotated to helm-installer,
@@ -31,8 +35,28 @@ spec:
       metrics/processed/pod_startup_times.json
       metrics/processed/metrics_summary.json
 
-    Non-fatal: any install / fetch / discovery failure logs a warning
-    and exits 0 so the pipeline is never blocked by scraper failures.
+    FAILURE CONTRACT (changed by issue #73). Any setup failure, and a
+    scrape that produced zero raw samples, now FAIL the task by default.
+    Set ``requireMetrics: "false"`` for the old behaviour of logging a
+    warning and exiting 0. Either way the outcome is recorded in
+    ``metrics/collection_status`` — ``ok raw=<n> processed=<n>`` or
+    ``failed <phase>: <detail>`` — so a consumer never has to infer from
+    an exit code whether metrics exist.
+
+    The failure is DEFERRED to the end of the run rather than raised where
+    it is detected. This task runs in parallel with the workload, and
+    ``collect-results`` is an ordinary pipeline task rather than a
+    ``finally`` one, so exiting non-zero early stops Tekton scheduling it —
+    the workload's results would never be collected and stream-epp-logs /
+    stream-gpu-stats would poll for sentinels that never arrive. So a
+    failure writes its marker immediately (discoverable straight away),
+    waits out the run, and only then exits non-zero. Failing over lost
+    metrics must not cost the rest of the run's data.
+
+    Previously every failure path exited 0. A run lost its entire metrics
+    set to a timed-out 60 MB kubectl download and Tekton reported
+    Succeeded after 49s; nothing on the PVC recorded that anything had
+    gone wrong.
 
     ASSUMPTIONS:
 
@@ -50,10 +74,21 @@ spec:
 
     3. Network egress from the workload pod to raw.githubusercontent.com
        for the harness-script fetch. Airgapped clusters need a mirror.
+       There is no longer any egress to dl.k8s.io — kubectl comes from the
+       image — so raw.githubusercontent.com is the only external host on
+       this path, and it is only ever asked for two small text files.
 
   workspaces:
     - name: data
       description: "Shared PVC (data-pvc)"
+
+  volumes:
+    # Carries kubectl from the provide-kubectl step into the scraper step.
+    # Pod-scoped and empty at start, which is all this needs: the binary is
+    # re-copied out of the image on every TaskRun, so there is nothing to
+    # invalidate and no state shared between runs.
+    - name: tool-bin
+      emptyDir: {}
 
   params:
     - { name: namespace,       type: string }
@@ -67,12 +102,71 @@ spec:
         gets the tip of the upstream repo; override with a pinned SHA
         for reproducible runs.
       default: "main"
+    - name: requireMetrics
+      type: string
+      default: "true"
+      description: >-
+        Only the exact string "false" makes a failure non-fatal (logging a
+        warning and exiting 0 — the pre-#73 behaviour). Every other value,
+        including the "true" default and any typo, FAILS the task. The
+        comparison is deliberately against "false" rather than "true" so that
+        a mistyped param cannot silently reinstate the silent-loss behaviour.
+
+        Defaults to failing because this task exists to collect metrics, and
+        a measured run without them is not a valid run; it has to be repeated
+        either way. The old soft-fail meant the operator did not find out
+        until they went looking for files that were never written, by which
+        point the pipeline had already spent ~9 minutes on corpus build, a
+        ~160 GiB model pull and a vLLM standup. Set "false" only where
+        metrics are genuinely optional (a smoke run, or a cluster with no
+        egress to raw.githubusercontent.com).
+
+        Either way the task writes ``metrics/collection_status``, so a
+        downstream consumer can tell "collected" from "gave up" without
+        having to infer it from the exit code.
 
   steps:
+    # ────────────────────────────────────────────────────────────────
+    # Step 0 — put kubectl on a volume the scraper step can read
+    # ────────────────────────────────────────────────────────────────
+    # collect_metrics.sh needs BOTH kubectl (pod discovery) and python3
+    # (inline aggregation, interleaved throughout the scrape loop rather than
+    # only at the end), so it cannot be split into a kubectl step and a
+    # python step the way deploy-model and the run-workload-* tasks are. No
+    # image already in use here carries both: alpine/kubectl,
+    # dtzar/helm-kubectl and bitnami/kubectl all lack python3, and
+    # python:*-slim lacks kubectl.
+    #
+    # So the binary is copied out of the image that already has it — the same
+    # alpine/kubectl:1.34.1 that stream-epp-logs and stream-gpu-stats run on
+    # directly, and the same v1.34.1 this task used to fetch. The version is
+    # now pinned by an image tag instead of by a string in a script.
+    #
+    # This replaces a 60 MB curl from dl.k8s.io on every run, which is what
+    # issue #73 was: the transfer hit a hard `-m 30` cap at 45,364,072 of
+    # 60,559,544 bytes (~1.5 MB/s sustained, against the ~2.0 MB/s that cap
+    # requires) and the task then exited 0, so a full run's metrics were lost
+    # while Tekton reported Succeeded. There is now no egress on this path,
+    # so there is no timeout to tune and no retry to get right.
+    - name: provide-kubectl
+      image: alpine/kubectl:1.34.1
+      volumeMounts:
+        - name: tool-bin
+          mountPath: /opt/tool-bin
+      script: |
+        #!/bin/sh
+        set -eu
+        cp /usr/local/bin/kubectl /opt/tool-bin/kubectl
+        chmod 0755 /opt/tool-bin/kubectl
+        echo "staged kubectl from image into /opt/tool-bin/kubectl"
+
     - name: stream-metrics
       image: python:3.12-slim-bookworm
       securityContext:
         runAsUser: 0
+      volumeMounts:
+        - name: tool-bin
+          mountPath: /opt/tool-bin
       script: |
         #!/usr/bin/env bash
         set +e
@@ -82,29 +176,97 @@ spec:
         SENTINEL="${RESULTS_DIR}/metrics_stream_done"
         INTERVAL="$(params.intervalSeconds)"
         HARNESS_SHA="$(params.harnessSha)"
-        KUBECTL_VER="v1.34.1"
+        REQUIRE_METRICS="$(params.requireMetrics)"
+        STATUS_FILE="${RESULTS_DIR}/metrics/collection_status"
+
+        # The status marker lives under metrics/, so that directory has to
+        # exist before the first thing that can fail — the old script created
+        # it in phase 2, after every install step, which is precisely why a
+        # phase-0 failure could leave no trace on the PVC at all.
+        mkdir -p "${RESULTS_DIR}/metrics"
 
         # ────────────────────────────────────────────────────────────
-        # Phase 0 — install runtime deps we need on top of python:slim
+        # Failure handling (issue #73)
         # ────────────────────────────────────────────────────────────
-        # python:3.12-slim-bookworm ships python3 + bash + apt-get. We
-        # need to add curl (for scraping /metrics and fetching the
-        # harness) + kubectl (for pod discovery inside
-        # collect_metrics.sh). Every install step is best-effort — if
-        # egress or apt is unreachable, the task exits 0 rather than
-        # blocking the pipeline.
+        # Every abort goes through `give_up`, which ALWAYS records why on the
+        # PVC and then exits according to requireMetrics. Before #73 each
+        # abort was an inline `exit 0`: Tekton recorded Succeeded, nothing was
+        # written, and the loss surfaced only when someone looked for the
+        # files. The marker is written even in the soft-fail case, so
+        # "collected" and "gave up" are distinguishable without reading logs
+        # or trusting the exit code.
+        # Blocks until collect-results writes the sentinel. With a PID argument
+        # it also returns early if that process dies. Shared by the normal path
+        # and the deferred-failure path so the two cannot drift.
+        wait_for_sentinel() {
+          while [ ! -f "${SENTINEL}" ]; do
+            if [ -n "${1:-}" ] && ! kill -0 "$1" 2>/dev/null; then
+              echo "Scraper process $1 exited before sentinel."
+              return 0
+            fi
+            sleep 1
+          done
+          echo "Sentinel found."
+        }
+
+        give_up() {
+          local phase="$1" detail="$2"
+          echo "failed ${phase}: ${detail}" > "${STATUS_FILE}"
+          echo "ERROR: ${phase} — ${detail}"
+          # Tested against "false", not "true", so the fail-safe direction is
+          # the default. Only the exact string "false" opts out; an empty,
+          # misspelled or unset value ("True", "yes", "0", "") fails the task
+          # rather than silently restoring the pre-#73 behaviour this exists to
+          # remove. A typo in a param should not cost a run's metrics.
+          if [ "${REQUIRE_METRICS}" = "false" ]; then
+            echo "requireMetrics=false — exiting 0; ${STATUS_FILE} records the failure"
+            exit 0
+          fi
+          # Failing, but NOT yet. This task runs in PARALLEL with the workload,
+          # and `collect-results` is an ordinary pipeline task rather than a
+          # `finally` one, so a non-zero exit here stops Tekton scheduling it.
+          # That would mean the workload's results are never collected at all,
+          # and stream-epp-logs / stream-gpu-stats poll for the epp_stream_done
+          # / gpu_stream_done sentinels that collect-results writes until their
+          # TaskRun timeouts expire. Failing over lost metrics must not cost the
+          # whole run's data — that is strictly worse than the bug being fixed.
+          #
+          # So wait the run out exactly as the happy path does, let
+          # collect-results finish, and only then report the failure. The
+          # TaskRun timeout bounds this if the sentinel never arrives.
+          echo "requireMetrics=${REQUIRE_METRICS:-<empty>} (not \"false\") — will fail" \
+               "this task, but only AFTER the run completes, so collect-results" \
+               "still runs and the rest of the run's data survives"
+          wait_for_sentinel
+          echo "Failing now: ${phase} — ${detail}"
+          exit 1
+        }
+
+        # ────────────────────────────────────────────────────────────
+        # Phase 0 — runtime deps on top of python:slim
+        # ────────────────────────────────────────────────────────────
+        # python:3.12-slim-bookworm ships python3 + bash + apt-get. curl is
+        # still needed here for scraping /metrics and fetching the harness
+        # scripts; kubectl now arrives from the provide-kubectl step instead
+        # of being downloaded, so dl.k8s.io is no longer on this path.
         apt-get update -qq >/dev/null 2>&1 \
-          && apt-get install -y --no-install-recommends curl >/dev/null 2>&1 || {
-          echo "WARNING: apt-get install curl failed — cannot run collect_metrics.sh"
-          exit 0
-        }
+          && apt-get install -y --no-install-recommends curl >/dev/null 2>&1 \
+          || give_up "apt-get install curl" "cannot scrape /metrics without curl"
 
-        curl -fsSL -m 30 -o /usr/local/bin/kubectl \
-          "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl" || {
-          echo "WARNING: kubectl ${KUBECTL_VER} download failed"
-          exit 0
-        }
-        chmod +x /usr/local/bin/kubectl
+        # Staged by the provide-kubectl step out of alpine/kubectl:1.34.1.
+        # Verified HERE rather than there, because what matters is that it
+        # runs in THIS container: the official kubectl is a statically linked
+        # Go binary, so an Alpine-sourced copy runs on Debian, but that is a
+        # property of the binary and not a guarantee of the image tag. If a
+        # future tag ever ships a dynamically linked build, this fails loudly
+        # with a recorded status instead of failing later inside
+        # collect_metrics.sh as an empty pod list.
+        export PATH="/opt/tool-bin:${PATH}"
+        [ -x /opt/tool-bin/kubectl ] \
+          || give_up "kubectl staging" "/opt/tool-bin/kubectl missing or not executable"
+        kubectl version --client >/dev/null 2>&1 \
+          || give_up "kubectl exec check" \
+                     "/opt/tool-bin/kubectl is present but will not run in this image"
 
         # ────────────────────────────────────────────────────────────
         # Phase 1 — fetch collect_metrics.sh + process_metrics.py
@@ -112,17 +274,20 @@ spec:
         # curl -f fails on HTTP 4xx/5xx (a wrong SHA won't silently
         # produce an empty file). -m 30 caps the fetch at 30s so a
         # network stall doesn't hang the workload.
+        # These two are small text files, so `-m 30` is generous rather than
+        # marginal — unlike the 60 MB binary it used to sit on. --retry with
+        # --retry-all-errors is added anyway because a transient 5xx or reset
+        # from raw.githubusercontent.com is retryable and costs a second;
+        # --retry alone does not cover curl's exit 28 on older curl.
         HARNESS_URL="https://raw.githubusercontent.com/llm-d/llm-d-benchmark/${HARNESS_SHA}/workload/harnesses"
-        curl -fsSL -m 30 -o /usr/local/bin/collect_metrics.sh \
-          "${HARNESS_URL}/collect_metrics.sh" || {
-          echo "WARNING: curl collect_metrics.sh failed (harnessSha=${HARNESS_SHA})"
-          exit 0
-        }
-        curl -fsSL -m 30 -o /usr/local/bin/process_metrics.py \
-          "${HARNESS_URL}/process_metrics.py" || {
-          echo "WARNING: curl process_metrics.py failed (harnessSha=${HARNESS_SHA})"
-          exit 0
-        }
+        curl -fsSL -m 30 --retry 3 --retry-delay 2 --retry-all-errors \
+          -o /usr/local/bin/collect_metrics.sh \
+          "${HARNESS_URL}/collect_metrics.sh" \
+          || give_up "fetch collect_metrics.sh" "harnessSha=${HARNESS_SHA}"
+        curl -fsSL -m 30 --retry 3 --retry-delay 2 --retry-all-errors \
+          -o /usr/local/bin/process_metrics.py \
+          "${HARNESS_URL}/process_metrics.py" \
+          || give_up "fetch process_metrics.py" "harnessSha=${HARNESS_SHA}"
         chmod +x /usr/local/bin/collect_metrics.sh
 
         # ────────────────────────────────────────────────────────────
@@ -135,7 +300,8 @@ spec:
         # can override if the Secret name changes.
         export LLMDBENCH_EPP_METRICS_SECRET="inference-gateway-sa-metrics-reader-secret"
 
-        mkdir -p "${RESULTS_DIR}/metrics"
+        # metrics/ was already created at the top of the script so the status
+        # marker had somewhere to land.
         rm -f "${SENTINEL}"
         LOG="${RESULTS_DIR}/metrics/metrics_collection.log"
 
@@ -150,22 +316,13 @@ spec:
         # ────────────────────────────────────────────────────────────
         # Phase 4 — sentinel poll
         # ────────────────────────────────────────────────────────────
-        # Exits on either:
+        # Returns on either:
         #   (a) sentinel file appears (collect-results wrote it — the
         #       normal completion path)
-        #   (b) the scraper process died on its own (fault; still exit
-        #       cleanly so the workload completes)
-        while true; do
-          if [ -f "${SENTINEL}" ]; then
-            echo "Sentinel found, stopping scraper."
-            break
-          fi
-          if ! kill -0 "${SCRAPER_PID}" 2>/dev/null; then
-            echo "Scraper process ${SCRAPER_PID} exited before sentinel."
-            break
-          fi
-          sleep 1
-        done
+        #   (b) the scraper process died on its own (fault; still fall
+        #       through so the workload completes, and phase 6 then decides
+        #       whether anything was actually collected)
+        wait_for_sentinel "${SCRAPER_PID}"
 
         # ────────────────────────────────────────────────────────────
         # Phase 5 — stop + process
@@ -180,8 +337,25 @@ spec:
         bash /usr/local/bin/collect_metrics.sh process >> "${LOG}" 2>&1
 
         # ────────────────────────────────────────────────────────────
-        # Phase 6 — final report
+        # Phase 6 — final report + status marker
         # ────────────────────────────────────────────────────────────
+        # "Ran to completion" is not the same as "collected something", and
+        # #73 is a case of the two being conflated. Zero raw scrapes means the
+        # scraper started and then discovered nothing for the whole workload —
+        # bad RBAC, a pod-label mismatch, an empty namespace — which produces
+        # exactly the same empty results directory as a failed install, and
+        # previously reported Succeeded just as cheerfully. Treat it as a
+        # failure so the run is not mistaken for a measured one.
         n_raw=$(find "${RESULTS_DIR}/metrics/raw" -name '*_metrics.log' 2>/dev/null | wc -l | tr -d ' ')
         n_proc=$(find "${RESULTS_DIR}/metrics/processed" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
         echo "Metrics scraping complete for $(params.resultsDir): ${n_raw} raw scrape(s), ${n_proc} processed JSON(s)"
+
+        if [ "${n_raw}" -eq 0 ]; then
+          give_up "scrape" \
+            "scraper ran but produced 0 raw scrapes — see ${LOG} and metrics/collection_debug.log"
+        fi
+
+        # Processed JSONs are reported but NOT required: `process` aggregating
+        # nothing useful out of real scrapes is a downstream-analysis problem,
+        # whereas having no scrapes at all means there is no measurement.
+        echo "ok raw=${n_raw} processed=${n_proc}" > "${STATUS_FILE}"
