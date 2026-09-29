@@ -18,14 +18,23 @@ HERE="$(dirname "$0")"
 TASK="${HERE}/../tekton/tasks/prepare-trace.yaml"
 EXTRACT="${HERE}/lib/extract_step.py"
 
+# Resolve an interpreter that has PyYAML, preferring a repo venv over the bare
+# python3. The dependency normally lives in a venv, and without this the file
+# takes the SKIP path below and exits 0 without asserting anything — which reads
+# as a pass when the suite is run in a loop.
+PYTHON=python3
+for cand in "${HERE}/../../.venv/bin/python" "${HERE}/../.venv/bin/python"; do
+  [ -x "${cand}" ] && PYTHON="${cand}" && break
+done
+
 [ -f "${TASK}" ] || { echo "FAIL: cannot find ${TASK}"; exit 1; }
 
-python3 -c 'import yaml' 2>/dev/null || {
+"${PYTHON}" -c 'import yaml' 2>/dev/null || {
   echo "SKIP: PyYAML not available (pip install -r tektonc/requirements.txt)"
   exit 0
 }
 
-STEP="$(python3 "${EXTRACT}" "${TASK}" download-corpus)" || {
+STEP="$("${PYTHON}" "${EXTRACT}" "${TASK}" download-corpus)" || {
   echo "FAIL: could not extract the download-corpus step"; exit 1; }
 
 # ────────────────────────────────────────────────────────────
@@ -43,7 +52,7 @@ echo "${STEP}" | grep -q '/resolve/main/' \
   || pass "hardcoded /resolve/main/ URL is gone"
 
 # The step now needs python+pip; curlimages/curl has neither and runs non-root.
-IMAGE="$(python3 - "${TASK}" <<'PY'
+IMAGE="$("${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 for s in task["spec"]["steps"]:
@@ -72,7 +81,7 @@ echo "${STEP}" | grep -q '/workspace/corpus_dir' \
   || fail "download-corpus does not write /workspace/corpus_dir"
 
 # Param declared, defaulting to "" (= repo default branch).
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 p = {x["name"]: x for x in task["spec"]["params"]}
@@ -85,7 +94,7 @@ fi
 
 # traceShards MUST survive: sim2real's pipeline.yaml passes it, and Tekton
 # rejects a Pipeline passing a param the Task does not declare.
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 sys.exit(0 if any(p["name"] == "traceShards" for p in task["spec"]["params"]) else 1)
@@ -106,7 +115,7 @@ trap 'rm -rf "${TMP}"' EXIT
 # if it silently produced an empty program, every behavioral assertion below
 # would "pass" against a no-op (0 downloads, empty corpus dir compared to
 # empty corpus dir), masking exactly the regression this file exists to catch.
-if ! python3 - "${TASK}" > "${TMP}/download.py" <<'PY'
+if ! "${PYTHON}" - "${TASK}" > "${TMP}/download.py" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in task["spec"]["steps"] if s["name"] == "download-corpus")
@@ -186,7 +195,7 @@ run_dl() {
   DL_LOG="${TMP}/dl.log" \
   PYTHONPATH="${TMP}/fake" \
   REPO="$1" REV="$2" SHARDS="$3" \
-  python3 "${TMP}/download.py" > "${TMP}/out.txt" 2>&1
+  "${PYTHON}" "${TMP}/download.py" > "${TMP}/out.txt" 2>&1
   rc=$?
   # QUIET=1 for cases that EXPECT a non-zero exit, so a passing test
   # does not print a scary "step output" dump.

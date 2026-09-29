@@ -19,13 +19,22 @@ HERE="$(dirname "$0")"
 TASK="${HERE}/../tekton/tasks/prepare-trace.yaml"
 EXTRACT="${HERE}/lib/extract_step.py"
 
+# Resolve an interpreter that has PyYAML, preferring a repo venv over the bare
+# python3. The dependency normally lives in a venv, and without this the file
+# takes the SKIP path below and exits 0 without asserting anything — which reads
+# as a pass when the suite is run in a loop.
+PYTHON=python3
+for cand in "${HERE}/../../.venv/bin/python" "${HERE}/../.venv/bin/python"; do
+  [ -x "${cand}" ] && PYTHON="${cand}" && break
+done
+
 [ -f "${TASK}" ] || { echo "FAIL: cannot find ${TASK}"; exit 1; }
-python3 -c 'import yaml' 2>/dev/null || {
+"${PYTHON}" -c 'import yaml' 2>/dev/null || {
   echo "SKIP: PyYAML not available (pip install -r tektonc/requirements.txt)"
   exit 0
 }
 
-STEP="$(python3 "${EXTRACT}" "${TASK}" build-otel)" || {
+STEP="$("${PYTHON}" "${EXTRACT}" "${TASK}" build-otel)" || {
   echo "FAIL: could not extract the build-otel step"; exit 1; }
 
 # Comment-stripped view of the step. The "is it gone?" assertions below must
@@ -84,7 +93,7 @@ echo "${STEP}" | grep -q 'ru_maxrss' \
 # ────────────────────────────────────────────────────────────
 # Part 2 — behavioral, both layouts
 # ────────────────────────────────────────────────────────────
-python3 -c 'import pyarrow' 2>/dev/null || {
+"${PYTHON}" -c 'import pyarrow' 2>/dev/null || {
   echo "SKIP: pyarrow not available — skipping the behavioral half"
   echo
   if ${PASS}; then echo "ALL PASS (structural only)"; exit 0; else echo "FAILURES"; exit 1; fi
@@ -93,7 +102,7 @@ python3 -c 'import pyarrow' 2>/dev/null || {
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-if ! python3 - "${TASK}" > "${TMP}/build.py" <<'PY'
+if ! "${PYTHON}" - "${TASK}" > "${TMP}/build.py" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in task["spec"]["steps"] if s["name"] == "build-otel")
@@ -120,7 +129,7 @@ sed -i.bak "s#/workspace#${TMP}/workspace#g" "${TMP}/build.py"
 # Schema mirrors the real datasets: spans is a list<struct> whose attributes
 # struct carries the gen_ai.* fields build-otel reads.
 build_corpus() {  # $1 = layout: flat|nested
-  python3 - "$1" "${TMP}" <<'PY'
+  "${PYTHON}" - "$1" "${TMP}" <<'PY'
 import os, sys
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -205,7 +214,7 @@ run_build() {  # $1 = layout
   CORPUS="$(build_corpus "$1")" || return 1
   printf '%s' "${CORPUS}" > "${TMP}/workspace/corpus_dir"
   MIN_ROUNDS=2 SPLIT=all DEDUP_BY_CONVERSATION=1 SHUFFLE_SEED=42 \
-    python3 "${TMP}/build.py" > "${TMP}/out_$1.txt" 2>&1
+    "${PYTHON}" "${TMP}/build.py" > "${TMP}/out_$1.txt" 2>&1
   rc=$?
   [ ${rc} -eq 0 ] || { echo "--- build-otel output ($1) ---"; cat "${TMP}/out_$1.txt"; }
   return ${rc}
@@ -241,7 +250,7 @@ if [ -f "${TMP}/out_nested.txt" ]; then
   if [ -z "${RSS_MB}" ]; then
     fail "build-otel did not log peak RSS"
   else
-    python3 -c "import sys; v=float('${RSS_MB}'); sys.exit(0 if 0 < v < 2048 else 1)" \
+    "${PYTHON}" -c "import sys; v=float('${RSS_MB}'); sys.exit(0 if 0 < v < 2048 else 1)" \
       && pass "build-otel logs a plausible peak RSS (${RSS_MB} MB)" \
       || fail "peak_rss_mb=${RSS_MB} is not a plausible MB value — check the ru_maxrss unit normalization"
   fi

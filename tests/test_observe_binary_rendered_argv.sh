@@ -29,14 +29,23 @@ EXTRACT="${HERE}/lib/extract_step.py"
 
 [ -f "${TASK}" ] || { echo "FAIL: cannot find ${TASK}"; exit 1; }
 
-python3 -c 'import yaml' 2>/dev/null || {
-  echo "SKIP: PyYAML not available (pip install -r tektonc/requirements.txt)"
+# Resolve an interpreter that has PyYAML, preferring a repo venv over the bare
+# python3. The dependency normally lives in a venv, and without this the file
+# takes the SKIP path below and exits 0 without asserting anything — which reads
+# as a pass when the suite is run in a loop.
+PYTHON=python3
+for cand in "${HERE}/../../.venv/bin/python" "${HERE}/../.venv/bin/python"; do
+  [ -x "${cand}" ] && PYTHON="${cand}" && break
+done
+
+"${PYTHON}" -c 'import yaml' 2>/dev/null || {
+  echo "SKIP: PyYAML not available for ${PYTHON} (pip install -r tektonc/requirements.txt)"
   exit 0
 }
 
-WWS="$(python3 "${EXTRACT}" "${TASK}" write-workload-spec)" \
+WWS="$("${PYTHON}" "${EXTRACT}" "${TASK}" write-workload-spec)" \
   || { echo "FAIL: no write-workload-spec step"; exit 1; }
-RUN="$(python3 "${EXTRACT}" "${TASK}" run-observe)" \
+RUN="$("${PYTHON}" "${EXTRACT}" "${TASK}" run-observe)" \
   || { echo "FAIL: no run-observe step"; exit 1; }
 
 # ────────────────────────────────────────────────────────────
@@ -45,7 +54,7 @@ RUN="$(python3 "${EXTRACT}" "${TASK}" run-observe)" \
 
 # The param set is the deliverable: 12 -> 4. Asserted as an exact set, so a
 # re-added scalar fails here rather than quietly growing the surface back.
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 got = {p["name"] for p in yaml.safe_load(open(sys.argv[1]))["spec"]["params"]}
 want = {"endpoint", "observeArgs", "workloadSpec", "resultsDir"}
@@ -61,7 +70,7 @@ fi
 # observeArgs MUST be required. A "" default would let a not-yet-updated
 # Pipeline reach blis with no workload source instead of failing at PipelineRun
 # creation with a Tekton param error.
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 p = {x["name"]: x for x in yaml.safe_load(open(sys.argv[1]))["spec"]["params"]}
 a = p.get("observeArgs")

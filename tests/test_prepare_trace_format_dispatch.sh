@@ -22,17 +22,26 @@ HERE="$(dirname "$0")"
 TASK="${HERE}/../tekton/tasks/prepare-trace.yaml"
 EXTRACT="${HERE}/lib/extract_step.py"
 
+# Resolve an interpreter that has PyYAML, preferring a repo venv over the bare
+# python3. The dependency normally lives in a venv, and without this the file
+# takes the SKIP path below and exits 0 without asserting anything — which reads
+# as a pass when the suite is run in a loop.
+PYTHON=python3
+for cand in "${HERE}/../../.venv/bin/python" "${HERE}/../.venv/bin/python"; do
+  [ -x "${cand}" ] && PYTHON="${cand}" && break
+done
+
 [ -f "${TASK}" ] || { echo "FAIL: cannot find ${TASK}"; exit 1; }
 
-python3 -c 'import yaml' 2>/dev/null || {
+"${PYTHON}" -c 'import yaml' 2>/dev/null || {
   echo "SKIP: PyYAML not available (pip install -r tektonc/requirements.txt)"
   exit 0
 }
 
-GUARD="$(python3 "${EXTRACT}" "${TASK}" guard)"       || { echo "FAIL: no guard step"; exit 1; }
-DL="$(python3 "${EXTRACT}" "${TASK}" download-corpus)" || { echo "FAIL: no download-corpus"; exit 1; }
-BO="$(python3 "${EXTRACT}" "${TASK}" build-otel)"     || { echo "FAIL: no build-otel"; exit 1; }
-CONV="$(python3 "${EXTRACT}" "${TASK}" convert)"      || { echo "FAIL: no convert step"; exit 1; }
+GUARD="$("${PYTHON}" "${EXTRACT}" "${TASK}" guard)"       || { echo "FAIL: no guard step"; exit 1; }
+DL="$("${PYTHON}" "${EXTRACT}" "${TASK}" download-corpus)" || { echo "FAIL: no download-corpus"; exit 1; }
+BO="$("${PYTHON}" "${EXTRACT}" "${TASK}" build-otel)"     || { echo "FAIL: no build-otel"; exit 1; }
+CONV="$("${PYTHON}" "${EXTRACT}" "${TASK}" convert)"      || { echo "FAIL: no convert step"; exit 1; }
 
 # ────────────────────────────────────────────────────────────
 # Part 1 — structural
@@ -40,7 +49,7 @@ CONV="$(python3 "${EXTRACT}" "${TASK}" convert)"      || { echo "FAIL: no conver
 
 # traceFormat MUST default to otel-parquet: a descriptor written before this
 # param existed has to keep behaving exactly as it did.
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 p = {x["name"]: x for x in yaml.safe_load(open(sys.argv[1]))["spec"]["params"]}
 f = p.get("traceFormat")
@@ -53,7 +62,7 @@ fi
 # traceMaxThinkTime MUST default to "" (= omit the flag). Any concrete default
 # would change one of the two paths, because the converters disagree: otel caps
 # at 15s, weka does not cap at all.
-if python3 - "${TASK}" <<'PY'
+if "${PYTHON}" - "${TASK}" <<'PY'
 import sys, yaml
 p = {x["name"]: x for x in yaml.safe_load(open(sys.argv[1]))["spec"]["params"]}
 m = p.get("traceMaxThinkTime")
@@ -207,7 +216,7 @@ rm -f "${TMP}/workspace/skip"
 # ────────────────────────────────────────────────────────────
 # Part 2b — behavioral: format-driven discovery in download-corpus
 # ────────────────────────────────────────────────────────────
-if ! python3 - "${TASK}" > "${TMP}/download.py" <<'PY'
+if ! "${PYTHON}" - "${TASK}" > "${TMP}/download.py" <<'PY'
 import sys, yaml
 task = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in task["spec"]["steps"] if s["name"] == "download-corpus")
@@ -270,7 +279,7 @@ run_dl() {
   : > "${TMP}/dl.log"
   DL_LOG="${TMP}/dl.log" PYTHONPATH="${TMP}/fake" \
   REPO="$1" REV="" SHARDS="" FORMAT="$2" \
-  python3 "${TMP}/download.py" > "${TMP}/dl.out" 2>&1
+  "${PYTHON}" "${TMP}/download.py" > "${TMP}/dl.out" 2>&1
 }
 
 if run_dl "hf:semianalysisai/cc-traces-weka-062126" "weka-jsonl"; then

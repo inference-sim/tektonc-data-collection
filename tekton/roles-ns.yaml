@@ -107,6 +107,14 @@ rules:
 - apiGroups: ["tekton.dev"]
   resources: ["pipelineruns"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Multi-node standup. A scenario with `multinode.enabled: true` makes the
+# modelservice chart emit LeaderWorkerSet objects instead of Deployments, and helm
+# fails on the install with "could not get information about the resource
+# LeaderWorkerSet ... is forbidden" before creating anything. get/list/watch are
+# needed for that pre-install read, the mutating verbs for the release itself.
+- apiGroups: ["leaderworkerset.x-k8s.io"]
+  resources: ["leaderworkersets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
