@@ -72,6 +72,15 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# statefulsets — read-only. collect_metrics.sh discovers model replicas with
+# `kubectl get deployments,statefulsets`, which is refused as a whole if either
+# resource is denied. Multi-node scenarios put model pods under StatefulSets
+# (owned by a LeaderWorkerSet), so without this the scrape loop silently
+# computes replica_status.json from an empty item list. Nothing here installs a
+# StatefulSet, hence no mutating verbs.
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["get", "list", "watch"]
 # Namespaced rbac for scenario extraObjects (e.g. Role + RoleBinding for
 # the gaie-epp ServiceAccount). ClusterRole/ClusterRoleBinding live in
 # the cluster augment.
